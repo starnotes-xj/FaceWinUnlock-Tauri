@@ -143,6 +143,7 @@ Files in `Server/src/`:
 | [#121](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/121) | 一致性验证极其卡顿（1-2 FPS） | `verify_face` 添加 `VERIFY_CACHE` 缓存参考图特征（首帧提取，后续帧复用），避免每帧重复 JPEG 解码+DNN检测+128维特征提取；前端帧间延迟从 100ms 降至 33ms |
 | [#92](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/92) | 深色模式 | 新增加 `useTheme` composable（localStorage 持久化 + 系统偏好跟随），导入 `element-plus/theme-chalk/dark/css-vars.css`，侧边栏添加 Sun/Moon 切换按钮，所有硬编码色值改为 CSS 变量 |
 | [#91](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/91) | 解锁磁贴优化 | 自有磁贴 `CPFT_LARGE_TEXT` 改为 `CPFT_SMALL_TEXT`（更小巧/状态指示器风格），标签文字精简为"面容解锁"；在用户账户磁贴上添加标记无法实现（Windows 凭据提供程序架构限制：一个 Provider 不能修改另一个的磁贴） |
+| [#94](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/94) | NVIDIA Broadcast 虚拟摄像头无法工作 | `try_open_camera_with_backend` 和 Unlock EXE 摄像头打开处设置默认 640×480 帧尺寸 + 10 帧预热，解决虚拟摄像头输出异常分辨率/格式导致的花屏或黑帧问题 |
 
 ### Registry Keys
 

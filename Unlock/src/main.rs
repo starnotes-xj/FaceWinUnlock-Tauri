@@ -25,7 +25,7 @@ use std::{
 };
 
 use opencv::{
-    core::{Mat, Ptr, Scalar, Size},
+    core::{Mat, Ptr, Size},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     prelude::*,
     videoio::VideoCapture,
@@ -35,14 +35,12 @@ use serde::Deserialize;
 use windows::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
     Storage::FileSystem::{
-        CreateFileW, WriteFile, ReadFile,
-        FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-        FILE_SHARE_NONE, OPEN_EXISTING,
+        WriteFile, ReadFile, PIPE_ACCESS_DUPLEX,
     },
     System::{
         Pipes::{
             ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe,
-            PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+            PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
         },
         Shutdown::LockWorkStation,
@@ -96,6 +94,14 @@ struct FaceRecord {
 #[derive(Deserialize)]
 struct JsonData {
     threshold: Option<i64>,
+}
+
+// HANDLE wraps *mut c_void which is not Send; safe because it's just a numeric handle
+struct SendHandle(HANDLE);
+unsafe impl Send for SendHandle {}
+impl SendHandle {
+    // 使用方法避免 Rust 2021 partial capture 直接捕获 .0 字段
+    fn take(self) -> HANDLE { self.0 }
 }
 
 // ─── Named pipe helpers ───────────────────────────────────────────────────────
@@ -201,7 +207,8 @@ fn run_unlock_server(state: Arc<State>) {
         if wait_for_client(pipe).is_err() { close_handle(pipe); continue; }
 
         let state2 = state.clone();
-        thread::spawn(move || handle_unlock_client(pipe, state2));
+        let sendable = SendHandle(pipe);
+        thread::spawn(move || handle_unlock_client(sendable.take(), state2));
     }
 }
 
@@ -460,8 +467,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             for idx in 0..4i32 {
                 if let Ok(mut c) = VideoCapture::new(idx, opencv::videoio::CAP_ANY) {
                     if c.is_opened().unwrap_or(false) {
+                        // 设置默认帧尺寸 + 多帧预热（虚拟摄像头兼容 #94）
+                        let _ = c.set(opencv::videoio::CAP_PROP_FRAME_WIDTH, 640.0);
+                        let _ = c.set(opencv::videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
                         let mut dummy = Mat::default();
-                        let _ = c.read(&mut dummy); // 预热
+                        for _ in 0..10 { let _ = c.read(&mut dummy); }
                         cam = Some(c);
                         break;
                     }
@@ -617,8 +627,10 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         for idx in 0..4i32 {
             if let Ok(mut c) = VideoCapture::new(idx, opencv::videoio::CAP_ANY) {
                 if c.is_opened().unwrap_or(false) {
+                    let _ = c.set(opencv::videoio::CAP_PROP_FRAME_WIDTH, 640.0);
+                    let _ = c.set(opencv::videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
                     let mut dummy = Mat::default();
-                    let _ = c.read(&mut dummy);
+                    for _ in 0..10 { let _ = c.read(&mut dummy); }
                     cam = Some(c);
                     break;
                 }

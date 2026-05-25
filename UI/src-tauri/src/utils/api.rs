@@ -648,8 +648,17 @@ fn try_open_camera_with_backend(
         return Err(format!("后端 {:?} 打开摄像头后状态为未激活", backend).into());
     }
 
-    // 激活摄像头
+    // 设置默认帧尺寸（虚拟摄像头如 NVIDIA Broadcast 可能输出异常分辨率 #94）
+    let _ = cam.set(opencv::videoio::CAP_PROP_FRAME_WIDTH, 640.0);
+    let _ = cam.set(opencv::videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
+
+    // 预热：丢弃前几帧，让虚拟摄像头初始化完成（#94）
     let mut frame = Mat::default();
+    for _ in 0..10 {
+        let _ = cam.read(&mut frame);
+    }
+
+    // 验证最终帧是否有效
     let read_result = cam.read(&mut frame);
 
     match read_result {
