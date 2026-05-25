@@ -144,6 +144,7 @@ Files in `Server/src/`:
 | [#92](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/92) | 深色模式 | 新增加 `useTheme` composable（localStorage 持久化 + 系统偏好跟随），导入 `element-plus/theme-chalk/dark/css-vars.css`，侧边栏添加 Sun/Moon 切换按钮，所有硬编码色值改为 CSS 变量 |
 | [#91](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/91) | 解锁磁贴优化 | 自有磁贴 `CPFT_LARGE_TEXT` 改为 `CPFT_SMALL_TEXT`（更小巧/状态指示器风格），标签文字精简为"面容解锁"；在用户账户磁贴上添加标记无法实现（Windows 凭据提供程序架构限制：一个 Provider 不能修改另一个的磁贴） |
 | [#94](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/94) | NVIDIA Broadcast 虚拟摄像头无法工作 | `try_open_camera_with_backend` 和 Unlock EXE 摄像头打开处设置默认 640×480 帧尺寸 + 10 帧预热，解决虚拟摄像头输出异常分辨率/格式导致的花屏或黑帧问题 |
+| [#103](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/103) | 面容被禁用后进行"虚空"登录 | Unlock EXE `load_face_records` 过滤 `view=false`（禁用）和 `lock=true`（锁定）的面容；DLL Creds 线程拒绝空用户名凭据 |
 
 ### Registry Keys
 

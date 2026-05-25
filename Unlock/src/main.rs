@@ -94,6 +94,8 @@ struct FaceRecord {
 #[derive(Deserialize)]
 struct JsonData {
     threshold: Option<i64>,
+    view: Option<bool>,
+    lock: Option<bool>,
 }
 
 // HANDLE wraps *mut c_void which is not Send; safe because it's just a numeric handle
@@ -268,10 +270,14 @@ fn load_face_records(db_path: &Path) -> Vec<FaceRecord> {
     .ok()
     .map(|rows| {
         rows.filter_map(|r| r.ok())
-            .map(|(u, p, t, j)| {
-                let thr = serde_json::from_str::<JsonData>(&j)
-                    .ok().and_then(|d| d.threshold).unwrap_or(60);
-                FaceRecord { user_name: u, user_pwd: p, face_token: t, threshold: thr }
+            .filter_map(|(u, p, t, j)| {
+                let json = serde_json::from_str::<JsonData>(&j).ok()?;
+                // 过滤已禁用（view=false）或已锁定（lock=true）的面容 (#103)
+                if !json.view.unwrap_or(true) || json.lock.unwrap_or(false) {
+                    return None;
+                }
+                let thr = json.threshold.unwrap_or(60);
+                Some(FaceRecord { user_name: u, user_pwd: p, face_token: t, threshold: thr })
             })
             .collect()
     })

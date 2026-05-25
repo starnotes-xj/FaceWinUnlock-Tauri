@@ -204,20 +204,25 @@ impl CPipeListener {
 
                             match parse_credentials(&data) {
                                 Some((user, pwd, domain)) => {
-                                    {
-                                        let mut creds = shared_creds.lock().unwrap();
-                                        info!("凭据线程：收到凭据，用户: {}", user);
-                                        creds.username = user;
-                                        creds.password = pwd;
-                                        creds.domain   = domain;
-                                        creds.is_ready = true;
-                                        creds.is_unlocked = true;
-                                    }
-                                    is_unlocked.store(true, Ordering::SeqCst);
-                                    if let Err(e) = send_events.notify_changed() {
-                                        error!("CredentialsChanged 失败: {:?}", e);
+                                    // 拒绝空用户名的凭据，防止"虚空登录" (#103)
+                                    if user.is_empty() {
+                                        warn!("凭据线程：收到空用户名凭据，已拒绝");
                                     } else {
-                                        info!("已通知 Windows 凭据已就绪");
+                                        {
+                                            let mut creds = shared_creds.lock().unwrap();
+                                            info!("凭据线程：收到凭据，用户: {}", user);
+                                            creds.username = user;
+                                            creds.password = pwd;
+                                            creds.domain   = domain;
+                                            creds.is_ready = true;
+                                            creds.is_unlocked = true;
+                                        }
+                                        is_unlocked.store(true, Ordering::SeqCst);
+                                        if let Err(e) = send_events.notify_changed() {
+                                            error!("CredentialsChanged 失败: {:?}", e);
+                                        } else {
+                                            info!("已通知 Windows 凭据已就绪");
+                                        }
                                     }
                                 }
                                 None => warn!("凭据线程：收到无法解析的凭据数据"),
