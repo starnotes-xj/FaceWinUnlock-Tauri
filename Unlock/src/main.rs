@@ -1,7 +1,606 @@
+/*!
+ * FaceWinUnlock-Server — 人脸解锁后台服务
+ *
+ * 管道拓扑:
+ *   MansonWindowsUnlockRustServer  — 本进程作 Server，DLL 作 Client
+ *       DLL 发送 "prepare" (初始化) / "run" (开始识别)
+ *
+ *   MansonWindowsUnlockRustUnlock  — 本进程作 Server，DLL 和 UI 均作 Client
+ *       DLL 连接后静默等待，本进程写入凭据到此连接完成解锁
+ *       UI 发送 "hello server"（心跳检测）或 "exit"（关闭服务）
+ */
 
-fn main() -> windows::core::Result<()> {
-    // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
-    // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
+#![windows_subsystem = "windows"]
 
-    Ok(())
+use std::{
+    ffi::OsStr,
+    os::windows::ffi::OsStrExt,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, AtomicI64, AtomicIsize, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use opencv::{
+    core::{Mat, Ptr, Scalar, Size},
+    objdetect::{FaceDetectorYN, FaceRecognizerSF},
+    prelude::*,
+    videoio::VideoCapture,
+};
+use rusqlite::Connection;
+use serde::Deserialize;
+use windows::Win32::{
+    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
+    Storage::FileSystem::{
+        CreateFileW, WriteFile, ReadFile,
+        FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        FILE_SHARE_NONE, OPEN_EXISTING,
+    },
+    System::{
+        Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe,
+            PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+        },
+        Shutdown::LockWorkStation,
+    },
+    UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
+};
+use windows_core::PCWSTR;
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const PIPE_SERVER_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustServer";
+const PIPE_UNLOCK_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustUnlock";
+const BUF_SIZE: u32 = 4096;
+
+// ─── Shared state ─────────────────────────────────────────────────────────────
+
+struct State {
+    should_exit:      AtomicBool,
+    run_requested:    AtomicBool,
+    /// DLL 在 MansonWindowsUnlockRustUnlock 上等待凭据的连接句柄（raw isize）
+    dll_creds_pipe:   AtomicIsize,
+    /// 人脸匹配到的 (username, password)
+    matched_creds:    Mutex<Option<(String, String)>>,
+    /// 上一次用户活跃的时间戳（Unix 秒），用于自动锁屏
+    last_user_active: AtomicI64,
+}
+
+impl State {
+    fn new() -> Arc<Self> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        Arc::new(Self {
+            should_exit:     AtomicBool::new(false),
+            run_requested:   AtomicBool::new(false),
+            dll_creds_pipe:  AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize),
+            matched_creds:   Mutex::new(None),
+            last_user_active: AtomicI64::new(now),
+        })
+    }
+}
+
+// ─── Face record ──────────────────────────────────────────────────────────────
+
+#[derive(Debug)]
+struct FaceRecord {
+    user_name:  String,
+    user_pwd:   String,
+    face_token: String,
+    threshold:  i64,   // 0~100，对应余弦相似度
+}
+
+#[derive(Deserialize)]
+struct JsonData {
+    threshold: Option<i64>,
+}
+
+// ─── Named pipe helpers ───────────────────────────────────────────────────────
+
+fn to_wide(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(Some(0)).collect()
+}
+
+fn create_named_pipe(name: &str) -> windows::core::Result<HANDLE> {
+    let wide = to_wide(name);
+    let h = unsafe {
+        CreateNamedPipeW(
+            PCWSTR::from_raw(wide.as_ptr()),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            BUF_SIZE, BUF_SIZE, 0, None,
+        )
+    };
+    if h.is_invalid() { Err(windows::core::Error::from_win32()) } else { Ok(h) }
+}
+
+fn wait_for_client(pipe: HANDLE) -> windows::core::Result<()> {
+    match unsafe { ConnectNamedPipe(pipe, None) } {
+        // ERROR_PIPE_CONNECTED: 客户端已连接，视为成功
+        Err(e) if e.code() == windows_core::HRESULT(0x80070217u32 as i32) => Ok(()),
+        r => r,
+    }
+}
+
+fn pipe_write(pipe: HANDLE, data: &[u8]) -> windows::core::Result<()> {
+    let mut w = 0u32;
+    unsafe { WriteFile(pipe, Some(data), Some(&mut w), None) }
+}
+
+fn pipe_read(pipe: HANDLE) -> windows::core::Result<Vec<u8>> {
+    let mut buf = vec![0u8; BUF_SIZE as usize];
+    let mut n = 0u32;
+    unsafe { ReadFile(pipe, Some(&mut buf), Some(&mut n), None)?; }
+    buf.truncate(n as usize);
+    Ok(buf)
+}
+
+/// 在 timeout 内非阻塞地检测管道是否有待读数据
+fn peek_has_data(pipe: HANDLE, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut avail = 0u32;
+        if unsafe { PeekNamedPipe(pipe, None, 0, None, Some(&mut avail), None).is_ok() } && avail > 0 {
+            return true;
+        }
+        if Instant::now() >= deadline { return false; }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn close_handle(h: HANDLE) {
+    if !h.is_invalid() { unsafe { let _ = CloseHandle(h); } }
+}
+
+// ─── Control pipe server（MansonWindowsUnlockRustServer）─────────────────────
+
+fn run_control_server(state: Arc<State>) {
+    loop {
+        if state.should_exit.load(Ordering::SeqCst) { break; }
+
+        let pipe = match create_named_pipe(PIPE_SERVER_NAME) {
+            Ok(p) => p,
+            Err(_) => { thread::sleep(Duration::from_secs(1)); continue; }
+        };
+
+        if wait_for_client(pipe).is_err() { close_handle(pipe); continue; }
+
+        loop {
+            if state.should_exit.load(Ordering::SeqCst) { break; }
+            match pipe_read(pipe) {
+                Ok(data) if !data.is_empty() => {
+                    let cmd = String::from_utf8_lossy(&data);
+                    if cmd.trim() == "run" {
+                        state.run_requested.store(true, Ordering::SeqCst);
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        unsafe { let _ = DisconnectNamedPipe(pipe); }
+        close_handle(pipe);
+    }
+}
+
+// ─── Unlock pipe server（MansonWindowsUnlockRustUnlock）──────────────────────
+
+fn run_unlock_server(state: Arc<State>) {
+    loop {
+        if state.should_exit.load(Ordering::SeqCst) { break; }
+
+        let pipe = match create_named_pipe(PIPE_UNLOCK_NAME) {
+            Ok(p) => p,
+            Err(_) => { thread::sleep(Duration::from_secs(1)); continue; }
+        };
+
+        if wait_for_client(pipe).is_err() { close_handle(pipe); continue; }
+
+        let state2 = state.clone();
+        thread::spawn(move || handle_unlock_client(pipe, state2));
+    }
+}
+
+fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
+    if peek_has_data(pipe, Duration::from_millis(200)) {
+        // UI 客户端：读取命令
+        if let Ok(data) = pipe_read(pipe) {
+            let msg = String::from_utf8_lossy(&data);
+            if msg.trim() == "exit" {
+                state.should_exit.store(true, Ordering::SeqCst);
+            }
+        }
+    } else {
+        // DLL 客户端：替换旧句柄，等待写入凭据
+        let old = state.dll_creds_pipe.swap(pipe.0 as isize, Ordering::SeqCst);
+        if old != INVALID_HANDLE_VALUE.0 as isize {
+            close_handle(HANDLE(old as *mut _));
+        }
+
+        loop {
+            if state.should_exit.load(Ordering::SeqCst) { break; }
+            let creds = state.matched_creds.lock().unwrap().take();
+            if let Some((username, password)) = creds {
+                let payload = format!("{}\0{}\0.\0", username, password);
+                let _ = pipe_write(pipe, payload.as_bytes());
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        state.dll_creds_pipe.compare_exchange(
+            pipe.0 as isize, INVALID_HANDLE_VALUE.0 as isize,
+            Ordering::SeqCst, Ordering::SeqCst,
+        ).ok();
+    }
+
+    unsafe { let _ = DisconnectNamedPipe(pipe); }
+    close_handle(pipe);
+}
+
+// ─── Database ─────────────────────────────────────────────────────────────────
+
+fn load_face_records(db_path: &Path) -> Vec<FaceRecord> {
+    let conn = match Connection::open(db_path) { Ok(c) => c, Err(_) => return vec![] };
+    let mut stmt = match conn.prepare(
+        "SELECT user_name, user_pwd, face_token, json_data FROM faces",
+    ) { Ok(s) => s, Err(_) => return vec![] };
+
+    stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3).unwrap_or_default(),
+        ))
+    })
+    .ok()
+    .map(|rows| {
+        rows.filter_map(|r| r.ok())
+            .map(|(u, p, t, j)| {
+                let thr = serde_json::from_str::<JsonData>(&j)
+                    .ok().and_then(|d| d.threshold).unwrap_or(60);
+                FaceRecord { user_name: u, user_pwd: p, face_token: t, threshold: thr }
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+// ─── Face feature comparison ──────────────────────────────────────────────────
+
+/// 从 Mat（feature 输出）中取出 f32 字节
+fn feature_to_bytes(feat: &Mat) -> Vec<u8> {
+    feat.data_bytes()
+        .map(|b| b.to_vec())
+        .unwrap_or_default()
+}
+
+/// 余弦相似度（0.0 ~ 1.0）
+fn cosine_sim(a: &[u8], b: &[u8]) -> f64 {
+    if a.len() != b.len() || a.len() % 4 != 0 { return 0.0; }
+    let to_f32 = |bytes: &[u8]| -> Vec<f32> {
+        bytes.chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    };
+    let av = to_f32(a);
+    let bv = to_f32(b);
+    let dot: f64 = av.iter().zip(bv.iter()).map(|(x, y)| (*x as f64) * (*y as f64)).sum();
+    let na: f64 = av.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+    let nb: f64 = bv.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+    if na == 0.0 || nb == 0.0 { 0.0 } else { (dot / (na * nb)).clamp(0.0, 1.0) }
+}
+
+// ─── OpenCV models ────────────────────────────────────────────────────────────
+
+struct Models {
+    detector:   Ptr<FaceDetectorYN>,
+    recognizer: Ptr<FaceRecognizerSF>,
+}
+
+fn load_models(resources: &Path) -> opencv::Result<Models> {
+    let detector = FaceDetectorYN::create(
+        resources.join("face_detection_yunet_2023mar.onnx").to_str().unwrap_or(""),
+        "", Size::new(320, 320), 0.9, 0.3, 5000, 0, 0,
+    )?;
+    let recognizer = FaceRecognizerSF::create(
+        resources.join("face_recognition_sface_2021dec.onnx").to_str().unwrap_or(""),
+        "", 0, 0,
+    )?;
+    Ok(Models { detector, recognizer })
+}
+
+/// 检测+提取特征，返回 None 表示无人脸或失败
+fn detect_and_extract(models: &mut Models, frame: &Mat) -> Option<Mat> {
+    models.detector.set_input_size(Size::new(frame.cols(), frame.rows())).ok()?;
+    let mut faces = Mat::default();
+    models.detector.detect(frame, &mut faces).ok()?;
+    if faces.rows() == 0 { return None; }
+
+    // 克隆第一行（BoxedRef → Mat）以满足 ToInputArray 要求
+    let face_row = faces.row(0).ok()?.try_clone().ok()?;
+
+    let mut aligned = Mat::default();
+    models.recognizer.align_crop(frame, &face_row, &mut aligned).ok()?;
+    let mut feature = Mat::default();
+    models.recognizer.feature(&aligned, &mut feature).ok()?;
+    Some(feature)
+}
+
+// ─── Test-creds file ──────────────────────────────────────────────────────────
+
+fn check_test_creds(exe_dir: &Path) -> Option<(String, String)> {
+    let path = exe_dir.join("block").join("test_creds.tmp");
+    if !path.exists() { return None; }
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+
+    #[derive(Deserialize)]
+    struct Creds { user_name: String, user_pwd: String }
+    let c: Creds = serde_json::from_str(&text).ok()?;
+    Some((c.user_name, c.user_pwd))
+}
+
+// ─── Face recognition loop ────────────────────────────────────────────────────
+
+fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
+    let resources = exe_dir.join("resources");
+    let db_path   = exe_dir.join("database.db");
+
+    let mut models = match load_models(&resources) { Ok(m) => m, Err(_) => return };
+    let mut cam: Option<VideoCapture> = None;
+    let mut records: Vec<FaceRecord> = vec![];
+    let mut last_reload = Instant::now() - Duration::from_secs(60);
+
+    loop {
+        if state.should_exit.load(Ordering::SeqCst) { break; }
+
+        // 轮询 test_creds.tmp（UI 测试模式）
+        if let Some((user, pwd)) = check_test_creds(&exe_dir) {
+            *state.matched_creds.lock().unwrap() = Some((user, pwd));
+            // 等待 DLL 消费（最多 30s）
+            for _ in 0..300 {
+                thread::sleep(Duration::from_millis(100));
+                if state.matched_creds.lock().unwrap().is_none()
+                    || state.should_exit.load(Ordering::SeqCst) { break; }
+            }
+            continue;
+        }
+
+        if !state.run_requested.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        state.run_requested.store(false, Ordering::SeqCst);
+
+        // 定期重新加载人脸记录
+        if last_reload.elapsed() > Duration::from_secs(30) {
+            records = load_face_records(&db_path);
+            last_reload = Instant::now();
+        }
+        if records.is_empty() { continue; }
+
+        // 打开摄像头（首次或重新打开）
+        if cam.is_none() {
+            for idx in 0..4i32 {
+                if let Ok(mut c) = VideoCapture::new(idx, opencv::videoio::CAP_ANY) {
+                    if c.is_opened().unwrap_or(false) {
+                        let mut dummy = Mat::default();
+                        let _ = c.read(&mut dummy); // 预热
+                        cam = Some(c);
+                        break;
+                    }
+                }
+            }
+        }
+        let cap = match cam.as_mut() { Some(c) => c, None => continue };
+
+        // 识别循环（最多 60 帧 ≈ 5~10 秒）
+        let mut matched = false;
+        for _ in 0..60 {
+            if state.should_exit.load(Ordering::SeqCst) { break; }
+            state.run_requested.store(false, Ordering::SeqCst);
+
+            let mut frame = Mat::default();
+            if cap.read(&mut frame).is_err() || frame.empty() {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            let cam_feat = match detect_and_extract(&mut models, &frame) {
+                Some(f) => f,
+                None => { thread::sleep(Duration::from_millis(100)); continue; }
+            };
+            let cam_bytes = feature_to_bytes(&cam_feat);
+
+            for rec in &records {
+                let face_path = exe_dir.join("faces").join(format!("{}.face", rec.face_token));
+                let stored_bytes = match std::fs::read(&face_path) { Ok(b) => b, Err(_) => continue };
+                let score = cosine_sim(&cam_bytes, &stored_bytes);
+                let threshold = rec.threshold as f64 / 100.0;
+                if score >= threshold {
+                    *state.matched_creds.lock().unwrap() = Some((rec.user_name.clone(), rec.user_pwd.clone()));
+                    // 更新活跃时间：人脸识别成功说明用户在
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+                    state.last_user_active.store(now, Ordering::SeqCst);
+                    matched = true;
+                    break;
+                }
+            }
+            if matched { break; }
+            thread::sleep(Duration::from_millis(80));
+        }
+    }
+}
+
+// ─── Auto-lock monitor ──────────────────────────────────────────────────────────
+
+/// 从 options 表读取自动锁屏配置
+fn load_auto_lock_settings(db_path: &Path) -> (bool, u64) {
+    let conn = match Connection::open(db_path) { Ok(c) => c, Err(_) => return (false, 300) };
+    let mut enabled = false;
+    let mut timeout: u64 = 300;
+
+    // 读取 autoLockEnabled (字符串 "true"/"false")
+    if let Ok(mut stmt) = conn.prepare("SELECT val FROM options WHERE key = 'autoLockEnabled'") {
+        if let Ok(val) = stmt.query_row([], |row| row.get::<_, String>(0)) {
+            enabled = val == "true";
+        }
+    }
+    // 读取 autoLockTimeout (秒，字符串数字)
+    if let Ok(mut stmt) = conn.prepare("SELECT val FROM options WHERE key = 'autoLockTimeout'") {
+        if let Ok(val) = stmt.query_row([], |row| row.get::<_, String>(0)) {
+            timeout = val.parse().unwrap_or(300);
+        }
+    }
+
+    (enabled, timeout)
+}
+
+/// 获取系统空闲时间（毫秒）
+fn get_idle_millis() -> u32 {
+    let mut lii = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    unsafe { let _ = GetLastInputInfo(&mut lii); }
+    let tick = unsafe { windows::Win32::System::SystemInformation::GetTickCount() };
+    tick.wrapping_sub(lii.dwTime)
+}
+
+/// 自动锁屏监控线程
+fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
+    let db_path = exe_dir.join("database.db");
+    let resources = exe_dir.join("resources");
+
+    // 首次加载设置
+    let (mut auto_lock_enabled, mut auto_lock_timeout) = load_auto_lock_settings(&db_path);
+    let mut last_config_check = Instant::now();
+
+    // 延迟加载模型（按需，避免内存浪费）
+    let mut models: Option<Models> = None;
+    let mut records: Vec<FaceRecord> = vec![];
+    let mut last_record_reload = Instant::now() - Duration::from_secs(60);
+
+    loop {
+        if state.should_exit.load(Ordering::SeqCst) { break; }
+        thread::sleep(Duration::from_secs(1));
+
+        // 每 30 秒重新读取设置
+        if last_config_check.elapsed() > Duration::from_secs(30) {
+            let (enabled, timeout) = load_auto_lock_settings(&db_path);
+            auto_lock_enabled = enabled;
+            auto_lock_timeout = timeout;
+            last_config_check = Instant::now();
+        }
+
+        if !auto_lock_enabled { continue; }
+
+        let idle_ms = get_idle_millis();
+        if idle_ms < (auto_lock_timeout * 1000) as u32 {
+            // 用户有活动，更新最后活跃时间
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+            state.last_user_active.store(now, Ordering::SeqCst);
+            continue;
+        }
+
+        // 空闲超时，且没有正在进行的解锁请求（避免冲突）
+        if state.run_requested.load(Ordering::SeqCst) { continue; }
+
+        // 加载模型（仅首次）
+        if models.is_none() {
+            models = load_models(&resources).ok();
+        }
+        let models = match models.as_mut() { Some(m) => m, None => continue };
+
+        // 重新加载人脸记录
+        if last_record_reload.elapsed() > Duration::from_secs(60) {
+            records = load_face_records(&db_path);
+            last_record_reload = Instant::now();
+        }
+        if records.is_empty() { continue; } // 无人脸记录，不锁屏
+
+        // 打开摄像头做一次验证（最多 15 帧 ≈ 2~3 秒）
+        let mut cam: Option<VideoCapture> = None;
+        for idx in 0..4i32 {
+            if let Ok(mut c) = VideoCapture::new(idx, opencv::videoio::CAP_ANY) {
+                if c.is_opened().unwrap_or(false) {
+                    let mut dummy = Mat::default();
+                    let _ = c.read(&mut dummy);
+                    cam = Some(c);
+                    break;
+                }
+            }
+        }
+        let cap = match cam.as_mut() { Some(c) => c, None => continue };
+
+        let mut authorized = false;
+        for _ in 0..15 {
+            if state.should_exit.load(Ordering::SeqCst) { break; }
+            // 中途用户回来操作了
+            if get_idle_millis() < 500 { authorized = true; break; }
+
+            let mut frame = Mat::default();
+            if cap.read(&mut frame).is_err() || frame.empty() {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            if let Some(feat) = detect_and_extract(models, &frame) {
+                let cam_bytes = feature_to_bytes(&feat);
+                for rec in &records {
+                    let face_path = exe_dir.join("faces").join(format!("{}.face", rec.face_token));
+                    let stored_bytes = match std::fs::read(&face_path) { Ok(b) => b, Err(_) => continue };
+                    let score = cosine_sim(&cam_bytes, &stored_bytes);
+                    let threshold = rec.threshold as f64 / 100.0;
+                    if score >= threshold {
+                        authorized = true;
+                        break;
+                    }
+                }
+            }
+            if authorized { break; }
+        }
+        // 释放摄像头
+        drop(cam);
+
+        if authorized {
+            // 授权用户在场，更新活跃时间，继续监控
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+            state.last_user_active.store(now, Ordering::SeqCst);
+        } else {
+            // 无人或非授权人员 → 锁屏
+            let _ = unsafe { LockWorkStation() };
+            // 锁屏后等 5 秒再继续检查
+            thread::sleep(Duration::from_secs(5));
+        }
+    }
+}
+
+// ─── Entry point ──────────────────────────────────────────────────────────────
+
+fn main() {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let state = State::new();
+
+    let s1 = state.clone();
+    thread::spawn(move || run_control_server(s1));
+
+    let s2 = state.clone();
+    thread::spawn(move || run_unlock_server(s2));
+
+    let s3 = state.clone();
+    let dir2 = exe_dir.clone();
+    thread::spawn(move || auto_lock_monitor(s3, dir2));
+
+    face_recognition_loop(state, exe_dir);
 }

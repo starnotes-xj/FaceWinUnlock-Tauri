@@ -3,7 +3,8 @@
 extern crate simplelog;
 use simplelog::*;
 use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, REG_VALUE_TYPE};
-use std::fs::File;
+use std::fs::OpenOptions;
+use std::os::windows::fs::OpenOptionsExt;
 
 // 引入必要的系统类型和Win32 API绑定
 use std::ffi::{c_void, OsStr};
@@ -14,7 +15,8 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, HINSTANCE, S_FALSE, S_OK};
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows::Win32::UI::Shell::ICredentialProvider;
-use windows_core::{implement, Ref, BOOL, GUID, PCWSTR};
+use windows_core::{implement, Ref, GUID, PCWSTR};
+use windows::Win32::Foundation::BOOL;
 use windows::core::{Interface, HRESULT};
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
 
@@ -128,6 +130,7 @@ pub struct SharedCredentials {
     pub password: String,
     pub domain: String,
     pub is_ready: bool,
+    pub is_unlocked: bool, // 面容已识别，触发自动登录；由 GetSerialization 消费后重置
 }
 
 /// 类工厂实现，用于创建凭据提供程序实例
@@ -270,19 +273,25 @@ pub unsafe extern "system" fn DllMain(
             }
 
             // 初始化日志系统
-            if let Ok(file) = File::create(log_path + "\\facewinunlock.log") {
-                // 日志时间太麻烦，不搞了，没有日期影响不大
+            // 使用 append + FILE_SHARE_READ|WRITE(0x03)，允许多进程（如 credentialuibroker.exe）同时写入同一日志文件
+            let log_file_path = format!("{}\\facewinunlock.log", log_path);
+            if let Ok(file) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .share_mode(0x00000003) // FILE_SHARE_READ | FILE_SHARE_WRITE
+                .open(&log_file_path)
+            {
                 if let Ok(config) = ConfigBuilder::new().set_time_offset_to_local(){
                     match CombinedLogger::init(
                         vec![
                             WriteLogger::new(
-                                LevelFilter::Info, 
-                                config.build(), 
+                                LevelFilter::Info,
+                                config.build(),
                                 file
                             ),
                         ]
                     ) {
-                        Ok(_) => info!("日志系统初始化成功"),
+                        Ok(_) => info!("日志系统初始化成功 (PID: {})", std::process::id()),
                         _ => {},
                     }
                 }

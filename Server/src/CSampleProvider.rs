@@ -1,8 +1,9 @@
 // 引入必要的Win32 API和同步原语
-use windows::Win32::{Foundation::{HANDLE, STATUS_SUCCESS}, Security::Authentication::Identity::{LsaConnectUntrusted, LsaDeregisterLogonProcess, LsaLookupAuthenticationPackage, LSA_STRING}, UI::Shell::*};
-use std::sync::{atomic::Ordering, Arc, Mutex};
+use windows::Win32::{Foundation::{E_NOTIMPL, HANDLE, STATUS_SUCCESS}, Security::Authentication::Identity::{LsaConnectUntrusted, LsaDeregisterLogonProcess, LsaLookupAuthenticationPackage, LSA_STRING}, UI::Shell::*};
+use std::sync::{Arc, Mutex};
 use crate::{dll_add_ref, dll_release, read_facewinunlock_registry, CPipeListener::CPipeListener, CSampleCredential::SampleCredential, SharedCredentials};
-use windows_core::{implement, BOOL, PSTR, PWSTR};
+use windows_core::{implement, PSTR, PWSTR};
+use windows::Win32::Foundation::BOOL;
 
 /// 凭据提供程序主类，负责管理凭据和与系统交互
 #[implement(ICredentialProvider)]
@@ -14,11 +15,12 @@ pub struct SampleProvider {
 /// 凭据提供程序的内部状态
 struct ProviderInner {
     usage_scenario: CREDENTIAL_PROVIDER_USAGE_SCENARIO, // 使用场景（登录、解锁等）
+    is_scenario_supported: bool,               // 当前场景是否在 UNLOCK_SCENE 列表中
     events: Option<ICredentialProviderEvents>, // 系统事件接口
-    advise_context: usize, // 通知上下文ID
+    advise_context: usize,                     // 通知上下文ID
     listener: Option<Arc<Mutex<CPipeListener>>>, // 管道监听器实例
     pub shared_creds: Arc<Mutex<SharedCredentials>>, // 共享的凭据列表
-    pub auth_package_id: u32, // 认证包ID
+    pub auth_package_id: u32,                  // 认证包ID
     pub credential: Option<ICredentialProviderCredential>,
 }
 
@@ -34,6 +36,7 @@ impl SampleProvider {
             password: String::new(),
             domain: String::from("."),
             is_ready: false,
+            is_unlocked: false,
         }));
 
         // 获取认证包ID
@@ -42,6 +45,7 @@ impl SampleProvider {
         Self {
             inner: Mutex::new(ProviderInner {
                 usage_scenario: CPUS_LOGON, // 默认场景为登录
+                is_scenario_supported: true,
                 events: None,
                 advise_context: 0,
                 listener: None,
@@ -65,11 +69,42 @@ impl Drop for SampleProvider {
 impl ICredentialProvider_Impl for SampleProvider_Impl {
     /// 设置凭据提供程序的使用场景
     /// cpus: 使用场景（登录、解锁、切换用户等）
-    /// _dwflags: 附加标志
-    fn SetUsageScenario(&self, cpus: CREDENTIAL_PROVIDER_USAGE_SCENARIO, _dwflags: u32) -> windows_core::Result<()> {
-        info!("SampleProvider::SetUsageScenario - 设置使用场景: {:?}", cpus);
+    /// dwflags: 附加标志（CREDUI 场景下包含调用方传入的 CREDUIWIN_* 标志）
+    fn SetUsageScenario(&self, cpus: CREDENTIAL_PROVIDER_USAGE_SCENARIO, dwflags: u32) -> windows_core::Result<()> {
+        info!("SampleProvider::SetUsageScenario - 设置使用场景: {:?}, flags: {:#X}", cpus, dwflags);
         let mut inner = self.inner.lock().unwrap();
-        inner.usage_scenario = cpus; // 保存使用场景
+        inner.usage_scenario = cpus;
+
+        // 读取 UNLOCK_SCENE 注册表（逗号分隔的场景 ID，如 "1,2"）
+        // CPUS_LOGON=1, CPUS_UNLOCK_WORKSTATION=2, CPUS_CREDUI=4
+        let supported: Vec<u32> = crate::read_facewinunlock_registry("UNLOCK_SCENE")
+            .unwrap_or_else(|_| "1,2,4".to_string())
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+
+        info!("支持的解锁场景: {:?}", supported);
+
+        inner.is_scenario_supported = supported.contains(&(cpus.0 as u32));
+        if !inner.is_scenario_supported {
+            // 告知 Windows 此提供程序不处理该场景，修复浏览器 PIN 弹窗卡顿问题 (#118)
+            info!("SampleProvider::SetUsageScenario - 场景 {} 不受支持，跳过", cpus.0);
+            return Err(E_NOTIMPL.into());
+        }
+
+        // CREDUI 场景黑名单过滤 (#114):
+        // 应用（如 RDP/mstsc）调用 CredUIPromptForWindowsCredentials 时会带 CREDUIWIN_GENERIC (0x1)
+        // UAC 系统提权则不带此标志。通过过滤 GENERIC 请求避免干扰 RDP 等应用的密码验证。
+        if cpus.0 == 4 && (dwflags & 0x1) != 0 {
+            let allow_generic = crate::read_facewinunlock_registry("CREDUI_ALLOW_GENERIC")
+                .unwrap_or_else(|_| "0".to_string());
+            if allow_generic != "1" {
+                info!("SampleProvider::SetUsageScenario - CREDUI GENERIC 请求已被过滤（CREDUI_ALLOW_GENERIC=0），跳过");
+                inner.is_scenario_supported = false;
+                return Err(E_NOTIMPL.into());
+            }
+        }
+
         Ok(())
     }
 
@@ -89,9 +124,13 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
         inner.events = pcpe.clone(); // 保存事件接口
         inner.advise_context = upadvisecontext; // 保存上下文ID
 
-        // 启动管道监听，传入系统事件接口
-        if let Some(events) = &inner.events {
-            inner.listener = Some(CPipeListener::start(events.clone(), upadvisecontext, inner.shared_creds.clone()));
+        // 只在受支持的场景下启动管道监听（防止不必要的场景触发面容识别）
+        if inner.is_scenario_supported {
+            if let Some(events) = &inner.events {
+                // 主场景（登录/解锁）：允许 stop_and_join 时通知 Unlock EXE 释放摄像头 (#117)
+                let is_primary = inner.usage_scenario.0 == 1 || inner.usage_scenario.0 == 2;
+                inner.listener = Some(CPipeListener::start(events.clone(), upadvisecontext, inner.shared_creds.clone(), is_primary));
+            }
         }
 
         Ok(())
@@ -137,9 +176,10 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             }
     
             // 根据索引设置字段类型和标签
+            // 使用 SMALL_TEXT 让磁贴更小巧，类似状态指示器 (#91)
             let (ft, label) = match dwindex {
-                0 => (CPFT_TILE_IMAGE, "框架图标"),  // 字段0: 图标
-                1 => (CPFT_LARGE_TEXT, "WinLogon基础框架加载成功！"),  // 字段1: 文本
+                0 => (CPFT_TILE_IMAGE, "面容图标"),
+                1 => (CPFT_SMALL_TEXT, "面容解锁"),
                 _ => {
                     error!("SampleProvider::GetFieldDescriptorAt - 无效的字段索引: {}", dwindex);
                     return Err(windows::Win32::Foundation::E_INVALIDARG.into());
@@ -189,20 +229,29 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
         info!( "是否显示图标: {}", show_tile);
 
         unsafe {
-            // 如果管道已经收到了数据，告诉系统我们要自动登录
-            if let Some(l) = &inner.listener {
-                let listener = l.lock().unwrap();
-                if listener.is_unlocked.load(Ordering::SeqCst) {
-                    listener.is_unlocked.store(false, Ordering::SeqCst);
-                    *pdwcount = 1;
-                    *pdwdefault = 0;
-                    *pbautologonwithdefault = BOOL::from(true); // 触发自动登录
-                } else {
-                    *pdwcount = if show_tile { 1 } else { 0 };
-                }
+            // 始终初始化输出指针，防止未定义行为
+            *pdwdefault = 0;
+
+            // 检查是否有面容识别完成的凭据待自动登录
+            // 使用 shared_creds.is_unlocked（脉冲信号），由 GetSerialization 成功后重置
+            // 防止 UAC 多次调用 GetCredentialCount 导致 autologon 丢失 (#112)
+            let autologon = {
+                let creds = inner.shared_creds.lock().unwrap();
+                creds.is_unlocked
+            };
+
+            if autologon {
+                *pdwcount = 1;
+                *pbautologonwithdefault = BOOL::from(true);
+                info!("SampleProvider::GetCredentialCount - 自动登录已触发");
+            } else if let Some(_l) = &inner.listener {
+                *pdwcount = if show_tile { 1 } else { 0 };
+                *pbautologonwithdefault = BOOL::from(false);
+            } else {
+                *pdwcount = 0;
+                *pbautologonwithdefault = BOOL::from(false);
             }
         }
-        info!("SampleProvider::GetCredentialCount - 凭据数量: 1，默认索引: 0");
         Ok(())
     }
 

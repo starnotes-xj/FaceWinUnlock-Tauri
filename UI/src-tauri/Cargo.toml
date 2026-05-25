@@ -1,0 +1,47 @@
+[package]
+name = "facewinunlock-tauri"
+version = "0.3.5"
+edition = "2021"
+
+[lib]
+name = "facewinunlock_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-log = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+opencv = { version = "0.92", features = ["dnn", "imgcodecs", "imgproc"] }
+base64 = "0.22"
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Media_DirectShow",
+    "Win32_Media_MediaFoundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Shutdown",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.59"
+lazy_static = "1"
+uuid = { version = "1", features = ["v4"] }
+encoding_rs = "0.8"
+winreg = "0.52"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

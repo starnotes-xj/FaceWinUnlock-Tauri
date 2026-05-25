@@ -1,35 +1,30 @@
-use std::{os::windows::process::CommandExt, process::Command};
+use std::{
+    os::windows::process::CommandExt,
+    process::Command,
+    thread,
+    time::Duration,
+};
 
 use crate::{
-    modules::options::{write_to_registry, RegistryItem},
     utils::custom_result::CustomResult,
     OpenCVResource, APP_STATE, GLOBAL_TRAY, ROOT_DIR,
 };
+use tauri_plugin_log::log::info;
 use opencv::{
     core::{Mat, MatTraitConst, Size},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
+    prelude::NetTrait,
     videoio::{self, VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Manager};
-use tauri_plugin_log::log::{error, info, warn};
 use windows::{
-    core::{BSTR, HSTRING, PWSTR},
+    core::PWSTR,
     Win32::{
-        Foundation::{E_UNEXPECTED, HWND},
-        Media::{
-            DirectShow::ICreateDevEnum,
-            MediaFoundation::{CLSID_SystemDeviceEnum, CLSID_VideoInputDeviceCategory},
-        },
+        Foundation::HWND,
         System::{
-            Com::{
-                CoCreateInstance, CoInitializeEx, CoUninitialize, IEnumMoniker,
-                StructuredStorage::IPropertyBag, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
-            },
             RemoteDesktop::WTSUnRegisterSessionNotification,
-            Shutdown::LockWorkStation,
-            Variant::{VariantClear, VARIANT},
             WindowsProgramming::GetUserNameW,
         },
     },
@@ -69,14 +64,55 @@ impl From<CameraBackend> for i32 {
 pub fn get_now_username() -> Result<CustomResult, CustomResult> {
     // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
     // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
+    unsafe {
+        let mut size = 0u32;
+        let _ = GetUserNameW(None, &mut size);
+        if size == 0 {
+            return Err(CustomResult::error(Some("获取用户名失败".to_string()), None));
+        }
+        let mut buf: Vec<u16> = vec![0u16; size as usize];
+        match GetUserNameW(Some(PWSTR(buf.as_mut_ptr())), &mut size) {
+            Ok(_) => {
+                let name = String::from_utf16_lossy(&buf[..size as usize - 1]);
+                Ok(CustomResult::success(Some(name), None))
+            }
+            Err(e) => Err(CustomResult::error(
+                Some(format!("获取用户名失败: {e}")),
+                None,
+            )),
+        }
+    }
 }
 
-// 测试 WinLogon 是否加载成功
+// 测试 WinLogon：写凭据到 block/test_creds.tmp，然后锁屏
+// Unlock.exe 会在锁屏后读取此文件并通过管道推送凭据完成自动登录
 #[tauri::command]
 pub fn test_win_logon(user_name: String, password: String) -> Result<CustomResult, CustomResult> {
-    // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
-    // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
-    return Ok(CustomResult::success(None, None));
+    // 创建 block 目录
+    let block_dir = ROOT_DIR.join("block");
+    std::fs::create_dir_all(&block_dir).map_err(|e| {
+        CustomResult::error(Some(format!("创建 block 目录失败: {}", e)), None)
+    })?;
+
+    // 写入凭据 JSON
+    let creds = serde_json::json!({
+        "user_name": user_name,
+        "user_pwd": password,
+        "domain": "."
+    });
+    let creds_path = block_dir.join("test_creds.tmp");
+    std::fs::write(&creds_path, creds.to_string()).map_err(|e| {
+        CustomResult::error(Some(format!("写凭据文件失败: {}", e)), None)
+    })?;
+
+    // 锁屏
+    unsafe {
+        use windows::Win32::System::Shutdown::LockWorkStation;
+        LockWorkStation()
+            .map_err(|e| CustomResult::error(Some(format!("锁屏失败: {}", e)), None))?;
+    }
+
+    Ok(CustomResult::success(None, None))
 }
 
 // 初始化模型
@@ -119,7 +155,27 @@ pub fn get_camera() -> Result<CustomResult, CustomResult> {
     // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
     // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
 
-    Ok(CustomResult::success(None, Some(json!(valid_cameras))))
+    match get_windows_video_devices() {
+        Ok(devices) => {
+            let valid_cameras: Vec<ValidCameraInfo> = devices
+                .into_iter()
+                .enumerate()
+                .map(|(i, (name, index))| {
+                    let is_valid = is_camera_index_valid(index).unwrap_or(false);
+                    ValidCameraInfo {
+                        camera_name: name,
+                        capture_index: i.to_string(),
+                        is_valid,
+                    }
+                })
+                .collect();
+            Ok(CustomResult::success(None, Some(json!(valid_cameras))))
+        }
+        Err(e) => Err(CustomResult::error(
+            Some(format!("获取摄像头列表失败: {e}")),
+            None,
+        )),
+    }
 }
 
 // 打开摄像头
@@ -128,14 +184,29 @@ pub fn open_camera(
     backend: Option<CameraBackend>,
     camear_index: i32,
 ) -> Result<CustomResult, CustomResult> {
-    // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
-    // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
+    // 按指定后端或依次尝试 MSMF → DShow → Any
+    let backends_to_try: Vec<CameraBackend> = match backend {
+        Some(b) => vec![b],
+        None => vec![CameraBackend::MSMF, CameraBackend::DShow, CameraBackend::Any],
+    };
 
-    // 所有后端都尝试失败
-    Err(CustomResult::error(
-        Some("所有摄像头后端均尝试失败，请检查设备是否连接/被占用/有权限".to_string()),
-        None,
-    ))
+    let mut last_err = String::from("无可用摄像头后端");
+    for b in backends_to_try {
+        match try_open_camera_with_backend(b, camear_index) {
+            Ok(cam) => {
+                let mut state = APP_STATE.lock().map_err(|e| {
+                    CustomResult::error(Some(format!("获取 app 状态失败: {}", e)), None)
+                })?;
+                state.camera = Some(OpenCVResource { inner: cam });
+                return Ok(CustomResult::success(None, None));
+            }
+            Err(e) => {
+                last_err = e.to_string();
+            }
+        }
+    }
+
+    Err(CustomResult::error(Some(last_err), None))
 }
 
 // 关闭摄像头
@@ -181,12 +252,12 @@ pub fn open_directory(path: String) -> Result<CustomResult, CustomResult> {
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 /// 通用计划任务创建函数
 /// 参数说明：
-/// - path: 程序相对路径（如 "Unlock.exe"）
+/// - path: 程序绝对路径
 /// - task_name: 任务名称
 /// - is_server: 是否为无GUI（SYSTEM账户）模式
-/// - silent: 是否静默运行
-/// - run_on_system_start: 是否系统启动就运行（而非登录后），该参数为true时is_server强制为true
-/// - run_immediately: 是否创建后立即运行任务
+/// - silent: 是否附加 --silent 参数
+/// - run_on_system_start: BootTrigger（true）or LogonTrigger（false），true 时强制 SYSTEM 账户
+/// - run_immediately: 创建后立即运行
 #[tauri::command]
 pub fn add_scheduled_task(
     path: String,
@@ -196,8 +267,104 @@ pub fn add_scheduled_task(
     run_on_system_start: bool,
     run_immediately: bool,
 ) -> Result<CustomResult, CustomResult> {
-    // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
-    // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
+    let use_system = is_server || run_on_system_start;
+
+    let trigger_xml = if run_on_system_start {
+        "<BootTrigger><Enabled>true</Enabled></BootTrigger>"
+    } else {
+        "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
+    };
+
+    let principal_xml = if use_system {
+        r#"<Principal id="Author">
+          <UserId>S-1-5-18</UserId>
+          <RunLevel>HighestAvailable</RunLevel>
+        </Principal>"#
+    } else {
+        r#"<Principal id="Author">
+          <RunLevel>HighestAvailable</RunLevel>
+        </Principal>"#
+    };
+
+    let args_xml = if silent {
+        "<Arguments>--silent</Arguments>"
+    } else {
+        ""
+    };
+
+    let exe_path = quote_exe_path_with_args(&path, None);
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    {trigger}
+    <SessionStateChangeTrigger>
+      <StateChange>SessionUnlock</StateChange>
+    </SessionStateChangeTrigger>
+  </Triggers>
+  <Principals>
+    {principal}
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+  </Settings>
+  <Actions>
+    <Exec>
+      <Command>{exe}</Command>
+      {args}
+    </Exec>
+  </Actions>
+</Task>"#,
+        trigger = trigger_xml,
+        principal = principal_xml,
+        exe = exe_path,
+        args = args_xml,
+    );
+
+    // 写 XML 到临时文件
+    let temp_path = std::env::temp_dir().join(format!("fwu_task_{}.xml", uuid::Uuid::new_v4()));
+    // schtasks /Create /XML 需要 UTF-16 LE 编码
+    let utf16: Vec<u8> = std::iter::once(0xFFu8)   // BOM
+        .chain(std::iter::once(0xFEu8))
+        .chain(
+            xml.encode_utf16()
+                .flat_map(|c| c.to_le_bytes())
+        )
+        .collect();
+    std::fs::write(&temp_path, &utf16).map_err(|e| {
+        CustomResult::error(Some(format!("写临时 XML 失败: {}", e)), None)
+    })?;
+
+    let output = Command::new("schtasks")
+        .args(&[
+            "/Create",
+            "/TN", &task_name,
+            "/XML", temp_path.to_str().unwrap_or(""),
+            "/F",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| CustomResult::error(Some(format!("执行 schtasks 失败: {}", e)), None))?;
+
+    let _ = std::fs::remove_file(&temp_path);
+
+    if !output.status.success() {
+        let err = fix_gbk_encoding(&output.stderr);
+        return Err(CustomResult::error(
+            Some(format!("创建计划任务失败: {}", err)),
+            None,
+        ));
+    }
+
+    if run_immediately {
+        let _ = Command::new("schtasks")
+            .args(&["/Run", "/TN", &task_name])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    }
 
     Ok(CustomResult::success(None, None))
 }
@@ -244,15 +411,16 @@ pub fn check_scheduled_task(task_name: String) -> Result<CustomResult, CustomRes
 
 #[tauri::command]
 pub fn check_process_running() -> Result<CustomResult, CustomResult> {
-    let client = Client::new(HSTRING::from(r"\\.\pipe\MansonWindowsUnlockRustUnlock"));
-    if client.is_err() {
-        return Err(CustomResult::error(
-            Some(format!("pipe错误: {}", client.err().unwrap())),
-            None,
-        ));
-    }
+    let client = match Client::new(r"\\.\pipe\MansonWindowsUnlockRustUnlock") {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(CustomResult::error(
+                Some(format!("pipe错误: {}", e)),
+                None,
+            ));
+        }
+    };
 
-    let client = client.unwrap();
     if let Err(e) = crate::utils::pipe::write(client.handle, String::from("hello server")) {
         return Err(CustomResult::error(
             Some(format!("向客户端写入数据失败: {:?}", e)),
@@ -265,15 +433,16 @@ pub fn check_process_running() -> Result<CustomResult, CustomResult> {
 
 #[tauri::command]
 pub fn delete_process_running() -> Result<CustomResult, CustomResult> {
-    let client = Client::new(HSTRING::from(r"\\.\pipe\MansonWindowsUnlockRustUnlock"));
-    if client.is_err() {
-        return Err(CustomResult::error(
-            Some(format!("pipe错误: {}", client.err().unwrap())),
-            None,
-        ));
-    }
+    let client = match Client::new(r"\\.\pipe\MansonWindowsUnlockRustUnlock") {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(CustomResult::error(
+                Some(format!("pipe错误: {}", e)),
+                None,
+            ));
+        }
+    };
 
-    let client = client.unwrap();
     if let Err(e) = crate::utils::pipe::write(client.handle, String::from("exit")) {
         return Err(CustomResult::error(
             Some(format!("向客户端写入数据失败: {:?}", e)),
@@ -329,9 +498,12 @@ pub fn close_app(app_handle: AppHandle) -> Result<CustomResult, CustomResult> {
     Ok(CustomResult::success(None, None))
 }
 #[tauri::command]
-// 加载opencv模型
-pub fn load_opencv_model() -> Result<(), String> {
-    // 加载模型
+// 加载opencv模型，backend/target 对应 OpenCV DNN 后端 ID:
+//   (0,0)=CPU  (3,1)=OpenCL  (3,2)=OpenCL_FP16  (2,9)=Intel NPU(OpenVINO)
+pub fn load_opencv_model(backend: Option<i32>, target: Option<i32>) -> Result<(), String> {
+    let backend_id = backend.unwrap_or(0);
+    let target_id  = target.unwrap_or(0);
+
     let mut app_state = APP_STATE
         .lock()
         .map_err(|e| format!("获取app状态失败 {}", e))?;
@@ -341,16 +513,15 @@ pub fn load_opencv_model() -> Result<(), String> {
             .join("resources")
             .join("face_detection_yunet_2023mar.onnx");
 
-        // 这个不用检查文件是否存在，不存在opencv会报错
         let detector = FaceDetectorYN::create(
             resource_path.to_str().unwrap_or(""),
             "",
-            Size::new(320, 320), // 初始尺寸，后面会动态更新
+            Size::new(320, 320),
             0.9,
             0.3,
             5000,
-            0,
-            0,
+            backend_id,
+            target_id,
         )
         .map_err(|e| format!("初始化检测器模型失败: {:?}", e))?;
 
@@ -361,8 +532,13 @@ pub fn load_opencv_model() -> Result<(), String> {
         let resource_path = ROOT_DIR
             .join("resources")
             .join("face_recognition_sface_2021dec.onnx");
-        let recognizer = FaceRecognizerSF::create(resource_path.to_str().unwrap_or(""), "", 0, 0)
-            .map_err(|e| format!("初始化识别器模型失败: {:?}", e))?;
+        let recognizer = FaceRecognizerSF::create(
+            resource_path.to_str().unwrap_or(""),
+            "",
+            backend_id,
+            target_id,
+        )
+        .map_err(|e| format!("初始化识别器模型失败: {:?}", e))?;
 
         app_state.recognizer = Some(OpenCVResource { inner: recognizer });
     }
@@ -371,8 +547,14 @@ pub fn load_opencv_model() -> Result<(), String> {
         let resource_path = ROOT_DIR
             .join("resources")
             .join("face_liveness.onnx");
-        let liveness = opencv::dnn::read_net_from_onnx(resource_path.to_str().unwrap_or(""))
+        let mut liveness = opencv::dnn::read_net_from_onnx(resource_path.to_str().unwrap_or(""))
             .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?;
+        liveness
+            .set_preferable_backend(backend_id)
+            .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
+        liveness
+            .set_preferable_target(target_id)
+            .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
 
         app_state.liveness = Some(OpenCVResource { inner: liveness });
     }
@@ -483,11 +665,14 @@ fn try_open_camera_with_backend(
 
     Ok(cam)
 }
-// 获取windows所有摄像头
+// 枚举系统摄像头：逐索引探测，收集所有可用设备
 fn get_windows_video_devices() -> windows::core::Result<Vec<(String, u32)>> {
-    // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
-    // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
-
+    let mut devices = Vec::new();
+    for index in 0u32..8 {
+        if is_camera_index_valid(index).unwrap_or(false) {
+            devices.push((format!("Camera {}", index), index));
+        }
+    }
     Ok(devices)
 }
 
@@ -504,10 +689,57 @@ fn is_camera_index_valid(index: u32) -> opencv::Result<bool> {
     Ok(is_valid)
 }
 
-// 解锁屏幕
-pub fn unlock(user_name: String, password: String) -> windows::core::Result<()> {
-    // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
-    // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
+/// 重新启动 Unlock 核心服务（计划任务 + 健康检查确认）
+#[tauri::command]
+pub fn restart_unlock_service(task_name: String) -> Result<CustomResult, CustomResult> {
+    info!("正在重启 Unlock 核心服务，任务名: {}", task_name);
 
+    // 先检查 Unlock EXE 是否已经在运行
+    if check_process_running().is_ok() {
+        info!("Unlock 核心服务已在运行，无需重启");
+        return Ok(CustomResult::success(Some("already_running".to_string()), None));
+    }
+
+    // 执行 schtasks /Run 启动任务
+    let run_output = Command::new("schtasks")
+        .args(&["/Run", "/TN", &task_name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| CustomResult::error(Some(format!("执行 schtasks 失败: {}", e)), None))?;
+
+    if !run_output.status.success() {
+        let err_msg = fix_gbk_encoding(&run_output.stderr);
+        return Err(CustomResult::error(
+            Some(format!("启动计划任务失败: {}", err_msg)),
+            None,
+        ));
+    }
+
+    // 等待 Unlock EXE 启动（最多 8 秒）
+    for i in 1..=8 {
+        thread::sleep(Duration::from_secs(1));
+        if check_process_running().is_ok() {
+            info!("Unlock 核心服务已成功重启（耗时{}秒）", i);
+            return Ok(CustomResult::success(Some("restarted".to_string()), None));
+        }
+    }
+
+    Err(CustomResult::error(
+        Some("Unlock 核心服务启动超时，请检查计划任务配置".to_string()),
+        None,
+    ))
+}
+
+/// 向 Unlock EXE 的管道发送凭据（null 分隔格式）
+pub fn unlock(user_name: String, password: String) -> windows::core::Result<()> {
+    let creds = format!("{}\0{}\0.\0", user_name, password);
+    match super::pipe::Client::new(r"\\.\pipe\MansonWindowsUnlockRustUnlock") {
+        Ok(client) => {
+            let _ = super::pipe::write(client.handle, creds);
+        }
+        Err(_) => {
+            // Unlock EXE 未运行时静默失败
+        }
+    }
     Ok(())
 }

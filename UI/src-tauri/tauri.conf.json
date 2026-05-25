@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "facewinunlock-tauri",
-  "version": "0.3.2",
+  "version": "0.3.5",
   "identifier": "com.administrator.facewinunlock-tauri",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -35,12 +35,13 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "E:/Code/Tauri/OpenSource/FaceWinUnlock-Tauri/Server/build/FaceWinUnlock-Tauri.dll": "resources/FaceWinUnlock-Tauri.dll",
-      "E:/Code/Rust/3rdparty/opencv/install/x64/vc17/bin/opencv_world4120.dll": "opencv_world4120.dll",
-      "E:/Code/Rust/Learn/opencv_rs/data/onnx/face_detection_yunet_2023mar.onnx": "resources/face_detection_yunet_2023mar.onnx",
-      "E:/Code/Rust/Learn/opencv_rs/data/onnx/face_recognition_sface_2021dec.onnx": "resources/face_recognition_sface_2021dec.onnx",
-      "E:/Code/Rust/Learn/opencv_rs/data/onnx/face_liveness_2_982_.onnx": "resources/face_liveness.onnx",
-      "E:/Code/Tauri/OpenSource/FaceWinUnlock-Tauri/Unlock/target/release/Unlock.exe": "FaceWinUnlock-Server.exe"
+      "../../target/release/FaceWinUnlock_Tauri.dll": "resources/FaceWinUnlock-Tauri.dll",
+      "../../target/release/FaceWinUnlock-Server.exe": "FaceWinUnlock-Server.exe",
+      "D:\\OpenCV\\build\\x64\\vc16\\bin\\opencv_world490.dll": "opencv_world490.dll",
+      "D:\\OpenCV\\build\\x64\\vc16\\bin\\opencv_videoio_ffmpeg490_64.dll": "opencv_videoio_ffmpeg490_64.dll",
+      "../resources/face_detection_yunet_2023mar.onnx": "resources/face_detection_yunet_2023mar.onnx",
+      "../resources/face_recognition_sface_2021dec.onnx": "resources/face_recognition_sface_2021dec.onnx",
+      "../resources/face_liveness.onnx": "resources/face_liveness.onnx"
     },
     "windows": {
       "nsis": {

@@ -4,23 +4,36 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import router from "./router";
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
+import 'element-plus/theme-chalk/dark/css-vars.css'
 import { createPinia } from 'pinia'
 import { useFile } from "./hook/useFile";
 import { warn } from "@tauri-apps/plugin-log";
 import { formatObjectString } from "./utils/function";
+import i18n from "./i18n";
+import { useTheme } from "./hook/useTheme";
 
 const pinia = createPinia()
 const app = createApp(App)
 const { read } = useFile();
+
+// Element Plus 国际化
+import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
+import en from 'element-plus/dist/locale/en.mjs'
+const elLocale = (i18n.global.locale.value === 'en') ? en : zhCn
 
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
   app.component(key, component)
 }
 
 app.use(router)
-app.use(ElementPlus)
+app.use(ElementPlus, { locale: elLocale })
 app.use(pinia)
+app.use(i18n)
 app.mount("#app");
+
+// 初始化暗色模式（#92）
+const { initTheme } = useTheme();
+initTheme();
 
 // 面容列表图片自定义指令
 const handleFaceImage = async (el, binding) => {

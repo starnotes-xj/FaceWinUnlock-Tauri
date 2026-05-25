@@ -1,11 +1,22 @@
 // 引入必要的同步原语和Win32 API
 use std::sync::{Arc, Mutex};
 use windows::Win32::{
-    Foundation::{ERROR_NOT_READY, E_NOTIMPL, STATUS_SUCCESS}, Graphics::Gdi::HBITMAP, Security::Credentials::{CredPackAuthenticationBufferW, CRED_PACK_FLAGS}, System::Com::CoTaskMemAlloc, UI::Shell::{
-        ICredentialProviderCredential, ICredentialProviderCredentialEvents, ICredentialProviderCredential_Impl, CPFIS_NONE, CPFS_DISPLAY_IN_BOTH, CPGSR_RETURN_CREDENTIAL_FINISHED, CPSI_ERROR, CPSI_NONE, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION, CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE, CREDENTIAL_PROVIDER_FIELD_STATE, CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE, CREDENTIAL_PROVIDER_STATUS_ICON
+    Foundation::{E_NOTIMPL, STATUS_SUCCESS},
+    Graphics::Gdi::HBITMAP,
+    Security::Credentials::{CredPackAuthenticationBufferW, CRED_PACK_PROTECTED_CREDENTIALS},
+    System::Com::{CoTaskMemAlloc, CoTaskMemFree},
+    UI::Shell::{
+        ICredentialProviderCredential, ICredentialProviderCredentialEvents,
+        ICredentialProviderCredential_Impl, CPFIS_NONE, CPFS_DISPLAY_IN_BOTH,
+        CPGSR_NO_CREDENTIAL_NOT_FINISHED, CPGSR_NO_CREDENTIAL_FINISHED,
+        CPGSR_RETURN_CREDENTIAL_FINISHED, CPSI_ERROR,
+        CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION, CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE,
+        CREDENTIAL_PROVIDER_FIELD_STATE, CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE,
+        CREDENTIAL_PROVIDER_STATUS_ICON
     }
 };
-use windows_core::{implement, BOOL, PCWSTR, PWSTR};
+use windows_core::{implement, PCWSTR, PWSTR};
+use windows::Win32::Foundation::BOOL;
 use crate::{CLSID_SampleProvider, SharedCredentials};
 
 /// 凭据实现类，代表登录界面上的一个磁贴
@@ -179,27 +190,140 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
 
     /// 序列化凭据信息（登录时调用）
     fn GetSerialization(
-        &self, 
-        pcpgsr: *mut CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE, 
-        pcpcs: *mut CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION, 
-        _ppszoptionalstatustext: *mut PWSTR, 
-        _pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON
+        &self,
+        pcpgsr: *mut CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE,
+        pcpcs: *mut CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION,
+        _ppszoptionalstatustext: *mut PWSTR,
+        _pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON,
     ) -> windows_core::Result<()> {
-        // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
-        // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
+        let creds = self.shared_creds.lock().unwrap();
+
+        if !creds.is_ready {
+            unsafe { *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED; }
+            return Ok(());
+        }
+
+        info!("SampleCredential::GetSerialization - 开始序列化凭据");
+
+        // 本地账户使用 ".\username"，域账户使用 "domain\username"
+        let qualified_user = if creds.domain.is_empty() || creds.domain == "." {
+            creds.username.clone()
+        } else {
+            format!("{}\\{}", creds.domain, creds.username)
+        };
+
+        let user_wide = to_wide_vec(&qualified_user);
+        let pwd_wide  = to_wide_vec(&creds.password);
+
+        // 第一次调用：查询所需缓冲区大小（预期返回 ERROR_INSUFFICIENT_BUFFER）
+        let mut cb_packed = 0u32;
+        unsafe {
+            let _ = CredPackAuthenticationBufferW(
+                CRED_PACK_PROTECTED_CREDENTIALS,
+                PCWSTR::from_raw(user_wide.as_ptr()),
+                PCWSTR::from_raw(pwd_wide.as_ptr()),
+                None,
+                &mut cb_packed,
+            );
+        }
+
+        if cb_packed == 0 {
+            error!("SampleCredential::GetSerialization - 无法获取缓冲区大小");
+            unsafe { *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED; }
+            // 凭据打包失败，重置标志防止死循环
+            drop(creds);
+            self.shared_creds.lock().unwrap().is_unlocked = false;
+            return Ok(());
+        }
+
+        // 分配输出缓冲区（Windows 负责释放）
+        let buf = unsafe { CoTaskMemAlloc(cb_packed as usize) as *mut u8 };
+        if buf.is_null() {
+            error!("SampleCredential::GetSerialization - 内存分配失败");
+            unsafe { *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED; }
+            drop(creds);
+            self.shared_creds.lock().unwrap().is_unlocked = false;
+            return Ok(());
+        }
+
+        // 第二次调用：实际打包凭据
+        let pack_result = unsafe {
+            CredPackAuthenticationBufferW(
+                CRED_PACK_PROTECTED_CREDENTIALS,
+                PCWSTR::from_raw(user_wide.as_ptr()),
+                PCWSTR::from_raw(pwd_wide.as_ptr()),
+                Some(buf),
+                &mut cb_packed,
+            )
+        };
+
+        if let Err(e) = pack_result {
+            error!("SampleCredential::GetSerialization - CredPackAuthenticationBufferW 失败: {:?}", e);
+            unsafe {
+                CoTaskMemFree(Some(buf as *mut _));
+                *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
+            }
+            drop(creds);
+            self.shared_creds.lock().unwrap().is_unlocked = false;
+            return Ok(());
+        }
+
+        // 凭据打包成功，重置 is_unlocked 标志（#112 修复：延迟重置防止 UAC 竞态）
+        drop(creds);
+        {
+            let mut s = self.shared_creds.lock().unwrap();
+            s.is_unlocked = false;
+        }
+
+        unsafe {
+            (*pcpcs).ulAuthenticationPackage = self.auth_package_id;
+            (*pcpcs).cbSerialization         = cb_packed;
+            (*pcpcs).rgbSerialization        = buf;
+            (*pcpcs).clsidCredentialProvider = CLSID_SampleProvider;
+            *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
+        }
+
+        info!("SampleCredential::GetSerialization - 凭据序列化完成，用户: {}", qualified_user);
         Ok(())
     }
 
     /// 报告登录结果
     fn ReportResult(
-        &self, 
-        ntsstatus: windows::Win32::Foundation::NTSTATUS, 
-        _ntssubstatus: windows::Win32::Foundation::NTSTATUS, 
-        ppszoptionalstatustext: *mut PWSTR, 
-        pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON
+        &self,
+        ntsstatus: windows::Win32::Foundation::NTSTATUS,
+        _ntssubstatus: windows::Win32::Foundation::NTSTATUS,
+        ppszoptionalstatustext: *mut PWSTR,
+        pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON,
     ) -> windows_core::Result<()> {
-        // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
-        // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
+        if ntsstatus == STATUS_SUCCESS {
+            info!("SampleCredential::ReportResult - 登录成功");
+            return Ok(());
+        }
+
+        // 登录失败：清除凭据，防止 Windows 持续用错误凭据重试 (#102)
+        error!("SampleCredential::ReportResult - 登录失败，NTSTATUS: {:#010X}", ntsstatus.0);
+        {
+            let mut creds = self.shared_creds.lock().unwrap();
+            creds.username.clear();
+            creds.password.clear();
+            creds.is_ready = false;
+            creds.is_unlocked = false;
+        }
+
+        unsafe {
+            if !ppszoptionalstatustext.is_null() {
+                let msg = "用户名或密码错误，请检查设置";
+                let wide: Vec<u16> = msg.encode_utf16().chain(Some(0)).collect();
+                let ptr = CoTaskMemAlloc(wide.len() * 2) as *mut u16;
+                if !ptr.is_null() {
+                    std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+                    *ppszoptionalstatustext = PWSTR(ptr);
+                }
+            }
+            if !pcpsioptionalstatusicon.is_null() {
+                *pcpsioptionalstatusicon = CPSI_ERROR;
+            }
+        }
         Ok(())
     }
 }

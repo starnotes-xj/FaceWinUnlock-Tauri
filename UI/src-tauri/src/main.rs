@@ -18,9 +18,9 @@ fn set_dir_permissions(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>>
         ).map_err(|e| format!("安全描述符转换失败：{}", e))?;
 
         // 提取DACL
-        let mut dacl_present: BOOL = BOOL::from(false);
+        let mut dacl_present: windows::Win32::Foundation::BOOL = windows::Win32::Foundation::BOOL::from(false);
         let mut dacl: *mut ACL = std::ptr::null_mut();
-        let mut dacl_defaulted: BOOL = BOOL::from(false);
+        let mut dacl_defaulted: windows::Win32::Foundation::BOOL = windows::Win32::Foundation::BOOL::from(false);
 
         GetSecurityDescriptorDacl(
             security_descriptor, // DACL指针

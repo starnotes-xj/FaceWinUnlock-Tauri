@@ -48,10 +48,20 @@
     const isEditMode = computed(() => route.query.mode === 'edit');
     const targetId = route.query.id;
 
+    // 推理后端名称到 OpenCV DNN backend/target ID 的映射
+    const INFERENCE_BACKEND_MAP: Record<string, { backend: number; target: number }> = {
+        'cpu':         { backend: 0, target: 0 },
+        'opencl':      { backend: 3, target: 1 },
+        'opencl_fp16': { backend: 3, target: 2 },
+        'intel_npu':   { backend: 2, target: 9 },
+    };
+
     onMounted(async () => {
         const loadingInstance = ElLoading.service({ fullscreen: true })
         try {
-            await invoke('load_opencv_model');
+            const backendKey = optionsStore.getOptionValueByKey('inferenceBackend') || 'cpu';
+            const { backend, target } = INFERENCE_BACKEND_MAP[backendKey] ?? { backend: 0, target: 0 };
+            await invoke('load_opencv_model', { backend, target });
         } catch (error) {
             loadingInstance.close();
             ElMessage.error(formatObjectString("加载OpenCV模型失败：", error));
@@ -190,8 +200,9 @@
                 }
             }
 
-            // 暂停100ms
-            await new Promise(resolve => setTimeout(resolve, 100));
+            // 帧间延迟：验证模式33ms（~30fps），录入模式50ms（~20fps）（#121）
+            const frameDelay = verificationMode.value ? 33 : 50;
+            await new Promise(resolve => setTimeout(resolve, frameDelay));
 
             // 继续下一帧
             requestAnimationFrame(streamLoop);
@@ -405,7 +416,7 @@
                                 </el-icon>
                                 <p>待录入面容</p>
                             </div>
-                            <img v-else :src="capturedImage" class="result-img" />
+                            <img v-else :src="capturedImage" class="result-img" :class="{ 'mirrored': isCameraStreaming }" />
                         </div>
 
                         <div v-if="verificationMode" class="screen-box secondary-screen">
@@ -416,7 +427,7 @@
                                     <Loading />
                                 </el-icon>
                             </div>
-                            <img v-else :src="verifyingStreamImage" class="result-img" />
+                            <img v-else :src="verifyingStreamImage" class="result-img mirrored" />
                             <div class="confidence-tag" :class="matchConfidence > (threshold) ? 'match' : 'mismatch'">
                                 <template v-if="matchConfidence > 0">
                                     <span v-if="matchConfidence > (threshold)">匹配成功</span>
@@ -556,6 +567,10 @@
         object-fit: contain;
         filter: drop-shadow(0 0 8px rgba(0, 242, 255, 0.2));
         border: 1px solid #333;
+    }
+
+    .mirrored {
+        transform: scaleX(-1);
     }
 
     .placeholder-content {

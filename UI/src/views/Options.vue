@@ -45,6 +45,8 @@
 		notFaceDelay: parseFloat(optionsStore.getOptionValueByKey('notFaceDelay')) || 3,
 		// 是否开机面容识别
 		isAutoFaceRecogOnStart: false,
+		// 推理后端
+		inferenceBackend: optionsStore.getOptionValueByKey('inferenceBackend') || 'cpu',
 		// 活体检测的配置
 		livenessEnabled: optionsStore.getOptionValueByKey('livenessEnabled') ? (optionsStore.getOptionValueByKey('livenessEnabled') == 'false' ? false : true) : false,
 		livenessThreshold: parseFloat(optionsStore.getOptionValueByKey('livenessThreshold')) || 0.50,
@@ -52,12 +54,16 @@
 		// 登录安全
 		loginEnabled: optionsStore.getOptionValueByKey('loginEnabled') ? (optionsStore.getOptionValueByKey('loginEnabled') == 'false' ? false : true) : false,
 		loginPassword: optionsStore.getOptionValueByKey('loginPassword') || '',
-		loginMethod: optionsStore.getOptionValueByKey('loginMethod') || 'onlyOpenApp'
+		loginMethod: optionsStore.getOptionValueByKey('loginMethod') || 'onlyOpenApp',
+		// 自动锁屏
+		autoLockEnabled: optionsStore.getOptionValueByKey('autoLockEnabled') ? (optionsStore.getOptionValueByKey('autoLockEnabled') == 'false' ? false : true) : false,
+		autoLockTimeout: parseInt(optionsStore.getOptionValueByKey('autoLockTimeout')) || 300,
 	})
 	checkAutoFaceRecogOnStart(null);
 
 	const dllConfig = reactive({
-		showTile: optionsStore.getOptionValueByKey('showTile') ? (optionsStore.getOptionValueByKey('showTile') == 'false' ? false : true) : true
+		showTile: optionsStore.getOptionValueByKey('showTile') ? (optionsStore.getOptionValueByKey('showTile') == 'false' ? false : true) : true,
+		unlockScene: (optionsStore.getOptionValueByKey('unlockScene') || '1,2,4').split(',').map((s: string) => s.trim()).filter(Boolean)
 	})
 
 	const refreshCameraList = ()=>{
@@ -144,12 +150,15 @@
 			silentRun: config.silentRun,
 			retryDelay: config.retryDelay,
 			notFaceDelay: isNaN(parseInt(config.notFaceDelay)) ? "3" : String(parseInt(config.notFaceDelay)),
+			inferenceBackend: config.inferenceBackend,
 			livenessEnabled: config.livenessEnabled,
 			livenessThreshold: config.livenessThreshold,
 			faceAlignedType: config.faceAlignedType,
 			loginEnabled: config.loginEnabled ? "true" : "false",
 			loginPassword: config.loginPassword,
-			loginMethod: config.loginMethod
+			loginMethod: config.loginMethod,
+			autoLockEnabled: config.autoLockEnabled ? "true" : "false",
+			autoLockTimeout: String(config.autoLockTimeout),
 		}).then((errorArray)=>{
 			if(errorArray.length > 0){
 				ElMessage.warning({
@@ -170,10 +179,15 @@
 			{
 				key: "SHOW_TILE",
 				value: dllConfig.showTile ? "1" : "0"
+			},
+			{
+				key: "UNLOCK_SCENE",
+				value: dllConfig.unlockScene.join(',')
 			}
 		]}).then(()=>{
 			return optionsStore.saveOptions({
-				showTile: dllConfig.showTile
+				showTile: dllConfig.showTile,
+				unlockScene: dllConfig.unlockScene.join(',')
 			})
 		}).then((errorArray)=>{
 			if(errorArray.length > 0){
@@ -441,14 +455,25 @@
 											</template>
 											<el-option v-for="item in cameraList" :key="item.capture_index" :value="item.capture_index" :label="item.camera_name" :disabled="!item.is_valid"/>
 										</el-select>
-										<el-button 
-											:icon="Refresh" 
+										<el-button
+											:icon="Refresh"
 											class="refresh-camera-btn"
 											title="刷新采集设备列表"
 											:loading="cameraListLoading"
 											@click="refreshCameraList"
 										/>
 									</div>
+								</el-form-item>
+								<el-form-item label="推理后端">
+									<el-select v-model="config.inferenceBackend" style="width: 100%">
+										<el-option value="cpu" label="CPU（默认，兼容所有设备）"/>
+										<el-option value="opencl" label="GPU - OpenCL（需要支持 OpenCL 的显卡）"/>
+										<el-option value="opencl_fp16" label="GPU - OpenCL FP16（更快，支持 FP16 的显卡）"/>
+										<el-option value="intel_npu" label="Intel NPU（需要安装 OpenVINO 运行时）"/>
+									</el-select>
+									<p style="font-size: 12px; color: #909399; margin: 6px 0 0 0;">
+										更改后需重新录入人脸或重启识别服务生效。OpenCL/NPU 若加载失败会在录入时报错，请切回 CPU。
+									</p>
 								</el-form-item>
 							</el-form>
 						</el-collapse-item>
@@ -608,6 +633,22 @@
 								</div>
 							</template>
 						</el-collapse-item>
+						<el-collapse-item title="自动锁屏" name="5">
+							<div class="option-row">
+								<div class="row-text">
+									<p class="label">启用自动锁屏</p>
+									<p class="sub">鼠标键盘闲置超时后，通过摄像头核验当前使用者，若不是授权人员则自动锁屏</p>
+								</div>
+								<el-switch v-model="config.autoLockEnabled" />
+							</div>
+							<div class="option-row" style="margin-top: 12px;">
+								<div class="row-text">
+									<p class="label">闲置超时</p>
+									<p class="sub">鼠标键盘无操作的秒数（默认 300 = 5分钟）</p>
+								</div>
+								<el-input-number v-model="config.autoLockTimeout" :min="30" :max="3600" :step="30" style="width: 140px"/>
+							</div>
+						</el-collapse-item>
 					</el-collapse>
 					
 				</div>
@@ -625,6 +666,21 @@
 								<p class="sub">在 Windows 锁屏界面显示解锁磁贴</p>
 							</div>
 							<el-switch v-model="dllConfig.showTile" />
+						</div>
+						<div style="padding: 16px 0; border-bottom: 1px solid #f2f6fc;">
+							<div class="row-text" style="margin-bottom: 12px;">
+								<p class="label">面容识别场景</p>
+								<p class="sub">
+									选择哪些场景下启用面容解锁。<br />
+									UAC / 应用层：支持浏览器查看存储密码、UAC 弹窗等场景，
+									<strong>不支持</strong>通行密钥创建时要求的 PIN（该场景为系统 TPM 验证，与密码登录无关）。
+								</p>
+							</div>
+							<el-checkbox-group v-model="dllConfig.unlockScene" style="display: flex; flex-direction: column; gap: 8px;">
+								<el-checkbox label="1">登录（开机登录界面）</el-checkbox>
+								<el-checkbox label="2">解锁（锁屏解锁界面）</el-checkbox>
+								<el-checkbox label="4">UAC / 应用层（浏览器查看密码、UAC 验证等）</el-checkbox>
+							</el-checkbox-group>
 						</div>
 					</div>
 				</div>
