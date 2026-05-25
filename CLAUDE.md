@@ -145,6 +145,7 @@ Files in `Server/src/`:
 | [#91](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/91) | 解锁磁贴优化 | 自有磁贴 `CPFT_LARGE_TEXT` 改为 `CPFT_SMALL_TEXT`（更小巧/状态指示器风格），标签文字精简为"面容解锁"；在用户账户磁贴上添加标记无法实现（Windows 凭据提供程序架构限制：一个 Provider 不能修改另一个的磁贴） |
 | [#94](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/94) | NVIDIA Broadcast 虚拟摄像头无法工作 | `try_open_camera_with_backend` 和 Unlock EXE 摄像头打开处设置默认 640×480 帧尺寸 + 10 帧预热，解决虚拟摄像头输出异常分辨率/格式导致的花屏或黑帧问题 |
 | [#103](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/103) | 面容被禁用后进行"虚空"登录 | Unlock EXE `load_face_records` 过滤 `view=false`（禁用）和 `lock=true`（锁定）的面容；DLL Creds 线程拒绝空用户名凭据 |
+| [#104](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/104) | 支持域账户登录 | `AccountAuthForm` 新增"域账户"类型 + 域名输入框；Unlock EXE `JsonData`/`FaceRecord` 新增 `domain` 字段，管道凭据组装用实际域名替代硬编码 `"."` |
 
 ### Registry Keys
 

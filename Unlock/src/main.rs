@@ -62,8 +62,8 @@ struct State {
     run_requested:    AtomicBool,
     /// DLL 在 MansonWindowsUnlockRustUnlock 上等待凭据的连接句柄（raw isize）
     dll_creds_pipe:   AtomicIsize,
-    /// 人脸匹配到的 (username, password)
-    matched_creds:    Mutex<Option<(String, String)>>,
+    /// 人脸匹配到的 (username, password, domain)
+    matched_creds:    Mutex<Option<(String, String, String)>>,
     /// 上一次用户活跃的时间戳（Unix 秒），用于自动锁屏
     last_user_active: AtomicI64,
 }
@@ -89,6 +89,7 @@ struct FaceRecord {
     user_pwd:   String,
     face_token: String,
     threshold:  i64,   // 0~100，对应余弦相似度
+    domain:     String,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +97,7 @@ struct JsonData {
     threshold: Option<i64>,
     view: Option<bool>,
     lock: Option<bool>,
+    domain: Option<String>,
 }
 
 // HANDLE wraps *mut c_void which is not Send; safe because it's just a numeric handle
@@ -233,8 +235,8 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
         loop {
             if state.should_exit.load(Ordering::SeqCst) { break; }
             let creds = state.matched_creds.lock().unwrap().take();
-            if let Some((username, password)) = creds {
-                let payload = format!("{}\0{}\0.\0", username, password);
+            if let Some((username, password, domain)) = creds {
+                let payload = format!("{}\0{}\0{}\0", username, password, domain);
                 let _ = pipe_write(pipe, payload.as_bytes());
                 break;
             }
@@ -277,7 +279,8 @@ fn load_face_records(db_path: &Path) -> Vec<FaceRecord> {
                     return None;
                 }
                 let thr = json.threshold.unwrap_or(60);
-                Some(FaceRecord { user_name: u, user_pwd: p, face_token: t, threshold: thr })
+                let dm = json.domain.unwrap_or_else(|| ".".to_string());
+                Some(FaceRecord { user_name: u, user_pwd: p, face_token: t, threshold: thr, domain: dm })
             })
             .collect()
     })
@@ -443,7 +446,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
         // 轮询 test_creds.tmp（UI 测试模式）
         if let Some((user, pwd)) = check_test_creds(&exe_dir) {
-            *state.matched_creds.lock().unwrap() = Some((user, pwd));
+            *state.matched_creds.lock().unwrap() = Some((user, pwd, ".".to_string()));
             // 等待 DLL 消费（最多 30s）
             for _ in 0..300 {
                 thread::sleep(Duration::from_millis(100));
@@ -520,7 +523,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 let score = cosine_sim(&cam_bytes, &stored_bytes);
                 let threshold = rec.threshold as f64 / 100.0;
                 if score >= threshold {
-                    *state.matched_creds.lock().unwrap() = Some((rec.user_name.clone(), rec.user_pwd.clone()));
+                    *state.matched_creds.lock().unwrap() = Some((rec.user_name.clone(), rec.user_pwd.clone(), rec.domain.clone()));
                     // 更新活跃时间：人脸识别成功说明用户在
                     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
                     state.last_user_active.store(now, Ordering::SeqCst);

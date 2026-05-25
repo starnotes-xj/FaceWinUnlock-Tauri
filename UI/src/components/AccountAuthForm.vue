@@ -103,22 +103,32 @@
     <div class="account-auth-container">
         <el-form :model="formData" label-position="top" class="auth-form">
             <el-form-item label="账户类型">
-                <el-select 
+                <el-select
                     v-model = "formData.accountType"
                     @focus="handleFocus"
                     @change="showModifyWarning('accountType')"
-                    placeholder="请选择账户类型" 
+                    placeholder="请选择账户类型"
                     style="width: 100%"
                 >
                     <el-option label="本地账户 (Local Account)" value="local" />
                     <el-option label="联机账户 (Microsoft Account)" value="online" />
+                    <el-option label="域账户 (Domain Account)" value="domain" />
                 </el-select>
             </el-form-item>
 
-            <el-form-item :label="formData.accountType === 'local' ? 'Windows 用户名' : '微软账号 Email'">
-                <el-input v-model="formData.username" :placeholder="formData.accountType === 'local' ? '例如: Administrator' : '例如: user@outlook.com'" @focus="handleFocus" @blur="handleBlur('username')">
-                    <template v-if="formData.accountType === 'local'" #prefix>
-                        <span style="padding-left: 5px; color: #409EFF; font-weight: bold;">.\</span>
+            <!-- 域账户：域名输入 -->
+            <el-form-item v-if="formData.accountType === 'domain'" label="域名称">
+                <el-input v-model="formData.domain" placeholder="例如: CORP">
+                    <template #prefix>
+                        <span style="padding-left: 5px; color: #409EFF; font-weight: bold;">\</span>
+                    </template>
+                </el-input>
+            </el-form-item>
+
+            <el-form-item :label="formData.accountType === 'local' ? 'Windows 用户名' : formData.accountType === 'domain' ? '域用户名' : '微软账号 Email'">
+                <el-input v-model="formData.username" :placeholder="formData.accountType === 'local' ? '例如: Administrator' : formData.accountType === 'domain' ? '例如: jdoe' : '例如: user@outlook.com'" @focus="handleFocus" @blur="handleBlur('username')">
+                    <template v-if="formData.accountType === 'local' || formData.accountType === 'domain'" #prefix>
+                        <span style="padding-left: 5px; color: #409EFF; font-weight: bold;">{{ formData.accountType === 'domain' && formData.domain ? formData.domain + '\\' : '.\\' }}</span>
                     </template>
                 </el-input>
             </el-form-item>
