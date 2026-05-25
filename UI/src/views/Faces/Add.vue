@@ -163,9 +163,10 @@
         if (!isLoopRunning) return;
 
         try {
+            const cameraRotation = parseInt(optionsStore.getOptionValueByKey('cameraRotation')) || 0;
             if(!verificationMode.value){
                 // 面容录入
-                const res = await invoke('check_face_from_camera', {faceDetectionThreshold: getFaceDetectionThresholdValue()});
+                const res = await invoke('check_face_from_camera', {faceDetectionThreshold: getFaceDetectionThresholdValue(), cameraRotation});
                 if(res.data.display_base64 === "未检测到人脸"){
                     capturedImage.value = res.data.raw_base64;
                     rawImageForSystem = "";
@@ -175,12 +176,13 @@
                 }
             } else {
                 // 一致性对比
-                const res = await invoke('verify_face', { 
-                    referenceBase64: rawImageForSystem.split(',')[1], 
+                const res = await invoke('verify_face', {
+                    referenceBase64: rawImageForSystem.split(',')[1],
                     faceDetectionThreshold: getFaceDetectionThresholdValue(),
                     livenessEnabled: optionsStore.getOptionValueByKey('livenessEnabled') ? (optionsStore.getOptionValueByKey('livenessEnabled') == 'false' ? false : true) : false,
                     livenessThreshold: parseFloat(optionsStore.getOptionValueByKey('livenessThreshold')) || 0.50,
                     faceAlignedType: optionsStore.getOptionValueByKey('faceAlignedType') || 'default',
+                    cameraRotation,
                 });
                 if(res.data.display_base64) {
                     verifyingStreamImage.value = res.data.display_base64;

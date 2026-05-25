@@ -332,6 +332,72 @@ fn detect_and_extract(models: &mut Models, frame: &Mat) -> Option<Mat> {
     Some(feature)
 }
 
+// ─── Screen brightness ───────────────────────────────────────────────────────
+
+/// 从 SQLite 读取解锁亮度目标值（0 = 不调节，1-100 = 目标亮度）
+fn load_unlock_brightness(db_path: &Path) -> u8 {
+    let conn = match Connection::open(db_path) { Ok(c) => c, Err(_) => return 0 };
+    if let Ok(mut stmt) = conn.prepare("SELECT val FROM options WHERE key = 'unlockBrightness'") {
+        if let Ok(val) = stmt.query_row([], |row| row.get::<_, String>(0)) {
+            return val.parse::<u8>().unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// 获取当前屏幕亮度（仅支持笔记本内置屏）
+fn get_brightness() -> Option<u8> {
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile", "-NonInteractive", "-Command",
+            "(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightness \
+             -ErrorAction SilentlyContinue | Select-Object -First 1).CurrentBrightness",
+        ])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse::<u8>().ok()
+}
+
+/// 设置屏幕亮度（0-100，仅支持笔记本内置屏）
+fn set_brightness(level: u8) {
+    let cmd = format!(
+        "Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods \
+         -ErrorAction SilentlyContinue | ForEach-Object {{ $_.WmiSetBrightness(1, {}) }}",
+        level
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
+        .output();
+}
+
+// ─── Camera rotation ─────────────────────────────────────────────────────────
+
+fn load_camera_rotation(db_path: &Path) -> i32 {
+    let conn = match Connection::open(db_path) { Ok(c) => c, Err(_) => return 0 };
+    if let Ok(mut stmt) = conn.prepare("SELECT val FROM options WHERE key = 'cameraRotation'") {
+        if let Ok(val) = stmt.query_row([], |row| row.get::<_, String>(0)) {
+            return val.parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// 旋转帧（rotation: 0/90/180/270）
+fn rotate_frame(frame: &Mat, rotation: i32) -> Option<Mat> {
+    if rotation == 0 {
+        return frame.try_clone().ok();
+    }
+    let code = match rotation {
+        90  => opencv::core::ROTATE_90_CLOCKWISE,
+        180 => opencv::core::ROTATE_180,
+        270 => opencv::core::ROTATE_90_COUNTERCLOCKWISE,
+        _   => return frame.try_clone().ok(),
+    };
+    let mut rotated = Mat::default();
+    opencv::core::rotate(frame, &mut rotated, code).ok()?;
+    Some(rotated)
+}
+
 // ─── Test-creds file ──────────────────────────────────────────────────────────
 
 fn check_test_creds(exe_dir: &Path) -> Option<(String, String)> {
@@ -356,6 +422,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let mut cam: Option<VideoCapture> = None;
     let mut records: Vec<FaceRecord> = vec![];
     let mut last_reload = Instant::now() - Duration::from_secs(60);
+    let mut camera_rotation = load_camera_rotation(&db_path);
+    let mut unlock_brightness = load_unlock_brightness(&db_path);
 
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -378,9 +446,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         }
         state.run_requested.store(false, Ordering::SeqCst);
 
-        // 定期重新加载人脸记录
+        // 定期重新加载人脸记录和配置
         if last_reload.elapsed() > Duration::from_secs(30) {
             records = load_face_records(&db_path);
+            camera_rotation = load_camera_rotation(&db_path);
+            unlock_brightness = load_unlock_brightness(&db_path);
             last_reload = Instant::now();
         }
         if records.is_empty() { continue; }
@@ -400,6 +470,15 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         }
         let cap = match cam.as_mut() { Some(c) => c, None => continue };
 
+        // 解锁前提升屏幕亮度（仅笔记本内置屏），识别结束后恢复
+        let saved_brightness = if unlock_brightness > 0 {
+            let orig = get_brightness();
+            set_brightness(unlock_brightness);
+            orig
+        } else {
+            None
+        };
+
         // 识别循环（最多 60 帧 ≈ 5~10 秒）
         let mut matched = false;
         for _ in 0..60 {
@@ -411,6 +490,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }
+            let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
 
             let cam_feat = match detect_and_extract(&mut models, &frame) {
                 Some(f) => f,
@@ -434,6 +514,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             }
             if matched { break; }
             thread::sleep(Duration::from_millis(80));
+        }
+
+        // 识别结束，恢复原始亮度
+        if let Some(orig) = saved_brightness {
+            set_brightness(orig);
         }
     }
 }
@@ -486,6 +571,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
     let mut models: Option<Models> = None;
     let mut records: Vec<FaceRecord> = vec![];
     let mut last_record_reload = Instant::now() - Duration::from_secs(60);
+    let mut camera_rotation = load_camera_rotation(&db_path);
 
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -496,6 +582,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             let (enabled, timeout) = load_auto_lock_settings(&db_path);
             auto_lock_enabled = enabled;
             auto_lock_timeout = timeout;
+            camera_rotation = load_camera_rotation(&db_path);
             last_config_check = Instant::now();
         }
 
@@ -550,6 +637,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }
+            let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
 
             if let Some(feat) = detect_and_extract(models, &frame) {
                 let cam_bytes = feature_to_bytes(&feat);

@@ -24,6 +24,23 @@ static VERIFY_CACHE: std::sync::LazyLock<Mutex<Option<VerificationCache>>> =
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
+/// 旋转帧（rotation: 0/90/180/270，270 等同逆时针 90°）
+fn rotate_frame(frame: &Mat, rotation: i32) -> Result<Mat, String> {
+    if rotation == 0 {
+        return frame.try_clone().map_err(|e| e.to_string());
+    }
+    let code = match rotation {
+        90  => opencv::core::ROTATE_90_CLOCKWISE,
+        180 => opencv::core::ROTATE_180,
+        270 => opencv::core::ROTATE_90_COUNTERCLOCKWISE,
+        _   => return frame.try_clone().map_err(|e| e.to_string()),
+    };
+    let mut rotated = Mat::default();
+    opencv::core::rotate(frame, &mut rotated, code)
+        .map_err(|e| format!("旋转帧失败: {:?}", e))?;
+    Ok(rotated)
+}
+
 fn mat_to_data_url(frame: &Mat) -> Result<String, String> {
     let params = Vector::<i32>::new();
     let mut buf = Vector::<u8>::new();
@@ -212,6 +229,7 @@ fn check_face_inner(frame: Mat, detection_threshold: f64) -> Result<CustomResult
 #[tauri::command]
 pub fn check_face_from_camera(
     face_detection_threshold: f64,
+    camera_rotation: i32,
 ) -> Result<CustomResult, CustomResult> {
     let frame = {
         let mut state = APP_STATE
@@ -230,6 +248,8 @@ pub fn check_face_from_camera(
         }
         f
     };
+    let frame = rotate_frame(&frame, camera_rotation)
+        .map_err(|e| CustomResult::error(Some(e), None))?;
     check_face_inner(frame, face_detection_threshold)
 }
 
@@ -347,6 +367,7 @@ pub fn verify_face(
     liveness_enabled: bool,
     liveness_threshold: f64,
     _face_aligned_type: String,
+    camera_rotation: i32,
 ) -> Result<CustomResult, CustomResult> {
     let threshold = face_detection_threshold as f32;
 
@@ -368,6 +389,8 @@ pub fn verify_face(
         }
         f
     };
+    let frame = rotate_frame(&frame, camera_rotation)
+        .map_err(|e| CustomResult::error(Some(e), None))?;
 
     // 2. 检测摄像头帧中的人脸
     let cam_faces = detect_faces(&frame, threshold)

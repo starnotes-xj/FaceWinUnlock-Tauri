@@ -37,6 +37,8 @@
 	checkServiceRunning(null);
 	const config = reactive({
 		camera: optionsStore.getOptionValueByKey('camera') || "-1",
+		cameraRotation: parseInt(optionsStore.getOptionValueByKey('cameraRotation')) || 0,
+		unlockBrightness: parseInt(optionsStore.getOptionValueByKey('unlockBrightness')) || 0,
 		autoStart: true,
 		faceRecogDelay: parseFloat(optionsStore.getOptionValueByKey('faceRecogDelay')) || 10.0,
 		faceRecogType: optionsStore.getOptionValueByKey('faceRecogType') || 'operation',
@@ -145,6 +147,8 @@
 
 		optionsStore.saveOptions({
 			camera: config.camera,
+			cameraRotation: String(config.cameraRotation),
+			unlockBrightness: String(config.unlockBrightness),
 			faceRecogDelay: config.faceRecogDelay,
 			faceRecogType: config.faceRecogType,
 			silentRun: config.silentRun,
@@ -463,6 +467,29 @@
 											@click="refreshCameraList"
 										/>
 									</div>
+								</el-form-item>
+								<el-form-item label="摄像头旋转">
+									<el-select v-model="config.cameraRotation" style="width: 100%">
+										<el-option :value="0" label="不旋转（默认）"/>
+										<el-option :value="90" label="顺时针 90°"/>
+										<el-option :value="180" label="旋转 180°"/>
+										<el-option :value="270" label="逆时针 90°"/>
+									</el-select>
+									<p style="font-size: 12px; color: #909399; margin: 6px 0 0 0;">
+										适用于笔记本侧放等摄像头朝向不正的场景，保存后录入人脸时实时生效。
+									</p>
+								</el-form-item>
+								<el-form-item label="解锁时屏幕亮度">
+									<el-input-number
+										v-model="config.unlockBrightness"
+										:min="0"
+										:max="100"
+										:step="10"
+										style="width: 140px;"
+									/>
+									<p style="font-size: 12px; color: #909399; margin: 6px 0 0 0;">
+										面容识别期间临时提升屏幕亮度，完成后自动恢复。0 = 不调节；建议 80~100 以改善弱光下解锁成功率。仅支持笔记本内置屏（外接显示器无效）。
+									</p>
 								</el-form-item>
 								<el-form-item label="推理后端">
 									<el-select v-model="config.inferenceBackend" style="width: 100%">
