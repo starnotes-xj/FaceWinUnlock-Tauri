@@ -602,9 +602,11 @@ unsafe fn render_base(
         );
     }
 
-    // 3. 弧线文字
-    let text_rot = (elapsed_secs as f32 / text_period * 360.0) % 360.0;
-    render_arc_text(ctx, res, text, text_rot)?;
+    // 3. 弧线文字（空字符串时跳过，配合 falcon 设计不显示文字）
+    if !text.is_empty() {
+        let text_rot = (elapsed_secs as f32 / text_period * 360.0) % 360.0;
+        render_arc_text(ctx, res, text, text_rot)?;
+    }
 
     // 4. 几何体（对号/叉号）
     if let Some((geo, brush, width)) = geo {
@@ -628,13 +630,13 @@ unsafe fn render_base(
 unsafe fn render_idle(
     ctx: &ID2D1DeviceContext, res: &BlackHoleRes, elapsed_secs: f64, main_bitmap: &ID2D1Bitmap1,
 ) -> windows_core::Result<()> {
-    render_base(ctx, res, elapsed_secs, None, "FACE WIN UNLOCK", TEXT_PERIOD_IDLE, None, 0.0, 0.0, main_bitmap)
+    render_base(ctx, res, elapsed_secs, None, "", TEXT_PERIOD_IDLE, None, 0.0, 0.0, main_bitmap)
 }
 
 unsafe fn render_scanning(
     ctx: &ID2D1DeviceContext, res: &BlackHoleRes, elapsed_secs: f64, main_bitmap: &ID2D1Bitmap1,
 ) -> windows_core::Result<()> {
-    render_base(ctx, res, elapsed_secs, None, "SCANNING...", TEXT_PERIOD_SCAN, None, 0.0, 0.0, main_bitmap)
+    render_base(ctx, res, elapsed_secs, None, "", TEXT_PERIOD_SCAN, None, 0.0, 0.0, main_bitmap)
 }
 
 unsafe fn render_success(
@@ -642,7 +644,7 @@ unsafe fn render_success(
 ) -> windows_core::Result<()> {
     let progress = (state_age.as_secs_f32() / OUTCOME_TIMEOUT_SECS).clamp(0.0, 1.0);
     let check_geo: ID2D1Geometry = res.check.cast()?;
-    render_base(ctx, res, elapsed_secs, Some(&res.green_brush), "WELCOME", TEXT_PERIOD_IDLE, Some((&check_geo, &res.green_brush, 4.0)), 0.0, progress, main_bitmap)
+    render_base(ctx, res, elapsed_secs, Some(&res.green_brush), "", TEXT_PERIOD_IDLE, Some((&check_geo, &res.green_brush, 4.0)), 0.0, progress, main_bitmap)
 }
 
 unsafe fn render_failure(
@@ -651,7 +653,7 @@ unsafe fn render_failure(
     let progress = (state_age.as_secs_f32() / OUTCOME_TIMEOUT_SECS).clamp(0.0, 1.0);
     let shake = (state_age.as_secs_f32() * 30.0).sin() * 10.0 * (1.0 - progress).powi(2);
     let cross_geo: ID2D1Geometry = res.cross.cast()?;
-    render_base(ctx, res, elapsed_secs, Some(&res.red_brush), "TRY AGAIN", TEXT_PERIOD_IDLE, Some((&cross_geo, &res.red_brush, 3.5)), shake, progress, main_bitmap)
+    render_base(ctx, res, elapsed_secs, Some(&res.red_brush), "", TEXT_PERIOD_IDLE, Some((&cross_geo, &res.red_brush, 3.5)), shake, progress, main_bitmap)
 }
 
 // ── 磁贴定位（未改动）─────────────────────────────────────────
@@ -805,8 +807,21 @@ fn run_render_loop(
         log::info!("[anim] tile strategy={strategy} rect=({},{})-({},{})", tile_rect.left, tile_rect.top, tile_rect.right, tile_rect.bottom);
         let tile_cx = (tile_rect.left + tile_rect.right) / 2;
         let tile_cy = (tile_rect.top + tile_rect.bottom) / 2;
-        dcomp_visual.SetOffsetX2((tile_cx - ANIM_WIDTH as i32 / 2) as f32)?;
-        dcomp_visual.SetOffsetY2((tile_cy - ANIM_HEIGHT as i32 / 2) as f32)?;
+
+        // Y 偏移：falcon 风格的按钮比黑洞更实，需要往上让出用户头像区域。
+        // 注册表 ANIMATION_Y_OFFSET（默认 -80）允许 VM 测试时微调而无需重建。
+        let y_offset: i32 = read_facewinunlock_registry("ANIMATION_Y_OFFSET")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(-80);
+        let x_offset: i32 = read_facewinunlock_registry("ANIMATION_X_OFFSET")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        log::info!("[anim] offset=({x_offset},{y_offset})");
+
+        dcomp_visual.SetOffsetX2((tile_cx - ANIM_WIDTH as i32 / 2 + x_offset) as f32)?;
+        dcomp_visual.SetOffsetY2((tile_cy - ANIM_HEIGHT as i32 / 2 + y_offset) as f32)?;
 
         let dcomp_surface = dcomp_device.CreateVirtualSurface(ANIM_WIDTH, ANIM_HEIGHT, DXGI_FORMAT_B8G8R8A8_UNORM, windows::Win32::Graphics::Dxgi::Common::DXGI_ALPHA_MODE_PREMULTIPLIED)?;
         dcomp_visual.SetContent(&dcomp_surface)?;
