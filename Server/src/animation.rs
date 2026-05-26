@@ -276,7 +276,8 @@ unsafe fn find_by_size_heuristic(parent: HWND) -> Option<RECT> {
         if (w - h).abs() > w / 2 { return BOOL(1); }
         let size_score = 100 - ((w - 192).abs() + (h - 192).abs()) / 4;
         let parent_h = { let mut pr = RECT::default(); if GetWindowRect(ctx.parent, &mut pr).is_err() { return BOOL(1); } pr.bottom - pr.top };
-        let pos_score = if rect.top > parent_h / 3 { 50 } else { 0 };
+        // 凭据磁贴图像区在父窗口上半部；偏向选择上方窗口
+        let pos_score = if rect.top < parent_h / 2 { 50 } else { 0 };
         ctx.candidates.push(Candidate { rect, score: size_score + pos_score });
         BOOL(1)
     }
@@ -299,7 +300,8 @@ unsafe fn fallback_position(parent: HWND) -> RECT {
     let mut cr = RECT::default();
     let _ = GetClientRect(parent, &mut cr);
     let cx = (cr.right - cr.left) / 2;
-    let cy = (cr.bottom - cr.top) * 2 / 3;
+    // 凭据磁贴图像区在父窗口上方约 1/3 处（2/3 处是 PIN 输入区，偏低）
+    let cy = (cr.bottom - cr.top) / 3;
     RECT { left: cx - ANIM_WIDTH as i32 / 2, top: cy - ANIM_HEIGHT as i32 / 2, right: cx + ANIM_WIDTH as i32 / 2, bottom: cy + ANIM_HEIGHT as i32 / 2 }
 }
 
@@ -376,16 +378,24 @@ unsafe fn create_arc_geometry(
     let geometry = factory.CreatePathGeometry()?;
     let sink = geometry.Open()?;
     let half_rad = (span_deg / 2.0).to_radians();
+    // Arc 起止点相对于圆心 (RING_CENTER_X, RING_CENTER_Y)，确保始终在 128×128 曲面内
+    // 起点：圆心右上方 half_span 角处；终点：圆心右下方 half_span 角处（顺时针）
     sink.BeginFigure(
-        D2D_POINT_2F { x: radius * half_rad.cos(), y: -radius * half_rad.sin() },
+        D2D_POINT_2F {
+            x: RING_CENTER_X + radius * half_rad.cos(),
+            y: RING_CENTER_Y - radius * half_rad.sin(),
+        },
         D2D1_FIGURE_BEGIN_HOLLOW,
     );
     sink.AddArc(&D2D1_ARC_SEGMENT {
-        point: D2D_POINT_2F { x: radius * half_rad.cos(), y: radius * half_rad.sin() },
+        point: D2D_POINT_2F {
+            x: RING_CENTER_X + radius * half_rad.cos(),
+            y: RING_CENTER_Y + radius * half_rad.sin(),
+        },
         size: D2D_SIZE_F { width: radius, height: radius },
         rotationAngle: 0.0,
         sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-        arcSize: D2D1_ARC_SIZE_SMALL,
+        arcSize: D2D1_ARC_SIZE_SMALL, // 120° < 180°，使用 SMALL
     });
     sink.EndFigure(D2D1_FIGURE_END_OPEN);
     sink.Close()?;
