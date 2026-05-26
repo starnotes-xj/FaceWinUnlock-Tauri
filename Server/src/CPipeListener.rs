@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::UI::Shell::ICredentialProviderEvents;
 
+use crate::animation::{AnimState, AnimationSlot};
 use crate::{read_facewinunlock_registry, SharedCredentials};
 use crate::Pipe::{
     parse_credentials,
@@ -19,9 +20,17 @@ struct SendableEvents(ICredentialProviderEvents, usize);
 unsafe impl Send for SendableEvents {}
 
 impl SendableEvents {
-    // 通过方法调用避免闭包直接捕获字段（Rust 2021 partial capture 会绕过 unsafe impl Send）
     fn notify_changed(&self) -> windows::core::Result<()> {
         unsafe { self.0.CredentialsChanged(self.1) }
+    }
+}
+
+/// 通过 AnimationSlot 设置动画状态（槽位为空时静默忽略）
+fn set_anim_state(slot: &AnimationSlot, state: AnimState) {
+    if let Ok(guard) = slot.lock() {
+        if let Some(ctx) = guard.as_ref() {
+            ctx.set_state(state);
+        }
     }
 }
 
@@ -38,23 +47,25 @@ pub struct CPipeListener {
 
 impl CPipeListener {
     /// 启动管道监听：
-    ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，发送 "prepare" / "run"，支持重试
-    ///   - Creds 线程：作为客户端连接到 Unlock EXE 的 Unlock 管道，阻塞等待凭据推送
-    ///   - is_primary_scenario: 是否为登录/解锁主场景（非 CREDUI），用于 stop 时决定是否通知 EXE 释放资源 (#117)
+    ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，发送 "prepare" / "run"，
+    ///     同时通过 animation_slot 驱动动画状态 (Scanning/Failure)
+    ///   - Creds 线程：阻塞等待凭据推送，收到后设置动画为 Success
     pub fn start(
         events: ICredentialProviderEvents,
         advise_context: usize,
         shared_creds: Arc<Mutex<SharedCredentials>>,
         is_primary_scenario: bool,
+        animation_slot: AnimationSlot,
     ) -> Arc<Mutex<Self>> {
         let is_unlocked    = Arc::new(AtomicBool::new(false));
         let stop_flag      = Arc::new(AtomicBool::new(false));
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
 
-        // ── Client 线程（发送 prepare / run）────────────────────────────
+        // ── Client 线程（发送 prepare / run + 驱动动画状态）────────────
         let client_thread = {
-            let stop_flag   = stop_flag.clone();
+            let stop_flag = stop_flag.clone();
+            let anim_slot = animation_slot.clone();
             thread::spawn(move || {
                 let connect_enabled = read_facewinunlock_registry("CONNECT_TO_PIPE")
                     .unwrap_or_else(|_| "1".to_string());
@@ -128,11 +139,19 @@ impl CPipeListener {
                         if let Err(e) = pipe_write_raw(pipe, b"run") {
                             warn!("写入 run 失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
                             unsafe { let _ = CloseHandle(pipe); }
-                            break; // 退出内层循环，在外层循环中重连
+                            break;
                         }
                         info!("向管道写入数据成功：run");
 
+                        // 动画：进入扫描状态
+                        set_anim_state(&anim_slot, AnimState::Scanning);
+
                         retry_count += 1;
+
+                        // 动画：连续 3 次未匹配 → 短暂 Failure，随后回 Scanning
+                        if retry_count == 3 {
+                            set_anim_state(&anim_slot, AnimState::Failure);
+                        }
 
                         // 退避策略: 逐步降低人脸识别频率，减少无人锁屏时的CPU消耗 (#115)
                         let delay = if retry_count <= 10 {
@@ -164,12 +183,13 @@ impl CPipeListener {
             })
         };
 
-        // ── Creds 线程（作为 CLIENT 连接到 Unlock EXE，接收凭据）────────
+        // ── Creds 线程（接收凭据 + 驱动 Success 动画）────────────────────
         let creds_thread = {
             let is_unlocked    = is_unlocked.clone();
             let stop_flag      = stop_flag.clone();
             let creds_pipe_raw = creds_pipe_raw.clone();
             let send_events    = SendableEvents(events, advise_context);
+            let anim_slot      = animation_slot.clone();
             thread::spawn(move || {
                 info!("CPipeListener::start - 进入凭据Client线程");
 
@@ -218,6 +238,10 @@ impl CPipeListener {
                                             creds.is_unlocked = true;
                                         }
                                         is_unlocked.store(true, Ordering::SeqCst);
+
+                                        // 动画：面容识别成功
+                                        set_anim_state(&anim_slot, AnimState::Success);
+
                                         if let Err(e) = send_events.notify_changed() {
                                             error!("CredentialsChanged 失败: {:?}", e);
                                         } else {

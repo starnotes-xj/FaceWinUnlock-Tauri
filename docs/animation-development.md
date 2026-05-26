@@ -68,43 +68,48 @@ windows = { version = "0.59", features = [
 ] }
 ```
 
-### 2.3 整体架构
+### 2.3 整体架构（路径 C）
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│   Server DLL (loaded in LogonUI.exe)                         │
-│                                                              │
-│   ┌─────────────────────────────────────────────────┐        │
-│   │ CSampleCredential                               │        │
-│   │   - Advise()        → 缓存 pEvents              │        │
-│   │   - OnCreatingWindow → 拿到 LogonUI 父 HWND    │        │
-│   │   - 创建子窗口（128×128 在磁贴位置）            │        │
-│   │   - 初始化 DComp Device + Target                │        │
-│   │   - 启动渲染线程                                │        │
-│   └─────────────────┬───────────────────────────────┘        │
-│                     │                                        │
-│                     ▼                                        │
-│   ┌─────────────────────────────────────────────────┐        │
-│   │ AnimationRenderer (独立线程)                    │        │
-│   │   - 状态机：Idle / Scanning / Success / Fail    │        │
-│   │   - D2D 绘制：旋转环 / 扫描线 / 边框脉冲        │        │
-│   │   - 16ms 帧率（60 FPS）                         │        │
-│   │   - DComp Commit → 硬件合成                     │        │
-│   └─────────────────────────────────────────────────┘        │
-│                     ▲                                        │
-│                     │ 状态变更                               │
-│   ┌─────────────────┴───────────────────────────────┐        │
-│   │ CPipeListener                                   │        │
-│   │   - 收到 Unlock.exe 的状态消息 → 切换状态       │        │
-│   └─────────────────────────────────────────────────┘        │
-└──────────────────────────────────────────────────────────────┘
+LogonUI.exe 窗口（父 HWND，来自 OnCreatingWindow）
+│
+├── [DComp Topmost Layer] ← 我们的动画（绑定到此窗口，topmost=true）
+│   └── DComp Visual { OffsetX, OffsetY = 磁贴中心位置 }
+│       └── DComp Surface (128×128) ← D2D 旋转环 (60 FPS GPU)
+│
+├── [Child Windows Layer] ← LogonUI 正常内容
+│   ├── 用户1 磁贴
+│   ├── 用户2 磁贴
+│   └── 我们的凭据磁贴 ← EnumChildWindows("FaceWinUnlock") 定位
+│       └── 头像 (CPFT_TILE_IMAGE)
+│
+└── [DComp Bottom Layer]
+
+Server DLL 内部：
+┌──────────────────────────────────────────────────┐
+│ CSampleCredential                                │
+│   - Advise() → OnCreatingWindow → 父 HWND        │
+│   - 启动 AnimationContext（渲染线程）             │
+│   - UnAdvise() → 停止渲染 → 释放资源              │
+│                                                  │
+│ AnimationContext（主线程）                        │
+│   - 保存父 HWND                                   │
+│   - Drop 时 signal stop + join 线程               │
+│                                                  │
+│ Render Thread（后台）                             │
+│   - D3D11 → DXGI → DComp (topmost)               │
+│   - EnumChildWindows 搜索磁贴位置                 │
+│   - Visual.SetOffsetX2/Y2 定位                   │
+│   - D2D 旋转环 60 FPS                            │
+│   - 状态机：Idle / Scanning                       │
+└──────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 三、阶段分解
 
-### 阶段 A：DComp 子窗口管线打通 + 亮度功能迁移 🎯 **当前阶段**
+### 阶段 A：DComp 子窗口管线打通 + 亮度功能迁移
 
 **目标**：在 Credential Provider DLL 里成功创建并显示一个 DComp 渲染的子窗口，并把现有的 issue #99 亮度提升功能从 Unlock.exe 迁移到 DLL（DLL 更接近凭据提供时机，亮度控制时序更好）。
 
@@ -212,42 +217,85 @@ windows = { version = "0.59", features = [
 
 | 阶段 | 任务 | 状态 | 完成日期 | 提交哈希 |
 |---|---|---|---|---|
-| A | A1 OnCreatingWindow | ✅ 完成 | 2026-05-26 | （本次） |
-| A | A2 CreateWindowEx | ✅ 完成 | 2026-05-26 | （本次） |
-| A | A3 D3D11 设备 | ✅ 完成 | 2026-05-26 | （本次） |
-| A | A4 DComp Device + Target | ✅ 完成 | 2026-05-26 | （本次） |
-| A | A5 D2D 渲染目标 | ✅ 完成 | 2026-05-26 | （本次） |
-| A | A6 纯色填充 PoC | ✅ 完成 | 2026-05-26 | （本次） |
-| A | A7 亮度功能迁移到 DLL | ⏸️ 延后 | - | (issue #99 当前 Unlock 侧实现工作中，B/C 之后再做) |
-| A | A8 资源清理 | ✅ 完成 | 2026-05-26 | （本次） |
-| A | A9 注册表开关 ANIMATION_UI_ENABLED | ✅ 完成 | 2026-05-26 | （本次） |
-| B | B1-B6 旋转环 PoC | ⏳ 阶段 A 完成后 | - | - |
-| C | C1-C6 状态机 | ⏳ 阶段 B 完成后 | - | - |
+| A | A1-A6, A8-A9 子窗口管线 | ✅ 完成 | 2026-05-26 | （本次） |
+| A | A7 亮度功能迁移到 DLL | ⏸️ 延后 | - | C 阶段之后再做 |
+| B | 旋转环 PoC（D2D + DComp 子窗口） | ✅ 完成 | 2026-05-26 | （本次） |
+| B | **路径 C：DComp Topmost + 磁贴定位** | ✅ 完成 | 2026-05-26 | （本次） |
+| C | C1-C6 状态机 | 🔄 进行中 | 2026-05-26 |动画状态机+管道驱动已实现，待VM实测 |
 | D | D1-D4 摄像头预览 | ⏳ 可选 | - | - |
 
 状态图例：⏳ 待开始 / 🔄 进行中 / ✅ 完成 / ⏸️ 阻塞 / ❌ 取消
 
-### 阶段 A 完成情况
+### 阶段 B 完成情况 · 路径 C 架构变更
 
-**已落地：**
-- `Server/Cargo.toml`: 新增 `Win32_Graphics_*` features（D2D/D3D11/DComp/DXGI/WindowsAndMessaging/LibraryLoader）
-- `Server/src/animation.rs`: 完整 DComp 子窗口管线（约 220 行）
-  - 自定义窗口类 + `CreateWindowExW` 子窗口
-  - D3D11 设备 → DXGI Device → DComp Device → Target → Visual → Surface
-  - D2D Factory → Device → DeviceContext → Bitmap from DXGI Surface
-  - `render_solid_color()` 验证管线
-  - `Drop` 自动 DestroyWindow + Release COM 对象
-- `Server/src/CSampleCredential.rs`:
-  - `Advise()`: 检查灰度开关 → `OnCreatingWindow()` 拿 HWND → 创建 `AnimationContext` → 渲染蓝色方块 PoC
-  - `UnAdvise()`: 先 drop 动画上下文，再清空 events（避免 LogonUI 卸载时序问题）
-  - 所有失败路径都不影响登录主流程（fallback 到原磁贴）
-- `Server/src/lib.rs`: 注册 `mod animation;`
+**调研决策：** SetFieldBitmap 无法达到 60 FPS（受限于 GDI HBITMAP 转换 + LogonUI 内部刷新率）。经过多轮深度调研，选择**路径 C**：
+
+```
+LogonUI 父 HWND (OnCreatingWindow 返回)
+│
+├── [DComp Topmost Layer] ← 我们的动画（SetOffsetX2/Y2 定位）
+│   └── DComp Visual → Surface ← D2D 旋转环 (60 FPS GPU)
+│
+└── [Child Windows] ← LogonUI 正常内容
+    └── 凭据磁贴 ← EnumChildWindows 文本匹配定位
+```
+
+核心改动：
+- **不再创建独立子窗口** — 直接绑定 DComp 到 LogonUI 父 HWND（`topmost=true`），动画渲染在所有凭据磁贴之上
+- **`EnumChildWindows` 定位磁贴** — 搜索子窗口文本 "FaceWinUnlock" 匹配凭据磁贴，`GetWindowRect` 拿到屏幕坐标后换算为父窗口 client 坐标
+- **`IDCompositionVisual::SetOffsetX2/Y2` 定位** — 将 128×128 动画表面精确放到磁贴中心位置
+- **重试机制** — 启动时最多重试 15 次（3 秒），等待 LogonUI 创建磁贴窗口；失败后回退到父窗口 client 区域 2/3 高度居中位置
+- **无 GDI 泄漏风险** — 不再创建窗口类/HWND/HBITMAP，纯 COM 对象由 Rust Drop 自动管理
+
+**已落地文件：**
+- `Server/src/animation.rs`（~340 行）：
+  - DComp target 绑定父 HWND（`topmost=true`）
+  - `find_tile_position()` + `enum_child_callback()` — EnumChildWindows 定位
+  - 矩阵辅助函数（identity/rotation/scale/mul）手动实现（windows-rs 0.59 的 Matrix3x2 是纯数据 struct）
+  - `render_scanning()` / `render_idle()` — 旋转环 + 呼吸脉冲
+  - 弧几何体预创建（`ID2D1PathGeometry1`），每帧 `SetTransform` 旋转
+  - 帧率控制（~16.67ms/帧）
+- `Server/src/CSampleCredential.rs`：`Advise()` 传父 HWND + 磁贴文本 "FaceWinUnlock" 给 AnimationContext
+- `Server/Cargo.toml`：新增 `"Foundation_Numerics"` feature（Matrix3x2 类型需要）
 
 **编译状态：** `cargo check -p winlogon` 通过（只有项目原有的命名规范警告）
 
 **VM 实测：** 待用户启用注册表开关 `ANIMATION_UI_ENABLED=1` 后在 VM 内验证
 
-**A7 延后原因：** issue #99 亮度功能当前在 Unlock.exe 侧实现工作正常，迁移到 DLL 需要替换 PowerShell 调用为 WMI COM（无 rusqlite 依赖、避免子进程开销），优先级低于 B 阶段动画实现。
+### 阶段 C 完成情况（状态机动画 + 管道驱动）
+
+**状态机：**
+```
+        ┌──────┐   CPipeListener 发送 "run"   ┌──────────┐
+        │ Idle │ ──────────────────────────►  │ Scanning │
+        └──────┘                               └────┬─────┘
+           ▲                            凭据到达  │   │ 重试3次未匹配
+           │                           ┌──────────┘   └──────────┐
+           │                           ▼                          ▼
+           │                      ┌─────────┐              ┌─────────┐
+           └──────────────────────│ Success │              │ Failure │
+              2 秒后自动退回      └─────────┘              └─────────┘
+                                       ▲ 2s → Idle            ▲ 2s → Idle
+```
+
+**已实现：**
+- `AnimState::Success` + `AnimState::Failure`（`animation.rs`）
+- `render_success()` — 绿色圆 + 白色对号 + 2 秒淡出
+- `render_failure()` — 红色圆 + 叉号 + 水平抖动 + 2 秒淡出
+- 自动超时退回：Success/Failure 2 秒后自动 → Idle
+- `AnimationSlot` 改为 `Arc<Mutex<Option<AnimationContext>>>`，三方共享
+- `CPipeListener::start()` 接受 `AnimationSlot`
+- Client 线程：发送 "run" → 设置 Scanning；3 次重试未匹配 → 触发 Failure
+- Creds 线程：收到凭据 → 触发 Success
+- `CSampleProvider` 创建 `AnimationSlot` 并传给 CPipeListener 和 CSampleCredential
+
+**文件变更：**
+| 文件 | 变更 |
+|---|---|
+| `Server/src/animation.rs` | +Success/Failure 状态、render_success/failure、PrebuiltGeo、auto-transition |
+| `Server/src/CPipeListener.rs` | +AnimationSlot 参数、set_anim_state()、Client/Creds 线程驱动状态 |
+| `Server/src/CSampleProvider.rs` | +animation_slot 字段、传递到 CPipeListener 和 SampleCredential |
+| `Server/src/CSampleCredential.rs` | 接受外部 AnimationSlot，不再自建
 
 ---
 
@@ -330,6 +378,6 @@ windows = { version = "0.59", features = [
 
 ---
 
-**最后更新**：2026-05-26
-**当前阶段**：A 已完成核心管线（A1-A6, A8, A9），等待 VM 实测
-**下一里程碑**：用户在 VM 中开启 `ANIMATION_UI_ENABLED=1` 验证锁屏蓝色方块 PoC，验证通过后进入阶段 B
+**最后更新**：2026-05-26（阶段 C 状态机+管道驱动实现完成）
+**当前阶段**：C 状态机+管道驱动已实现，等待 VM 实测
+**下一里程碑**：VM 锁屏验证 4 状态动画（Idle → Scanning → Success/Failure），验证通过后进入阶段 D（摄像头预览）或考虑合并

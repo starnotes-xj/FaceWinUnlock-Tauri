@@ -17,7 +17,7 @@ use windows::Win32::{
 };
 use windows_core::{implement, PCWSTR, PWSTR};
 use windows::Win32::Foundation::BOOL;
-use crate::animation::{make_slot, AnimationContext, AnimationSlot};
+use crate::animation::{AnimationContext, AnimationSlot};
 use crate::{CLSID_SampleProvider, SharedCredentials};
 
 /// 凭据实现类，代表登录界面上的一个磁贴
@@ -35,16 +35,13 @@ pub struct SampleCredential {
 
 impl SampleCredential {
     /// 创建新的凭据实例
-    pub fn new(shared_creds: Arc<Mutex<SharedCredentials>>, auth_package_id: u32) -> Self {
+    pub fn new(shared_creds: Arc<Mutex<SharedCredentials>>, auth_package_id: u32, animation: AnimationSlot) -> Self {
         info!("SampleCredential::new - 创建凭据实例");
-        // 引用计数不在此处管理了
-        // 原因是：当 SampleCredential 转换为 ICredentialProviderCredential COM 接口后，它的生命周期由 Windows COM 运行时管理，而不是 Rust
-        // 所以 SampleCredential 的Drop永远不会被调用，在new中创建的引用计数也永远不会减少
         Self {
             events: Mutex::new(None),
-            shared_creds: shared_creds,
-            auth_package_id: auth_package_id,
-            animation: make_slot(),
+            shared_creds,
+            auth_package_id,
+            animation,
         }
     }
 }
@@ -63,36 +60,31 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         let mut events = self.events.lock().unwrap();
         *events = pcpce.clone(); // 保存事件接口
 
-        // ── 阶段 A：拉起动画 UI 管线 ─────────────────────────────────
-        // 通过 events.OnCreatingWindow 拿 LogonUI 父窗口 HWND，
-        // 然后创建 DComp 子窗口 + D3D11 + D2D 渲染管线（PoC：纯蓝色填充）
+        // ── 动画 UI 管线（路径 C：DComp topmost + 磁贴定位）──────
+        // 绑定 DComp 到 LogonUI 父窗口（topmost=true），通过
+        // EnumChildWindows 定位凭据磁贴，在头像区叠加 60 FPS GPU 动画。
         if let Some(ev) = events.as_ref() {
-            // 仅在注册表 ANIMATION_UI_ENABLED == "1" 时启用（默认关闭，灰度上线）
             if is_animation_enabled() {
                 match unsafe { ev.OnCreatingWindow() } {
                     Ok(parent_hwnd) => {
-                        info!("SampleCredential::Advise - 拿到 LogonUI 父 HWND: {:?}", parent_hwnd);
-                        match AnimationContext::new(parent_hwnd) {
-                            Ok(mut ctx) => {
-                                // A6 PoC：渲染亮蓝色方块（BGRA premul：R=0.2, G=0.6, B=0.9, A=1.0）
-                                if let Err(e) = ctx.render_solid_color(0.2, 0.6, 0.9, 1.0) {
-                                    warn!("SampleCredential::Advise - PoC 渲染失败: {:?}", e);
-                                } else {
-                                    info!("SampleCredential::Advise - DComp 管线就绪，已渲染 PoC 蓝色方块");
-                                }
+                        info!("SampleCredential::Advise - LogonUI 父 HWND: {:?}", parent_hwnd);
+                        // 用磁贴文本片段定位（容错：EnumChildWindows 找不到时回退到默认位置）
+                        match AnimationContext::new(parent_hwnd, "FaceWinUnlock") {
+                            Ok(ctx) => {
+                                info!("SampleCredential::Advise - 动画渲染线程已启动（路径 C：topmost 叠加）");
                                 *self.animation.lock().unwrap() = Some(ctx);
                             }
                             Err(e) => {
-                                warn!("SampleCredential::Advise - AnimationContext 初始化失败（不影响登录）: {:?}", e);
+                                warn!("SampleCredential::Advise - AnimationContext 失败: {:?}", e);
                             }
                         }
                     }
                     Err(e) => {
-                        warn!("SampleCredential::Advise - OnCreatingWindow 失败（不影响登录）: {:?}", e);
+                        warn!("SampleCredential::Advise - OnCreatingWindow 失败: {:?}", e);
                     }
                 }
             } else {
-                info!("SampleCredential::Advise - 动画 UI 未启用（ANIMATION_UI_ENABLED=0），跳过");
+                info!("SampleCredential::Advise - ANIMATION_UI_ENABLED=0，跳过");
             }
         }
 

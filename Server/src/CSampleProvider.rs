@@ -1,7 +1,7 @@
 // 引入必要的Win32 API和同步原语
 use windows::Win32::{Foundation::{E_NOTIMPL, HANDLE, STATUS_SUCCESS}, Security::Authentication::Identity::{LsaConnectUntrusted, LsaDeregisterLogonProcess, LsaLookupAuthenticationPackage, LSA_STRING}, UI::Shell::*};
 use std::sync::{Arc, Mutex};
-use crate::{dll_add_ref, dll_release, read_facewinunlock_registry, CPipeListener::CPipeListener, CSampleCredential::SampleCredential, SharedCredentials};
+use crate::{dll_add_ref, dll_release, read_facewinunlock_registry, CPipeListener::CPipeListener, CSampleCredential::SampleCredential, SharedCredentials, animation::{self, AnimationSlot}};
 use windows_core::{implement, PSTR, PWSTR};
 use windows::Win32::Foundation::BOOL;
 
@@ -14,14 +14,16 @@ pub struct SampleProvider {
 
 /// 凭据提供程序的内部状态
 struct ProviderInner {
-    usage_scenario: CREDENTIAL_PROVIDER_USAGE_SCENARIO, // 使用场景（登录、解锁等）
-    is_scenario_supported: bool,               // 当前场景是否在 UNLOCK_SCENE 列表中
-    events: Option<ICredentialProviderEvents>, // 系统事件接口
-    advise_context: usize,                     // 通知上下文ID
-    listener: Option<Arc<Mutex<CPipeListener>>>, // 管道监听器实例
-    pub shared_creds: Arc<Mutex<SharedCredentials>>, // 共享的凭据列表
-    pub auth_package_id: u32,                  // 认证包ID
+    usage_scenario: CREDENTIAL_PROVIDER_USAGE_SCENARIO,
+    is_scenario_supported: bool,
+    events: Option<ICredentialProviderEvents>,
+    advise_context: usize,
+    listener: Option<Arc<Mutex<CPipeListener>>>,
+    pub shared_creds: Arc<Mutex<SharedCredentials>>,
+    pub auth_package_id: u32,
     pub credential: Option<ICredentialProviderCredential>,
+    /// 动画槽位（Provider/Credential/PipeListener 三方共享）
+    pub animation_slot: AnimationSlot,
 }
 
 impl SampleProvider {
@@ -44,14 +46,15 @@ impl SampleProvider {
 
         Self {
             inner: Mutex::new(ProviderInner {
-                usage_scenario: CPUS_LOGON, // 默认场景为登录
+                usage_scenario: CPUS_LOGON,
                 is_scenario_supported: true,
                 events: None,
                 advise_context: 0,
                 listener: None,
                 shared_creds: shared,
                 auth_package_id: auth_id,
-                credential: None
+                credential: None,
+                animation_slot: animation::make_slot(),
             }),
         }
     }
@@ -129,7 +132,8 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             if let Some(events) = &inner.events {
                 // 主场景（登录/解锁）：允许 stop_and_join 时通知 Unlock EXE 释放摄像头 (#117)
                 let is_primary = inner.usage_scenario.0 == 1 || inner.usage_scenario.0 == 2;
-                inner.listener = Some(CPipeListener::start(events.clone(), upadvisecontext, inner.shared_creds.clone(), is_primary));
+                let slot = inner.animation_slot.clone();
+                inner.listener = Some(CPipeListener::start(events.clone(), upadvisecontext, inner.shared_creds.clone(), is_primary, slot));
             }
         }
 
@@ -268,7 +272,7 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
 
             // 创建凭据实例并转换为接口返回，并传递收到的用户名和密码
             info!("SampleProvider::GetCredentialAt - 首次创建凭据实例");
-            let cred = SampleCredential::new(inner.shared_creds.clone(), inner.auth_package_id);
+            let cred = SampleCredential::new(inner.shared_creds.clone(), inner.auth_package_id, inner.animation_slot.clone());
             let cred_interface: ICredentialProviderCredential = cred.into();
             inner.credential = Some(cred_interface.clone());
             Ok(cred_interface)
