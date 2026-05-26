@@ -90,7 +90,8 @@ const FRAME_PERIOD: f64 = 6.0;
 const DEFAULT_FPS: u32 = 60;
 const OUTCOME_TIMEOUT_SECS: f32 = 2.0;
 const TILE_FIND_RETRY_MS: u64 = 200;
-const TILE_FIND_MAX_RETRIES: u32 = 15;
+// 凭据磁贴出现得很快，5×200ms=1s 已经足够；从 15 降下来让动画出现更快
+const TILE_FIND_MAX_RETRIES: u32 = 5;
 const TILE_MIN_SIZE: i32 = 64;
 const TILE_MAX_SIZE: i32 = 512;
 
@@ -753,7 +754,11 @@ unsafe fn fallback_position(parent: HWND) -> RECT {
 }
 
 unsafe fn find_tile_position(parent: HWND, search_text: &[u16], stop: &AtomicBool) -> (RECT, &'static str) {
-    dump_child_windows(parent);
+    // 仅在调试开关启用时枚举子窗口（注册表 ANIMATION_DUMP_WINDOWS="1"）。
+    // 默认关闭，避免每次磁贴搜索都做日志写盘 + EnumChildWindows 调用
+    if read_facewinunlock_registry("ANIMATION_DUMP_WINDOWS").ok().as_deref() == Some("1") {
+        dump_child_windows(parent);
+    }
     for _ in 0..TILE_FIND_MAX_RETRIES {
         if stop.load(Ordering::SeqCst) { return (fallback_position(parent), "stopped"); }
         if let Some(r) = find_by_text(parent, search_text) { return (r, "text_match"); }
