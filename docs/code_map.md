@@ -184,8 +184,8 @@ unsafe impl Send for AnimationContext {}    // LogonUI 串行化 Advise/UnAdvise
 | A7 | 亮度功能从 Unlock.exe 迁移到 DLL | ⏸️ 延后 |
 | A8 | UnAdvise 清理（Drop AnimationContext） | ✅ |
 | A9 | 灰度开关 ANIMATION_UI_ENABLED | ✅ |
-| B | D2D 旋转环动画 60 FPS | ⏳ 待实现 |
-| C | 状态机（Idle/Scanning/Success/Failure） | ⏳ 待实现 |
+| B | D2D 旋转环动画 60 FPS | ✅ 已实现（DComp topmost 路径 C）|
+| C | 状态机（Idle/Scanning/Success/Failure） | 🔄 已实现，待 VM 回归验证 |
 | D | 摄像头预览到磁贴 | ⏳ 可选 |
 
 **下一步（阶段 B）**：用 Opus 设计旋转环渲染方案，Sonnet 实现后编译验证。

@@ -75,7 +75,8 @@ fn is_likely_tile(class_name: &str, rect: &RECT) -> bool {
 | Win11 锁屏 | 屏幕垂直居中，水平居中 |
 | CredUI（UAC） | 对话框中心 |
 
-常用回退：在父窗口 client 区域的**水平居中、垂直 2/3 处**放置。
+常用回退：在父窗口 client 区域的**水平居中、垂直 1/3 处**放置。
+（VM 测试确认：2/3 高度 = PIN 输入区，偏低；1/3 高度 ≈ 凭据磁贴图像区）
 
 ### 策略 4：注册表可配置偏移量
 
@@ -264,7 +265,7 @@ run_render_loop(parent_hwnd)
 │   ├── [1] 类名模式匹配        → 找到 → 返回 RECT
 │   ├── [2] 尺寸+可见性启发式    → 找到 → 返回 RECT
 │   ├── [3] 注册表偏移配置      → 读取 ANIMATION_OFFSET_*
-│   └── [4] 兜底：父窗口 2/3 处  → 返回默认 RECT
+│   └── [4] 兜底：父窗口 1/3 处  → 返回默认 RECT（VM 实测纠正：2/3 落在 PIN 区）
 │
 ├── SetOffsetX2 / SetOffsetY2    → 放置 Visual
 │
