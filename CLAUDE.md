@@ -320,3 +320,37 @@ Models are loaded into `APP_STATE` by `load_opencv_model(backend, target)`. All 
 | `Unlock/Cargo.toml` | ✅ Restored (complete 607-line implementation) |
 | `UI/src-tauri/tauri.conf.json` | ⚠️ Intact but version stuck at `"0.3.2"`, `bundle.resources` is empty `{}` |
 | `UI/package.json` | ✅ Intact |
+
+---
+
+## 动画 UI 开发（进行中）
+
+正在为 Credential Provider DLL 添加 Windows Hello 风格的解锁动画，详细计划与进度跟踪见 [docs/animation-development.md](docs/animation-development.md)。
+
+### 核心约束
+
+- **技术方案**：DirectComposition 自定义子窗口（"我们的窗口"）+ Direct2D 原生绘制（路径 ②）
+- **绝不使用**：WebView2（已实证在 winlogon 不工作）、Sciter/Ultralight（未验证 + 体积大）、Hook 内部 API（不稳定）
+- **当前阶段**：A — DComp 子窗口管线打通 + 亮度功能从 Unlock.exe 迁移到 DLL
+- **测试要求**：所有阶段必须在 VM（Hyper-V/VMware）内连续 100 次锁屏/解锁验证后才能合并主分支
+- **灰度开关**：注册表 `ANIMATION_UI_ENABLED`（默认 `"0"`），用于安全启用/禁用
+
+### AI 协作规则
+
+| 任务类型 | 模型 |
+|---|---|
+| 架构设计、技术选型、深度调研 | **Opus** (`claude-opus-4-7`) |
+| 代码编写、Bug 修复、Git 操作 | **Sonnet** (`claude-sonnet-4-6`) |
+| 调试逻辑 Bug（Sonnet 卡住时） | Opus 兜底 |
+
+每次开始新阶段前先用 Opus 设计方案，再切到 Sonnet 实施。详细切换规则见 [docs/animation-development.md](docs/animation-development.md) 第 5 节。
+
+### 阶段 A 关键改动点
+
+| 文件 | 变更 |
+|---|---|
+| `Server/src/CSampleCredential.rs` | 实现 `OnCreatingWindow`，创建 DComp 子窗口 |
+| `Server/src/CPipeListener.rs` | 接收亮度调节指令（从 Unlock.exe 迁移而来） |
+| `Server/Cargo.toml` | 添加 `Win32_Graphics_*` features（DComp/D2D/D3D11/DXGI） |
+| `Unlock/src/main.rs` | 移除亮度逻辑（功能上移到 DLL） |
+| 新文件 `Server/src/animation.rs` | DComp 子窗口、D2D 渲染线程、状态机 |
