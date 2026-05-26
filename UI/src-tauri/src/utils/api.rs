@@ -74,7 +74,10 @@ pub fn get_now_username() -> Result<CustomResult, CustomResult> {
         match GetUserNameW(Some(PWSTR(buf.as_mut_ptr())), &mut size) {
             Ok(_) => {
                 let name = String::from_utf16_lossy(&buf[..size as usize - 1]);
-                Ok(CustomResult::success(Some(name), None))
+                Ok(CustomResult::success(
+                    Some("获取用户名成功".to_string()),
+                    Some(serde_json::json!({"username": name})),
+                ))
             }
             Err(e) => Err(CustomResult::error(
                 Some(format!("获取用户名失败: {e}")),
