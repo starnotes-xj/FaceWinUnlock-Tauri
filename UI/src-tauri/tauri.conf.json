@@ -44,9 +44,13 @@
       "../resources/face_liveness.onnx": "resources/face_liveness.onnx"
     },
     "windows": {
+      "wix": {
+        "language": "zh-CN"
+      },
       "nsis": {
         "installMode": "perMachine",
-        "installerHooks": "./nsis/hooks.nsh"
+        "installerHooks": "./nsis/hooks.nsh",
+        "languages": ["SimpChinese", "English"]
       }
     }
   }

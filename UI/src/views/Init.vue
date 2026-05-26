@@ -8,10 +8,12 @@
     import {handleLocalAccount, formatObjectString} from '../utils/function'
     import { info, error as errorLog, warn } from '@tauri-apps/plugin-log';
 
-    const checks = reactive({ 
-        camera: false, 
+    const checks = reactive({
+        camera: false,
         admin: false,
-        loading: true 
+        loading: true,
+        admin_msg: '',
+        camera_msg: '',
     });
 
     const activeStep = ref(0);
@@ -47,21 +49,38 @@
         if (activeStep.value < 2) activeStep.value++;
     };
 
-    // 环境自检
+    // 环境自检（摄像头检测不作为阻塞项——VM 环境通常无摄像头）
     const performCheck = async () => {
         checks.loading = true;
-        invoke('check_admin_privileges').then(()=>{
+
+        // 管理员权限检查（必须）
+        try {
+            await invoke('check_admin_privileges');
             checks.admin = true;
-            return invoke('check_camera_status');
-        }).then(()=>{
+            checks.admin_msg = '';
+        } catch (e) {
+            checks.admin = false;
+            checks.admin_msg = String(e);
+            ElMessage.warning('请以管理员身份重新运行程序');
+        }
+
+        // 摄像头检查（非阻塞，仅提示）
+        try {
+            await invoke('check_camera_status');
             checks.camera = true;
+            checks.camera_msg = '';
+        } catch (e) {
+            checks.camera = false;
+            checks.camera_msg = '未检测到摄像头（VM 环境可忽略）';
+        }
+
+        if (checks.admin && checks.camera) {
             ElMessage.success('环境检查通过');
-        }).catch((e)=>{
-            errorLog(formatObjectString("环境自检失败：", e));
-            ElMessage.error(formatObjectString(e));
-        }).finally(()=>{
-            checks.loading = false;
-        });
+        } else if (checks.admin) {
+            ElMessage.warning('摄像头不可用，面容识别功能将无法使用');
+        }
+
+        checks.loading = false;
     };
 
     onMounted(() => {
@@ -170,25 +189,45 @@
 
             <div class="step-content">
                 <div v-if="activeStep === 0">
-                    <el-result icon="info" title="准备环境" sub-title="我们将检查摄像头权限及系统权限">
+                    <el-result icon="info" title="准备环境" sub-title="检查摄像头及系统权限">
                         <template #extra>
-                            <ul class="check-list">
-                                <li>摄像头状态：
-                                    <el-icon :color="checks.camera ? '#67C23A' : '#F56C6C'">
-                                        <CircleCheckFilled v-if="checks.camera" />
+                            <!-- 加载中状态 -->
+                            <div v-if="checks.loading" style="margin-bottom:20px">
+                                <el-icon class="is-loading" :size="32"><Loading /></el-icon>
+                                <p style="color:#909399;margin-top:8px">正在检查环境...</p>
+                            </div>
+
+                            <!-- 检查结果 -->
+                            <ul v-if="!checks.loading" class="check-list">
+                                <li>
+                                    <span>管理员权限：</span>
+                                    <el-icon :color="checks.admin ? '#67C23A' : '#F56C6C'">
+                                        <CircleCheckFilled v-if="checks.admin" />
                                         <CircleCloseFilled v-else />
                                     </el-icon>
+                                    <span v-if="!checks.admin" style="color:#F56C6C;font-size:13px;margin-left:4px">{{ checks.admin_msg }}</span>
                                 </li>
-                                <li>系统管理员权限：
-                                    <el-icon color="#67C23A">
-                                        <el-icon :color="checks.admin ? '#67C23A' : '#F56C6C'">
-                                            <CircleCheckFilled v-if="checks.admin" />
-                                            <CircleCloseFilled v-else />
-                                        </el-icon>
+                                <li>
+                                    <span>摄像头状态：</span>
+                                    <el-icon :color="checks.camera ? '#67C23A' : '#E6A23C'">
+                                        <CircleCheckFilled v-if="checks.camera" />
+                                        <WarningFilled v-else />
                                     </el-icon>
+                                    <span v-if="!checks.camera" style="color:#E6A23C;font-size:13px;margin-left:4px">{{ checks.camera_msg }}</span>
                                 </li>
                             </ul>
-                            <el-button type="primary" @click="handleNextStep" style="display: block;" :loading="!(checks.camera && checks.admin)">继续部署</el-button>
+                            <el-tooltip :content="!checks.admin ? '需要管理员权限才能继续' : ''" placement="top">
+                                <el-button
+                                    type="primary"
+                                    @click="handleNextStep"
+                                    style="display: block; width: 200px; margin: 0 auto;"
+                                    :loading="checks.loading"
+                                    :disabled="!checks.admin"
+                                >继续部署</el-button>
+                            </el-tooltip>
+                            <p v-if="!checks.admin && !checks.loading" style="color:#F56C6C;font-size:13px;margin-top:10px">
+                                请关闭程序，右键以管理员身份重新运行
+                            </p>
                         </template>
                     </el-result>
                 </div>
