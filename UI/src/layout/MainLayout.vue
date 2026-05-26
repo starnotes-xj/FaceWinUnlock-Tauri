@@ -14,6 +14,12 @@
 
     const version = ref(localStorage.getItem("version") || 'unknown');
     const { isDark, toggleTheme } = useTheme();
+
+    /** 路由切换时重置 el-main 滚动位置，防止从长页面切回短页面后内容不可见 */
+    function resetScroll() {
+        const el = document.querySelector('.main-content');
+        if (el) el.scrollTop = 0;
+    }
 </script>
 
 <template>
@@ -91,8 +97,9 @@
             </el-header>
             <el-main class="main-content">
                 <router-view v-slot="{ Component }">
-                    <transition name="fade-transform" mode="out-in">
-                        <component :is="Component" />
+                    <transition name="fade-transform" mode="out-in"
+                        @before-enter="resetScroll">
+                        <component :is="Component" :key="$route.path" />
                     </transition>
                 </router-view>
             </el-main>
@@ -178,9 +185,6 @@
     .main-content {
         padding: 30px;
         overflow-y: auto;
-        /* flex 列容器：让子页面（如 Dashboard）可用 flex:1 撑满剩余高度 */
-        display: flex;
-        flex-direction: column;
     }
 
     .global-header {
@@ -213,10 +217,12 @@
         color: var(--el-text-color-regular, #606266);
     }
 
-    /* 页面切换动画 */
+    /* 页面切换动画 — 只过渡 opacity + transform，
+       不能用 all（会把子页面的 height/flex 也过渡，导致仪表盘切回时白屏） */
     .fade-transform-enter-active,
     .fade-transform-leave-active {
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                    transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     }
 
     .fade-transform-enter-from {

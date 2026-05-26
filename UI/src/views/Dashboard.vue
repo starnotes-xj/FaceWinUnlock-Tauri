@@ -159,24 +159,10 @@
 	.dashboard-wrapper {
 		display: flex;
 		flex-direction: column;
-		flex: 1;
-		/* calc 兜底：VM 待机恢复 / 路由过渡后 flex 高度可能未重算，
-		   min-height 用 viewport 单位保证始终有可见区域（50px header + 60px padding） */
-		min-height: calc(100vh - 110px);
+		height: 100%;
 		color: #2c3e50;
-		animation: pageEnter 0.6s cubic-bezier(0.22, 1, 0.36, 1);
-	}
-
-	@keyframes pageEnter {
-		from {
-			opacity: 0;
-			transform: translateY(20px);
-		}
-
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
+		/* 页面进入动画由 MainLayout 的 fade-transform transition 统一处理，
+		   不再使用独立 animation（两者 opacity 竞争会导致切回时白屏） */
 	}
 
 	.glass-card {
