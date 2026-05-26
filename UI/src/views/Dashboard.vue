@@ -57,12 +57,15 @@
 		let tempList = JSON.parse(tempCameraList);
 		systemStatus.value[2].desc = tempList[tempCameraIndex].camera_name;
 		systemStatus.value[2].active = true;
+	} else {
+		console.warn('[Dashboard] 摄像头未配置: cameraList=', tempCameraList, 'camera=', tempCameraIndex);
 	}
 
 	invoke("check_process_running").then(()=>{
 		systemStatus.value[1].desc = '负责进行面容认证的服务';
 		systemStatus.value[1].active = true;
-	}).catch(()=>{
+	}).catch((error)=>{
+		console.warn('[Dashboard] 解锁核心服务检测失败:', formatObjectString(error));
 		systemStatus.value[1].desc = '服务未启动，请检查计划任务或手动启动';
 		systemStatus.value[1].active = false;
 	})
@@ -156,10 +159,10 @@
 	.dashboard-wrapper {
 		display: flex;
 		flex-direction: column;
-		/* flex:1 替代 height:100% — 路由 out-in 过渡期间百分比高度无法解析，
-		   flex 布局不依赖父元素定义 height，re-mount 后仍能撑满 el-main */
 		flex: 1;
-		min-height: 0;
+		/* calc 兜底：VM 待机恢复 / 路由过渡后 flex 高度可能未重算，
+		   min-height 用 viewport 单位保证始终有可见区域（50px header + 60px padding） */
+		min-height: calc(100vh - 110px);
 		color: #2c3e50;
 		animation: pageEnter 0.6s cubic-bezier(0.22, 1, 0.36, 1);
 	}
