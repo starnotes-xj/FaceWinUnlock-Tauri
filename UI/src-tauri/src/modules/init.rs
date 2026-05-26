@@ -144,6 +144,34 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         .set_value("ThreadingModel", &"Apartment")
         .map_err(|e| CustomResult::error(Some(format!("写 ThreadingModel 失败: {}", e)), None))?;
 
+    // 4. 写入应用注册表配置（HKLM\SOFTWARE\facewinunlock-tauri）
+    let app_reg_path = r"SOFTWARE\facewinunlock-tauri";
+    let (app_key, _) = hklm
+        .create_subkey_with_flags(app_reg_path, KEY_WRITE)
+        .map_err(|e| CustomResult::error(Some(format!("创建应用注册表键失败: {}", e)), None))?;
+
+    // 默认配置（仅写入尚未存在的键，避免覆盖用户自定义设置）
+    let defaults: &[(&str, &str)] = &[
+        ("UNLOCK_SCENE", "1,2,4"),
+        ("SHOW_TILE", "1"),
+        ("CONNECT_TO_PIPE", "1"),
+        ("RETRY_DELAY", "10.0"),
+        ("UNLOCK_GRACE_PERIOD", "5.0"),
+        ("CREDUI_ALLOW_GENERIC", "0"),
+        ("DLL_LOG_PATH", ROOT_DIR.to_str().unwrap_or(r"C:\Program Files\facewinunlock-tauri")),
+        // 动画 UI（阶段 B/C）— 默认启用以便 VM 测试
+        ("ANIMATION_UI_ENABLED", "1"),
+    ];
+
+    for &(name, value) in defaults {
+        // 仅在键不存在时写入，避免覆盖已有配置
+        if app_key.get_value::<String, _>(name).is_err() {
+            app_key
+                .set_value(name, &value)
+                .map_err(|e| CustomResult::error(Some(format!("写 {name} 失败: {e}")), None))?;
+        }
+    }
+
     Ok(CustomResult::success(None, None))
 }
 
