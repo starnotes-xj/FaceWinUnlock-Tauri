@@ -41,7 +41,8 @@
       "D:\\OpenCV\\build\\x64\\vc16\\bin\\opencv_videoio_ffmpeg4120_64.dll": "opencv_videoio_ffmpeg4120_64.dll",
       "../resources/face_detection_yunet_2023mar.onnx": "resources/face_detection_yunet_2023mar.onnx",
       "../resources/face_recognition_sface_2021dec.onnx": "resources/face_recognition_sface_2021dec.onnx",
-      "../resources/face_liveness.onnx": "resources/face_liveness.onnx"
+      "../resources/face_liveness.onnx": "resources/face_liveness.onnx",
+      "../resources/animation_frames.bin": "resources/animation_frames.bin"
     },
     "windows": {
       "wix": {

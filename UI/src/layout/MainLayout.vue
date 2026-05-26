@@ -185,6 +185,9 @@
     .main-content {
         padding: 30px;
         overflow-y: auto;
+        /* min-height: 0 关键：flex 子项 overflow:auto 时，无此项会被子内容撑大，
+           导致 height:100% 链断裂、白屏复发 */
+        min-height: 0;
     }
 
     .global-header {

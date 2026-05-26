@@ -105,7 +105,7 @@
 		</el-row>
 
 		<el-row :gutter="24" class="content-section">
-			<el-col :span="10" style="height:100%;">
+			<el-col :span="10" class="col-flex">
 				<div class="glass-card main-card">
 					<div class="card-title">
 						<span>服务监控中心</span>
@@ -126,7 +126,7 @@
 				</div>
 			</el-col>
 
-			<el-col :span="14" style="height:100%;">
+			<el-col :span="14" class="col-flex">
 				<div class="glass-card main-card">
 					<div class="card-title">
 						<span>今日登录统计</span>
@@ -240,16 +240,25 @@
 		margin-left: 6px;
 	}
 
-	/* 主内容区域卡片 */
-	.content-section{
-		flex-grow: 1;
-		height: 0px;
+	/* 主内容区域卡片
+	   flex: 1 + min-height: 0 让 flexbox 分配剩余高度，无需百分比高度链 */
+	.content-section {
+		flex: 1;
+		min-height: 0;
+	}
+
+	/* el-col 本身改为 flex 列容器，让 main-card 直接用 flex:1 填满 */
+	.col-flex {
+		display: flex;
+		flex-direction: column;
 	}
 
 	.main-card {
-		height: calc(100% - 80px);
+		flex: 1;
+		min-height: 0;
 		display: flex;
 		flex-direction: column;
+		overflow: hidden;
 	}
 
 	.card-title {
@@ -265,7 +274,9 @@
 
 	/* 服务状态列表样式 */
 	.status-grid {
-		flex-grow: 1;
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
 	}
 
 	.status-row {
@@ -314,6 +325,8 @@
 
 	/* 时间轴日志样式 */
 	.timeline-container {
+		flex: 1;
+		min-height: 0;
 		padding-left: 10px;
 		overflow-y: auto;
 	}

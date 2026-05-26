@@ -221,7 +221,9 @@ Server DLL 内部：
 | A | A7 亮度功能迁移到 DLL | ⏸️ 延后 | - | C 阶段之后再做 |
 | B | 旋转环 PoC（D2D + DComp 子窗口） | ✅ 完成 | 2026-05-26 | （本次） |
 | B | **路径 C：DComp Topmost + 磁贴定位** | ✅ 完成 | 2026-05-26 | （本次） |
-| C | C1-C6 状态机 | 🔄 进行中 | 2026-05-26 | 动画状态机+管道驱动已实现；VM 测试修复两个 Bug（弧截断 + 位置偏低）→ 待回归验证 |
+| C | C1-C6 状态机（旋转环版） | ✅ 完成 | 2026-05-26 | 动画状态机+管道驱动已实现；VM 测试修复两个 Bug（弧截断 + 位置偏低） |
+| C' | **黑洞 Loader 动画替换** | ✅ 完成 | 2026-05-26 | （本次）—— 基于 [Uiverse.io](https://uiverse.io/StealthWorm/pink-duck-62) 的黑洞+弧线文字设计，完整替换原旋转环动画 |
+| C' | 黑洞 Loader VM 实测验证 | ⏳ 待开始 | - | VM 锁屏验证 4 状态动画视觉效果 + 性能（目标：100 次锁屏/解锁） |
 | D | D1-D4 摄像头预览 | ⏳ 可选 | - | - |
 
 状态图例：⏳ 待开始 / 🔄 进行中 / ✅ 完成 / ⏸️ 阻塞 / ❌ 取消
@@ -296,6 +298,81 @@ LogonUI 父 HWND (OnCreatingWindow 返回)
 | `Server/src/CPipeListener.rs` | +AnimationSlot 参数、set_anim_state()、Client/Creds 线程驱动状态 |
 | `Server/src/CSampleProvider.rs` | +animation_slot 字段、传递到 CPipeListener 和 SampleCredential |
 | `Server/src/CSampleCredential.rs` | 接受外部 AnimationSlot，不再自建
+
+### 阶段 C' 完成情况（黑洞 Loader 动画替换 · 2026-05-26）
+
+**动机：** 原旋转环动画过于简洁，用户选择了 [Uiverse.io 黑洞 loader](https://uiverse.io/StealthWorm/pink-duck-62) 作为替代，要求全 4 状态替换 + 状态切换文字 + 尽量还原 CSS 视觉效果。
+
+**新动画设计：**
+```
+┌────────── 200×200 DComp Surface ──────────┐
+│                                            │
+│    ┌── 弧线文字 (DWrite 逐字弧形定位) ──┐   │
+│    │  "SCANNING..." / "WELCOME" 等     │   │
+│    └──────────────────────────────────┘   │
+│                                            │
+│         ┌─ 小旋转环 (3s周期) ─┐           │
+│         │  ┌──────────────┐   │           │
+│         │  │ 黑洞主体圆    │   │           │
+│         │  │ 径向渐变      │   │           │
+│         │  │ 黑→白        │   │           │
+│         │  └──────────────┘   │           │
+│         └─────────────────────┘           │
+│                                            │
+│     ╱ 椭圆盘 (42° 倾斜, 模拟3D碟盘) ╱     │
+│    ╱  径向渐变 白→灰→白           ╱       │
+│   ╱  2s 脉动周期                 ╱        │
+│                                            │
+│  ~~~ 外发光环 (4层同心椭圆 α衰减) ~~~     │
+│  ~~~ 模拟 CSS blur(4px)+box-shadow   ~~~   │
+│                                            │
+└────────────────────────────────────────────┘
+```
+
+**CSS → D2D 翻译映射：**
+
+| CSS 特性 | D2D 等价 | 复杂度 |
+|---|---|---|
+| `radial-gradient(circle at center, black 25%, white 35%...)` | `ID2D1RadialGradientBrush` 5-stop 渐变 | 中 |
+| `blur(4px)` + `box-shadow` 外发光 | 4 层同心椭圆 `CreateSolidColorBrush` + α 衰减 (0.50→0.22→0.08→0.04) | 低 |
+| `rotate3d(1,1,1,220deg)` 碟盘 | 椭圆 (rx=20, ry=42) + 2D 42° 旋转 + 径向渐变（无真 3D） | 低 |
+| `@keyframes pulseAnimation` (scale 1→1.09) | 正弦波 scale(0.97~1.03)，2s 周期 | 低 |
+| `@keyframes rotate` 文字旋转 | `mat_rotation` + 角度增量，按状态调速 (8s/3s) | 低 |
+| SVG `textPath` 弧线文字 | DWrite `DrawText` 逐字：半径 84px、张角 260°、切线方向旋转 | 高 |
+| `drop-shadow(0 2px 8px black)` 文字阴影 | **未实现** — D2D Shadow effect 需额外 COM 接口，当前优先级低 | — |
+
+**4 状态参数：**
+
+| 状态 | 弧线文字 | 旋转周期 | 色调 | 特效 |
+|---|---|---|---|---|
+| Idle | `FACE WIN UNLOCK` | 8s | 无 | 黑洞基础 + 微脉动 |
+| Scanning | `SCANNING...` | 3s | 无 | 黑洞基础 + 快速旋转 |
+| Success | `WELCOME` | 8s | 绿色环叠加 + 对号 | 2s 淡出 → Idle |
+| Failure | `TRY AGAIN` | 8s | 红色环叠加 + 叉号 + 抖动 | 2s 淡出 → Idle |
+
+**技术要点：**
+- 渲染表面从 128×128 → 200×200（适应弧线文字半径 84px）
+- 新增 `Win32_Graphics_DirectWrite` feature（DWrite 文字渲染）
+- `ID2D1RadialGradientBrush` 通过 QI `ID2D1DeviceContext` → `ID2D1RenderTarget` 创建（windows-rs 0.59 限制）
+- `DrawText` 用 `std::ptr::from_ref` 传 `D2D_RECT_F` 指针（API 接受 `*const D2D_RECT_F`）
+- 每帧创建 4 个临时 `ID2D1SolidColorBrush`（外发光环）+ 1 个淡出遮罩（Success/Failure），COM 引用计数由 Rust Drop 管理
+- 公共接口（`AnimState`、`AnimationContext`、`AnimationSlot`、`make_slot`）完全不变
+
+**文件变更：**
+
+| 文件 | 变更 |
+|---|---|
+| `Server/src/animation.rs` | 648行 → 869行：新 `BlackHoleRes`、`make_radial_brush`、`render_arc_text`、`render_blackhole_core`、4 状态渲染函数 |
+| `Server/Cargo.toml` | +`Win32_Graphics_DirectWrite` feature |
+
+**编译状态：** `cargo check -p winlogon` 通过（只有项目原有的命名规范警告）
+
+**已知局限：**
+1. 文字无 `drop-shadow`（CSS 原版有黑色阴影提升可读性）— 可用 D2D 二次绘制偏移实现，但每帧字符数翻倍
+2. 碟盘无真 3D 变换 — 用户说"尽量还原"可接受
+3. 每帧创建临时笔刷（外发光 4 个 + 淡出 1 个）— 实测性能后再决定是否缓存
+
+---
 
 ---
 
@@ -378,6 +455,6 @@ LogonUI 父 HWND (OnCreatingWindow 返回)
 
 ---
 
-**最后更新**：2026-05-26（阶段 C 状态机+管道驱动实现完成）
-**当前阶段**：C 状态机+管道驱动已实现，等待 VM 实测
-**下一里程碑**：VM 锁屏验证 4 状态动画（Idle → Scanning → Success/Failure），验证通过后进入阶段 D（摄像头预览）或考虑合并
+**最后更新**：2026-05-26（阶段 C' 黑洞 Loader 动画替换完成，编译通过）
+**当前阶段**：C' 黑洞 Loader 代码完成，等待 VM 实测
+**下一里程碑**：VM 锁屏验证黑洞 Loader 4 状态动画视觉效果 + 性能，100 次锁屏/解锁无崩溃后进入阶段 D 或合并

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  /* CRITICAL: 200×200 必须与 capture_frames.js WIDTH/HEIGHT、
+     animation.rs ANIM_WIDTH/ANIM_HEIGHT 三方同步 */
+  body {
+    width: 200px; height: 200px;
+    background: transparent;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .loader {
+    display: flex; width: 8rem; height: 8rem;
+    justify-content: center; align-items: center;
+    position: relative; flex-direction: column;
+  }
+  .curve {
+    width: 180%; height: 180%;
+    position: absolute;
+    animation: rotate 8s linear infinite;
+    fill: transparent;
+  }
+  .curve text {
+    letter-spacing: 20px; text-transform: uppercase;
+    font: 1.5em "Fira Sans", sans-serif;
+    fill: white;
+    filter: drop-shadow(0 2px 8px black);
+  }
+  .blackhole {
+    z-index: -1; display: flex; position: absolute;
+    width: 8rem; height: 8rem;
+    align-items: center; justify-content: center;
+  }
+  .blackhole-circle {
+    z-index: 0; display: flex;
+    width: 100%; height: 100%;
+    border-radius: 50%;
+    background: radial-gradient(circle at center, black 25%, rgba(255,255,255,0.95) 33%, rgba(255,255,255,0.4) 55%, transparent 75%);
+    box-shadow: 0px 0px 2rem rgba(194,186,187,0.5);
+    align-items: center; justify-content: center;
+  }
+  .blackhole-circle::after {
+    z-index: 0; position: absolute; content: "";
+    display: flex; width: 100%; height: 100%;
+    border-radius: 50%;
+    border: 4px solid rgba(255,255,255,0.6);
+    background: radial-gradient(circle at center, black 35%, rgba(255,255,255,0.6) 55%, rgba(255,255,255,0.15) 70%, transparent 85%);
+    box-shadow: 0px 0px 5rem rgba(194,186,187,0.35);
+    align-items: center; justify-content: center;
+    filter: blur(4px);
+    animation: pulseAnimation linear infinite 2s alternate-reverse;
+  }
+  .blackhole-circle::before {
+    z-index: 1; content: ""; display: flex;
+    width: 4rem; height: 4rem;
+    border: 2px solid rgba(255,255,255,0.85);
+    box-shadow: 3px 3px 10px rgba(194,186,187,0.5), inset 0 0 1rem rgba(255,255,255,0.8);
+    border-radius: 50%; top: 5rem;
+    filter: blur(0.5px);
+    animation: rotate linear infinite 3s;
+  }
+  .blackhole-disc {
+    position: absolute; z-index: 0; display: flex;
+    width: 5rem; height: 10rem;
+    border-radius: 50%;
+    background: radial-gradient(circle at center, rgba(255,255,255,0.95) 75%, rgba(53,53,53,0.4) 88%, transparent 100%);
+    filter: blur(1rem) brightness(130%);
+    border: 1rem solid rgba(255,255,255,0.5);
+    box-shadow: 0px 0px 3rem rgba(215,196,190,0.45);
+    transform: rotate3d(1, 1, 1, 220deg);
+    animation: pulseAnimation2 linear infinite 2s alternate-reverse;
+    justify-content: center; align-items: center;
+    -webkit-mask: radial-gradient(circle at center, transparent 32%, black 38%);
+    mask: radial-gradient(circle at center, transparent 32%, black 38%);
+  }
+  .blackhole-disc::before {
+    content: ""; position: absolute; z-index: 0; display: flex;
+    width: 5rem; height: 10rem; border-radius: 50%;
+    background: radial-gradient(circle at center, rgba(255,255,255,0.8) 75%, rgba(53,53,53,0.3) 88%, transparent 100%);
+    filter: blur(3rem); border: 1rem solid rgba(255,255,255,0.4);
+    box-shadow: 0px 0px 6rem rgba(215,196,190,0.3);
+    animation: pulseAnimation linear infinite 2s alternate-reverse;
+    -webkit-mask: radial-gradient(circle at center, transparent 32%, black 38%);
+    mask: radial-gradient(circle at center, transparent 32%, black 38%);
+  }
+  @keyframes rotate {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+  @keyframes pulseAnimation {
+    0% { box-shadow: 0px 0px 3rem #c2babb; transform: scale(1); }
+    100% { box-shadow: 0px 0px 5rem #c2babb; transform: scale(1.09); }
+  }
+  @keyframes pulseAnimation2 {
+    0% { box-shadow: 0px 0px 3rem #c2babb; transform: rotate3d(1, 1, 1, 220deg) scale(1); }
+    100% { box-shadow: 0px 0px 5rem #c2babb; transform: rotate3d(1, 1, 1, 220deg) scale(.95); }
+  }
+</style>
+</head>
+<body>
+<div class="loader">
+  <div class="blackhole">
+    <div class="blackhole-circle"></div>
+    <div class="blackhole-disc"></div>
+  </div>
+  <div class="curve">
+    <svg viewBox="0 0 500 500">
+      <path id="loading" d="M73.2,148.6c4-6.1,65.5-96.8,178.6-95.6c111.3,1.2,170.8,90.3,175.1,97"></path>
+    </svg>
+  </div>
+</div>
+</body>
+</html>

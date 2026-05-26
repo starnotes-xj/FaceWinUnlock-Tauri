@@ -1,24 +1,20 @@
-//! 动画 UI 管线（阶段 C · 状态机）
+//! 动画 UI 管线（阶段 E · 预渲染帧 + 文字叠加）
 //!
 //! DComp topmost 层叠加在 LogonUI 凭据磁贴上方，60 FPS GPU 动画。
 //! 状态机：Idle → Scanning → Success|Failure → (2s) → Idle
 //!
-//! 架构：
-//!   LogonUI 父 HWND
-//!     ├── [DComp Topmost] ← Visual { Offset = 磁贴位置 }
-//!     │       └── Surface (128×128) ← D2D 状态机动画
-//!     └── [Child Windows] ← LogonUI 凭据磁贴
+//! 动画设计来源：https://uiverse.io/StealthWorm/pink-duck-62
 //!
-//!   AnimationSlot = Arc<Mutex<Option<AnimationContext>>>
-//!     - CSampleCredential: 创建并存入 AnimationContext
-//!     - CPipeListener: 通过 set_state() 驱动状态变更
-//!     - RenderThread: 读取状态并渲染对应动画
+//! 架构：浏览器预渲染帧序列 + DWrite 动态文字叠加
+//!   构建时：Puppeteer 渲染 HTML/CSS → 导出 BGRA8 帧序列 (animation_frames.bin)
+//!   运行时：加载帧 → ID2D1Bitmap1 Vec → 每帧 DrawImage + 文字 + 状态特效
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use windows::core::w;
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::{
     Foundation::{BOOL, HMODULE, HWND, LPARAM, POINT, RECT},
@@ -26,15 +22,18 @@ use windows::Win32::{
         Direct2D::{
             Common::{
                 D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-                D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
-                D2D_POINT_2F, D2D_SIZE_F, D2D_RECT_F,
+                D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
+                D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_U,
+                D2D1_COMPOSITE_MODE_SOURCE_OVER,
             },
             D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1,
-            ID2D1PathGeometry1, ID2D1StrokeStyle, D2D1_ARC_SEGMENT,
-            D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
+            ID2D1PathGeometry1, ID2D1StrokeStyle, ID2D1RenderTarget,
+            D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
             D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-            D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_SWEEP_DIRECTION_CLOCKWISE,
-            ID2D1Brush, ID2D1Geometry,
+            D2D1_FACTORY_TYPE_SINGLE_THREADED,
+            ID2D1Geometry, ID2D1SolidColorBrush,
+            D2D1_INTERPOLATION_MODE_LINEAR,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
         },
         Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL},
         Direct3D11::{
@@ -42,6 +41,13 @@ use windows::Win32::{
         },
         DirectComposition::{
             DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionVisual2,
+        },
+        DirectWrite::{
+            DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
+            DWRITE_FACTORY_TYPE_SHARED, DWRITE_TEXT_ALIGNMENT_CENTER,
+            DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_FONT_WEIGHT_BOLD,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            DWRITE_MEASURING_MODE_NATURAL,
         },
         Dxgi::{Common::DXGI_FORMAT_B8G8R8A8_UNORM, IDXGIDevice, IDXGISurface},
         Gdi::{
@@ -60,21 +66,29 @@ use crate::read_facewinunlock_registry;
 
 // ── 常量 ──────────────────────────────────────────────────────
 
-const ANIM_WIDTH: u32 = 128;
-const ANIM_HEIGHT: u32 = 128;
+// CRITICAL: ANIM_WIDTH/HEIGHT 必须与以下两处保持一致，create_frames() 会 assert：
+//   - UI/resources/capture_frames.js WIDTH / HEIGHT
+//   - UI/resources/animation_render.html body { width / height }
+const ANIM_WIDTH: u32 = 200;
+const ANIM_HEIGHT: u32 = 200;
 
-const RING_RADIUS: f32 = 48.0;
-const RING_CENTER_X: f32 = 64.0;
-const RING_CENTER_Y: f32 = 64.0;
-const ARC_SPAN_DEG: f32 = 120.0;
-const BG_STROKE_WIDTH: f32 = 2.0;
-const ARC_STROKE_WIDTH: f32 = 3.0;
-const ROTATION_SPEED: f32 = 180.0;
+const CX: f32 = 100.0;
+const CY: f32 = 100.0;
+
+// 文字
+const TEXT_RADIUS: f32 = 84.0;
+const TEXT_FONT_SIZE: f32 = 14.0;
+const TEXT_ARC_DEG: f32 = 260.0;
+const TEXT_START_DEG: f32 = 230.0;
+
+const TEXT_PERIOD_IDLE: f32 = 8.0;
+const TEXT_PERIOD_SCAN: f32 = 3.0;
+
+// 预渲染帧参数（须与 capture_frames.js 一致）
+const FRAME_PERIOD: f64 = 6.0;
+
 const DEFAULT_FPS: u32 = 60;
-
-/// Success/Failure 动画持续后自动退回 Idle 的时间
 const OUTCOME_TIMEOUT_SECS: f32 = 2.0;
-
 const TILE_FIND_RETRY_MS: u64 = 200;
 const TILE_FIND_MAX_RETRIES: u32 = 15;
 const TILE_MIN_SIZE: i32 = 64;
@@ -82,8 +96,6 @@ const TILE_MAX_SIZE: i32 = 512;
 
 // ── 帧率检测 ─────────────────────────────────────────────────
 
-/// 查询 `hwnd` 所在显示器的刷新率（Hz）。
-/// 失败时返回 `DEFAULT_FPS`。
 fn query_monitor_refresh_rate(hwnd: HWND) -> u32 {
     unsafe {
         let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
@@ -109,7 +121,6 @@ fn query_monitor_refresh_rate(hwnd: HWND) -> u32 {
 
         let hz = dm.dmDisplayFrequency;
         if hz == 0 || hz == 1 {
-            // 0/1 = 驱动未报告有效值
             log::warn!("[anim] driver reported {hz} Hz, fallback {DEFAULT_FPS} Hz");
             return DEFAULT_FPS;
         }
@@ -117,7 +128,7 @@ fn query_monitor_refresh_rate(hwnd: HWND) -> u32 {
     }
 }
 
-// ── 动画状态 ──────────────────────────────────────────────────
+// ── 动画状态（公共接口不变）──────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AnimState {
@@ -127,21 +138,17 @@ pub enum AnimState {
     Failure,
 }
 
-/// 状态 + 进入时间（渲染线程原子读取）
 struct AnimStateData {
     state: AnimState,
     entered_at: Instant,
 }
 
-// ── 共享状态 ──────────────────────────────────────────────────
-
 struct RenderState {
     stop: AtomicBool,
-    /// 动画状态 + 状态进入时间（Mutex 保护）
     anim: Mutex<AnimStateData>,
 }
 
-// ── AnimationContext（主线程控制器）───────────────────────────
+// ── AnimationContext（公共接口不变）───────────────────────────
 
 pub struct AnimationContext {
     parent_hwnd: HWND,
@@ -167,8 +174,8 @@ impl AnimationContext {
         let thread_state = render_state.clone();
         let thread = std::thread::spawn(move || {
             let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
-            if let Err(_e) = run_render_loop(hwnd, &search_utf16, thread_state) {
-                // 渲染失败不影响登录
+            if let Err(e) = run_render_loop(hwnd, &search_utf16, thread_state) {
+                log::error!("[anim] render loop failed: {:?}", e);
             }
         });
 
@@ -179,7 +186,6 @@ impl AnimationContext {
         })
     }
 
-    /// 切换动画状态（由 CPipeListener 从管道线程调用）
     pub fn set_state(&self, new_state: AnimState) {
         if let Ok(mut a) = self.render_state.anim.lock() {
             if a.state != new_state {
@@ -205,9 +211,6 @@ impl Drop for AnimationContext {
     }
 }
 
-// ── 公开槽位类型（Arc 共享版本）───────────────────────────────
-
-/// Arc-wrapped animation slot，可跨组件共享
 pub type AnimationSlot = Arc<Mutex<Option<AnimationContext>>>;
 
 pub fn make_slot() -> AnimationSlot {
@@ -231,13 +234,8 @@ fn mat_rotation(angle_deg: f32, cx: f32, cy: f32) -> Matrix3x2 {
     }
 }
 
-fn mat_scale(sx: f32, sy: f32, cx: f32, cy: f32) -> Matrix3x2 {
-    Matrix3x2 {
-        M11: sx,  M12: 0.0,
-        M21: 0.0, M22: sy,
-        M31: cx * (1.0 - sx),
-        M32: cy * (1.0 - sy),
-    }
+fn mat_translate(tx: f32, ty: f32) -> Matrix3x2 {
+    Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: tx, M32: ty }
 }
 
 fn mat_mul(a: &Matrix3x2, b: &Matrix3x2) -> Matrix3x2 {
@@ -251,7 +249,412 @@ fn mat_mul(a: &Matrix3x2, b: &Matrix3x2) -> Matrix3x2 {
     }
 }
 
-// ── 磁贴定位（多层策略 + 自诊断）─────────────────────────────
+// ── 颜色工具 ──────────────────────────────────────────────────
+
+fn color(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F { r, g, b, a }
+}
+
+// ── 预构建资源 ────────────────────────────────────────────────
+
+struct BlackHoleRes {
+    // 预渲染帧
+    frames: Vec<ID2D1Bitmap1>,
+    total_frames: u32,
+
+    // 纯色笔刷
+    white_brush: ID2D1SolidColorBrush,
+    green_brush: ID2D1SolidColorBrush,
+    red_brush: ID2D1SolidColorBrush,
+    black_brush: ID2D1SolidColorBrush,
+
+    // 文字
+    text_format: IDWriteTextFormat,
+
+    // 几何体
+    check: ID2D1PathGeometry1,
+    cross: ID2D1PathGeometry1,
+}
+
+/// 查找帧数据文件，返回原始字节
+fn load_frames_raw() -> Result<Vec<u8>, String> {
+    // 1. 注册表自定义路径（最高优先级，供高级用户覆盖）
+    if let Ok(custom) = read_facewinunlock_registry("ANIMATION_FRAMES_PATH") {
+        let path = custom.trim();
+        if !path.is_empty() {
+            log::info!("[anim] trying registry override path: {path}");
+            if let Ok(data) = std::fs::read(path) {
+                log::info!("[anim] loaded frames from registry override: {path}");
+                return Ok(data);
+            }
+            log::warn!("[anim] registry override path not found: {path}");
+        }
+    }
+
+    // 2. 安装目录（DLL_LOG_PATH 由 UI 安装时写入，指向 ROOT_DIR）
+    if let Ok(raw) = read_facewinunlock_registry("DLL_LOG_PATH") {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            log::warn!("[anim] DLL_LOG_PATH is empty in registry, skipping install-dir lookup");
+        } else {
+            let stripped = if let Some(rest) = trimmed.strip_prefix("\\\\?\\") {
+                rest
+            } else {
+                trimmed
+            };
+            let install_dir = stripped.trim_end_matches('\\');
+            for rel in &["resources\\animation_frames.bin", "animation_frames.bin"] {
+                let p = format!("{}\\{}", install_dir, rel);
+                match std::fs::read(&p) {
+                    Ok(data) => {
+                        log::info!("[anim] loaded frames from install dir: {p}");
+                        return Ok(data);
+                    }
+                    Err(e) => log::info!("[anim] tried {}: {}", p, e),
+                }
+            }
+        }
+    }
+
+    // 3. DLL 自身所在目录（开发/测试场景 DLL 未注册到 System32 时）
+    match get_dll_directory() {
+        Ok(dll_dir) => {
+            for rel in &["resources\\animation_frames.bin", "animation_frames.bin"] {
+                let p = format!("{}\\{}", dll_dir, rel);
+                match std::fs::read(&p) {
+                    Ok(data) => {
+                        log::info!("[anim] loaded frames from DLL dir: {p}");
+                        return Ok(data);
+                    }
+                    Err(e) => log::info!("[anim] tried {}: {}", p, e),
+                }
+            }
+        }
+        Err(_) => log::warn!("[anim] get_dll_directory failed, cannot try DLL-relative fallback"),
+    }
+
+    Err("animation_frames.bin not found. Set ANIMATION_FRAMES_PATH registry key or reinstall.".to_string())
+}
+
+/// 本函数地址用于 GetModuleHandleExW 反查 DLL 模块
+extern "C" fn addr_for_module_handle() {}
+
+/// 获取 DLL 所在目录（通过函数地址反查，不依赖文件名拼写）
+fn get_dll_directory() -> Result<String, ()> {
+    unsafe {
+        use windows::Win32::System::LibraryLoader::{
+            GetModuleHandleExW, GetModuleFileNameW,
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        };
+        let mut hmod = HMODULE::default();
+        let addr = windows_core::PCWSTR::from_raw(
+            addr_for_module_handle as *const u16,
+        );
+        let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+        GetModuleHandleExW(flags, addr, &mut hmod)
+            .map_err(|_| log::warn!("[anim] GetModuleHandleExW failed"))?;
+        let mut buf = vec![0u16; 512];
+        let len = GetModuleFileNameW(Some(hmod), &mut buf) as usize;
+        if len == 0 { return Err(()); }
+        let full_path = String::from_utf16_lossy(&buf[..len]);
+        log::info!("[anim] DLL full path: {}", full_path);
+        std::path::Path::new(&full_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .ok_or(())
+    }
+}
+
+unsafe fn create_frames(
+    ctx: &ID2D1DeviceContext,
+    raw: &[u8],
+) -> windows_core::Result<(Vec<ID2D1Bitmap1>, u32)> {
+    if raw.len() < 12 {
+        return Err(windows::core::Error::new(
+            windows::Win32::Foundation::E_FAIL,
+            "frames file too small",
+        ));
+    }
+
+    let total_frames = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    let fw = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+    let fh = u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]);
+
+    log::info!("[anim] loading {total_frames} frames ({fw}x{fh})");
+
+    // 校验文件帧尺寸与编译时常量一致（capture_frames.js WIDTH/HEIGHT 必须与
+    // ANIM_WIDTH/ANIM_HEIGHT 同步，否则 stride 错位导致花屏）
+    if fw != ANIM_WIDTH || fh != ANIM_HEIGHT {
+        return Err(windows::core::Error::new(
+            windows::Win32::Foundation::E_FAIL,
+            format!(
+                "frame size mismatch: file is {}x{}, code expects {}x{}",
+                fw, fh, ANIM_WIDTH, ANIM_HEIGHT
+            )
+            .as_str(),
+        ));
+    }
+    if total_frames == 0 {
+        return Err(windows::core::Error::new(
+            windows::Win32::Foundation::E_FAIL,
+            "frames file declares zero frames",
+        ));
+    }
+
+    let frame_size = (fw * fh * 4) as usize;
+    if raw.len() < 12 + total_frames as usize * frame_size {
+        return Err(windows::core::Error::new(
+            windows::Win32::Foundation::E_FAIL,
+            "frames file truncated",
+        ));
+    }
+
+    let bmp_props = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+        colorContext: std::mem::ManuallyDrop::new(None),
+    };
+
+    let mut frames = Vec::with_capacity(total_frames as usize);
+    for i in 0..total_frames as usize {
+        let offset = 12 + i * frame_size;
+        let bmp = ctx.CreateBitmap(
+            D2D_SIZE_U { width: fw, height: fh },
+            Some(raw[offset..].as_ptr() as *const _),
+            fw * 4,
+            &bmp_props,
+        )?;
+        frames.push(bmp);
+    }
+
+    Ok((frames, total_frames))
+}
+
+unsafe fn create_all_resources(
+    d2d_factory: &ID2D1Factory1,
+    ctx: &ID2D1DeviceContext,
+    rt: &ID2D1RenderTarget,
+) -> windows_core::Result<BlackHoleRes> {
+    // ── 加载预渲染帧 ──
+
+    let raw = load_frames_raw().map_err(|e| {
+        log::error!("[anim] {e}");
+        windows::core::Error::new(windows::Win32::Foundation::E_FAIL, e)
+    })?;
+    let (frames, total_frames) = create_frames(ctx, &raw)?;
+
+    // ── 纯色笔刷 ──
+
+    let white_brush = rt.CreateSolidColorBrush(
+        &D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+        None,
+    )?;
+    let green_brush = rt.CreateSolidColorBrush(&color(0.2, 0.85, 0.4, 1.0), None)?;
+    let red_brush = rt.CreateSolidColorBrush(&color(0.9, 0.2, 0.2, 1.0), None)?;
+    let black_brush = rt.CreateSolidColorBrush(&color(0.0, 0.0, 0.0, 0.65), None)?;
+
+    // ── DWrite ──
+
+    let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+    let text_format: IDWriteTextFormat = dwrite_factory.CreateTextFormat(
+        w!("Segoe UI"),
+        None,
+        DWRITE_FONT_WEIGHT_BOLD,
+        DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL,
+        TEXT_FONT_SIZE,
+        w!("en-US"),
+    )?;
+    let _ = text_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    let _ = text_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+    // ── 几何体 ──
+
+    let check = d2d_factory.CreatePathGeometry()?;
+    {
+        let sink = check.Open()?;
+        sink.BeginFigure(D2D_POINT_2F { x: CX - 18.0, y: CY + 3.0 }, D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddLine(D2D_POINT_2F { x: CX - 5.0, y: CY + 16.0 });
+        sink.AddLine(D2D_POINT_2F { x: CX + 20.0, y: CY - 16.0 });
+        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        sink.Close()?;
+    }
+
+    let cross = d2d_factory.CreatePathGeometry()?;
+    {
+        let sink = cross.Open()?;
+        let d = 16.0;
+        sink.BeginFigure(D2D_POINT_2F { x: CX - d, y: CY - d }, D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddLine(D2D_POINT_2F { x: CX + d, y: CY + d });
+        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        sink.BeginFigure(D2D_POINT_2F { x: CX + d, y: CY - d }, D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddLine(D2D_POINT_2F { x: CX - d, y: CY + d });
+        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        sink.Close()?;
+    }
+
+    Ok(BlackHoleRes {
+        frames,
+        total_frames,
+        white_brush,
+        green_brush,
+        red_brush,
+        black_brush,
+        text_format,
+        check,
+        cross,
+    })
+}
+
+// ── 弧线文字渲染（带 drop-shadow）────────────────────────────
+
+unsafe fn render_arc_text(
+    ctx: &ID2D1DeviceContext,
+    res: &BlackHoleRes,
+    text: &str,
+    rotation_deg: f32,
+) -> windows_core::Result<()> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Ok(());
+    }
+    let n = chars.len();
+
+    for (i, &ch) in chars.iter().enumerate() {
+        let frac = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.5 };
+        let angle_deg = TEXT_START_DEG + frac * TEXT_ARC_DEG + rotation_deg;
+        let angle_rad = angle_deg.to_radians();
+        let px = CX + TEXT_RADIUS * angle_rad.cos();
+        let py = CY + TEXT_RADIUS * angle_rad.sin();
+        let tangent_deg = angle_deg + 90.0;
+
+        let rotate_mat = mat_rotation(tangent_deg, 0.0, 0.0);
+        let mut wbuf = [0u16; 2];
+        let ch_str = ch.encode_utf16(&mut wbuf);
+        let char_rect = D2D_RECT_F { left: -18.0, top: -10.0, right: 18.0, bottom: 10.0 };
+
+        // 阴影
+        let sxform = mat_mul(&rotate_mat, &mat_translate(px + 1.0, py + 2.0));
+        ctx.SetTransform(&sxform);
+        let _ = ctx.DrawText(ch_str, &res.text_format, std::ptr::from_ref(&char_rect), &res.black_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+        // 主体
+        let mxform = mat_mul(&rotate_mat, &mat_translate(px, py));
+        ctx.SetTransform(&mxform);
+        let _ = ctx.DrawText(ch_str, &res.text_format, std::ptr::from_ref(&char_rect), &res.white_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+    }
+    ctx.SetTransform(&mat_identity());
+    Ok(())
+}
+
+// ── 帧索引计算 ────────────────────────────────────────────────
+
+fn get_frame_idx(elapsed_secs: f64, total_frames: u32) -> u32 {
+    let phase = (elapsed_secs % FRAME_PERIOD) / FRAME_PERIOD;
+    (phase * total_frames as f64) as u32 % total_frames
+}
+
+// ── 各状态渲染（完整管理 BeginDraw/EndDraw）─────────────────
+
+unsafe fn render_base(
+    ctx: &ID2D1DeviceContext,
+    res: &BlackHoleRes,
+    elapsed_secs: f64,
+    tint: Option<&ID2D1SolidColorBrush>,
+    text: &str,
+    text_period: f32,
+    geo: Option<(&ID2D1Geometry, &ID2D1SolidColorBrush, f32)>,
+    shake: f32,
+    fade_progress: f32,
+    main_bitmap: &ID2D1Bitmap1,
+) -> windows_core::Result<()> {
+    let frame_idx = get_frame_idx(elapsed_secs, res.total_frames);
+
+    ctx.SetTarget(main_bitmap);
+    ctx.BeginDraw();
+    ctx.Clear(None);
+
+    // 抖动变换（Failure）
+    if shake != 0.0 {
+        ctx.SetTransform(&mat_translate(shake, 0.0));
+    }
+
+    // 1. 预渲染帧
+    ctx.DrawImage(
+        &res.frames[frame_idx as usize],
+        None,
+        None,
+        D2D1_INTERPOLATION_MODE_LINEAR,
+        D2D1_COMPOSITE_MODE_SOURCE_OVER,
+    );
+
+    // 2. 状态色调叠加
+    if let Some(tint) = tint {
+        ctx.DrawEllipse(
+            &D2D1_ELLIPSE { point: D2D_POINT_2F { x: CX, y: CY }, radiusX: 44.0, radiusY: 44.0 },
+            tint, 2.0, None::<&ID2D1StrokeStyle>,
+        );
+    }
+
+    // 3. 弧线文字
+    let text_rot = (elapsed_secs as f32 / text_period * 360.0) % 360.0;
+    render_arc_text(ctx, res, text, text_rot)?;
+
+    // 4. 几何体（对号/叉号）
+    if let Some((geo, brush, width)) = geo {
+        ctx.DrawGeometry(geo, brush, width, None::<&ID2D1StrokeStyle>);
+    }
+
+    // 5. 淡出遮罩
+    if fade_progress > 0.0 {
+        let fade_overlay = ctx.CreateSolidColorBrush(&color(0.0, 0.0, 0.0, fade_progress * 0.7), None)?;
+        ctx.FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: ANIM_WIDTH as f32, bottom: ANIM_HEIGHT as f32 }, &fade_overlay);
+    }
+
+    if shake != 0.0 {
+        ctx.SetTransform(&mat_identity());
+    }
+
+    ctx.EndDraw(None, None)?;
+    Ok(())
+}
+
+unsafe fn render_idle(
+    ctx: &ID2D1DeviceContext, res: &BlackHoleRes, elapsed_secs: f64, main_bitmap: &ID2D1Bitmap1,
+) -> windows_core::Result<()> {
+    render_base(ctx, res, elapsed_secs, None, "FACE WIN UNLOCK", TEXT_PERIOD_IDLE, None, 0.0, 0.0, main_bitmap)
+}
+
+unsafe fn render_scanning(
+    ctx: &ID2D1DeviceContext, res: &BlackHoleRes, elapsed_secs: f64, main_bitmap: &ID2D1Bitmap1,
+) -> windows_core::Result<()> {
+    render_base(ctx, res, elapsed_secs, None, "SCANNING...", TEXT_PERIOD_SCAN, None, 0.0, 0.0, main_bitmap)
+}
+
+unsafe fn render_success(
+    ctx: &ID2D1DeviceContext, res: &BlackHoleRes, elapsed_secs: f64, state_age: &Duration, main_bitmap: &ID2D1Bitmap1,
+) -> windows_core::Result<()> {
+    let progress = (state_age.as_secs_f32() / OUTCOME_TIMEOUT_SECS).clamp(0.0, 1.0);
+    let check_geo: ID2D1Geometry = res.check.cast()?;
+    render_base(ctx, res, elapsed_secs, Some(&res.green_brush), "WELCOME", TEXT_PERIOD_IDLE, Some((&check_geo, &res.green_brush, 4.0)), 0.0, progress, main_bitmap)
+}
+
+unsafe fn render_failure(
+    ctx: &ID2D1DeviceContext, res: &BlackHoleRes, elapsed_secs: f64, state_age: &Duration, main_bitmap: &ID2D1Bitmap1,
+) -> windows_core::Result<()> {
+    let progress = (state_age.as_secs_f32() / OUTCOME_TIMEOUT_SECS).clamp(0.0, 1.0);
+    let shake = (state_age.as_secs_f32() * 30.0).sin() * 10.0 * (1.0 - progress).powi(2);
+    let cross_geo: ID2D1Geometry = res.cross.cast()?;
+    render_base(ctx, res, elapsed_secs, Some(&res.red_brush), "TRY AGAIN", TEXT_PERIOD_IDLE, Some((&cross_geo, &res.red_brush, 3.5)), shake, progress, main_bitmap)
+}
+
+// ── 磁贴定位（未改动）─────────────────────────────────────────
 
 unsafe fn dump_child_windows(parent: HWND) {
     struct Ctx;
@@ -320,7 +723,6 @@ unsafe fn find_by_size_heuristic(parent: HWND) -> Option<RECT> {
         if (w - h).abs() > w / 2 { return BOOL(1); }
         let size_score = 100 - ((w - 192).abs() + (h - 192).abs()) / 4;
         let parent_h = { let mut pr = RECT::default(); if GetWindowRect(ctx.parent, &mut pr).is_err() { return BOOL(1); } pr.bottom - pr.top };
-        // 凭据磁贴图像区在父窗口上半部；偏向选择上方窗口
         let pos_score = if rect.top < parent_h / 2 { 50 } else { 0 };
         ctx.candidates.push(Candidate { rect, score: size_score + pos_score });
         BOOL(1)
@@ -344,8 +746,6 @@ unsafe fn fallback_position(parent: HWND) -> RECT {
     let mut cr = RECT::default();
     let _ = GetClientRect(parent, &mut cr);
     let cx = (cr.right - cr.left) / 2;
-    // 凭据磁贴图像区在父窗口上方约 1/4 处
-    // VM 实测：2/3 → PIN 输入区；1/3 → 与用户头像重合；1/4 → 头像上方
     let cy = (cr.bottom - cr.top) / 4;
     RECT { left: cx - ANIM_WIDTH as i32 / 2, top: cy - ANIM_HEIGHT as i32 / 2, right: cx + ANIM_WIDTH as i32 / 2, bottom: cy + ANIM_HEIGHT as i32 / 2 }
 }
@@ -361,93 +761,7 @@ unsafe fn find_tile_position(parent: HWND, search_text: &[u16]) -> (RECT, &'stat
     (fallback_position(parent), "fallback")
 }
 
-// ── 几何体预创建 ──────────────────────────────────────────────
-
-struct PrebuiltGeo {
-    arc: ID2D1Geometry,
-    check: ID2D1PathGeometry1,
-    cross: ID2D1PathGeometry1,
-}
-
-/// 预创建弧、对号、叉号几何体
-unsafe fn create_all_geometries(factory: &ID2D1Factory1) -> windows_core::Result<PrebuiltGeo> {
-    // ── 弧（120°）─
-    let arc = create_arc_geometry(factory, RING_RADIUS, ARC_SPAN_DEG)?;
-    let arc_geom: ID2D1Geometry = arc.cast()?;
-
-    // ── 对号 ─
-    let check = factory.CreatePathGeometry()?;
-    {
-        let sink = check.Open()?;
-        sink.BeginFigure(
-            D2D_POINT_2F { x: RING_CENTER_X - 16.0, y: RING_CENTER_Y + 2.0 },
-            D2D1_FIGURE_BEGIN_FILLED,
-        );
-        sink.AddLine(D2D_POINT_2F { x: RING_CENTER_X - 4.0, y: RING_CENTER_Y + 14.0 });
-        sink.AddLine(D2D_POINT_2F { x: RING_CENTER_X + 18.0, y: RING_CENTER_Y - 14.0 });
-        sink.EndFigure(D2D1_FIGURE_END_OPEN);
-        sink.Close()?;
-    }
-
-    // ── 叉号 ─
-    let cross = factory.CreatePathGeometry()?;
-    {
-        let sink = cross.Open()?;
-        let d = 14.0;
-        sink.BeginFigure(
-            D2D_POINT_2F { x: RING_CENTER_X - d, y: RING_CENTER_Y - d },
-            D2D1_FIGURE_BEGIN_FILLED,
-        );
-        sink.AddLine(D2D_POINT_2F { x: RING_CENTER_X + d, y: RING_CENTER_Y + d });
-        sink.EndFigure(D2D1_FIGURE_END_OPEN);
-        // 第二段
-        sink.BeginFigure(
-            D2D_POINT_2F { x: RING_CENTER_X + d, y: RING_CENTER_Y - d },
-            D2D1_FIGURE_BEGIN_FILLED,
-        );
-        sink.AddLine(D2D_POINT_2F { x: RING_CENTER_X - d, y: RING_CENTER_Y + d });
-        sink.EndFigure(D2D1_FIGURE_END_OPEN);
-        sink.Close()?;
-    }
-
-    Ok(PrebuiltGeo { arc: arc_geom, check, cross })
-}
-
-// ── D2D 几何体辅助创建 ────────────────────────────────────────
-
-unsafe fn create_arc_geometry(
-    factory: &ID2D1Factory1,
-    radius: f32,
-    span_deg: f32,
-) -> windows_core::Result<ID2D1PathGeometry1> {
-    let geometry = factory.CreatePathGeometry()?;
-    let sink = geometry.Open()?;
-    let half_rad = (span_deg / 2.0).to_radians();
-    // Arc 起止点相对于圆心 (RING_CENTER_X, RING_CENTER_Y)，确保始终在 128×128 曲面内
-    // 起点：圆心右上方 half_span 角处；终点：圆心右下方 half_span 角处（顺时针）
-    sink.BeginFigure(
-        D2D_POINT_2F {
-            x: RING_CENTER_X + radius * half_rad.cos(),
-            y: RING_CENTER_Y - radius * half_rad.sin(),
-        },
-        D2D1_FIGURE_BEGIN_HOLLOW,
-    );
-    sink.AddArc(&D2D1_ARC_SEGMENT {
-        point: D2D_POINT_2F {
-            x: RING_CENTER_X + radius * half_rad.cos(),
-            y: RING_CENTER_Y + radius * half_rad.sin(),
-        },
-        size: D2D_SIZE_F { width: radius, height: radius },
-        rotationAngle: 0.0,
-        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-        arcSize: D2D1_ARC_SIZE_SMALL, // 120° < 180°，使用 SMALL
-    });
-    sink.EndFigure(D2D1_FIGURE_END_OPEN);
-    sink.Close()?;
-    Ok(geometry)
-}
-
-// ── 渲染线程 ──────────────────────────────────────────────────
+// ── 渲染主循环 ────────────────────────────────────────────────
 
 fn run_render_loop(
     parent_hwnd: HWND,
@@ -455,16 +769,19 @@ fn run_render_loop(
     state: Arc<RenderState>,
 ) -> windows_core::Result<()> {
     unsafe {
+        log::info!("[anim] initializing D3D11 device...");
         let mut d3d_device: Option<ID3D11Device> = None;
         let mut feature_level = D3D_FEATURE_LEVEL::default();
         D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut d3d_device), Some(&mut feature_level), None)?;
         let d3d_device = d3d_device.ok_or_else(|| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, "D3D11 设备为空"))?;
+        log::info!("[anim] D3D11 device created");
 
         let dxgi_device: IDXGIDevice = d3d_device.cast()?;
         let dcomp_device: IDCompositionDesktopDevice = DCompositionCreateDevice2(&dxgi_device)?;
         let dcomp_target = dcomp_device.CreateTargetForHwnd(parent_hwnd, true)?;
         let dcomp_visual: IDCompositionVisual2 = dcomp_device.CreateVisual()?.cast()?;
         dcomp_target.SetRoot(&dcomp_visual)?;
+        log::info!("[anim] DComp target created");
 
         let (tile_rect, strategy) = find_tile_position(parent_hwnd, tile_search_text);
         log::info!("[anim] tile strategy={strategy} rect=({},{})-({},{})", tile_rect.left, tile_rect.top, tile_rect.right, tile_rect.bottom);
@@ -481,17 +798,11 @@ fn run_render_loop(
         let d2d_device = d2d_factory.CreateDevice(&dxgi_device)?;
         let d2d_context = d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
 
-        let bg_brush: ID2D1Brush = d2d_context.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.4, g: 0.4, b: 0.45, a: 0.35 }, None)?.cast()?;
-        let arc_brush: ID2D1Brush = d2d_context.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.2, g: 0.6, b: 0.95, a: 1.0 }, None)?.cast()?;
-        let success_bg: ID2D1Brush = d2d_context.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.15, g: 0.75, b: 0.35, a: 1.0 }, None)?.cast()?;
-        let failure_bg: ID2D1Brush = d2d_context.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.9, g: 0.2, b: 0.2, a: 1.0 }, None)?.cast()?;
-        let white_brush: ID2D1Brush = d2d_context.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?.cast()?;
+        let rt: ID2D1RenderTarget = d2d_context.cast()?;
+        log::info!("[anim] loading resources...");
+        let res = create_all_resources(&d2d_factory, &d2d_context, &rt)?;
+        log::info!("[anim] resources loaded, entering render loop");
 
-        let geo = create_all_geometries(&d2d_factory)?;
-        let check_geom: ID2D1Geometry = geo.check.cast().unwrap();
-        let cross_geom: ID2D1Geometry = geo.cross.cast().unwrap();
-
-        // 帧率：注册表 ANIMATION_FPS 覆盖 > 显示器刷新率 > 默认 60
         let monitor_hz = query_monitor_refresh_rate(parent_hwnd);
         let target_fps = read_facewinunlock_registry("ANIMATION_FPS")
             .ok()
@@ -507,21 +818,17 @@ fn run_render_loop(
 
             let frame_start = Instant::now();
             let elapsed = app_start.elapsed().as_secs_f64();
-            let angle = (elapsed * ROTATION_SPEED as f64) as f32 % 360.0;
 
-            // 读取状态 + 进入时间
             let (current_state, state_age) = {
                 let a = state.anim.lock().unwrap();
                 (a.state, a.entered_at.elapsed())
             };
 
-            // Success/Failure 超时自动退回 Idle
             let effective_state = match current_state {
                 AnimState::Success | AnimState::Failure
                     if state_age > Duration::from_secs_f32(OUTCOME_TIMEOUT_SECS) =>
                 {
-                    // 自动过渡
-                    drop(state.anim.lock()); // 避免死锁
+                    drop(state.anim.lock());
                     if let Ok(mut a) = state.anim.lock() {
                         if matches!(a.state, AnimState::Success | AnimState::Failure) {
                             a.state = AnimState::Idle;
@@ -545,18 +852,13 @@ fn run_render_loop(
             };
             let bitmap: ID2D1Bitmap1 = d2d_context.CreateBitmapFromDxgiSurface(&dxgi_surface, Some(&bitmap_props))?;
 
-            d2d_context.SetTarget(&bitmap);
-            d2d_context.BeginDraw();
-            d2d_context.Clear(None);
-
             match effective_state {
-                AnimState::Idle => render_idle(&d2d_context, &bg_brush, &arc_brush, &geo.arc, angle)?,
-                AnimState::Scanning => render_scanning(&d2d_context, &bg_brush, &arc_brush, &geo.arc, angle)?,
-                AnimState::Success => render_success(&d2d_context, &success_bg, &white_brush, &check_geom, &state_age)?,
-                AnimState::Failure => render_failure(&d2d_context, &failure_bg, &white_brush, &cross_geom, &state_age)?,
+                AnimState::Idle => render_idle(&d2d_context, &res, elapsed, &bitmap)?,
+                AnimState::Scanning => render_scanning(&d2d_context, &res, elapsed, &bitmap)?,
+                AnimState::Success => render_success(&d2d_context, &res, elapsed, &state_age, &bitmap)?,
+                AnimState::Failure => render_failure(&d2d_context, &res, elapsed, &state_age, &bitmap)?,
             }
 
-            d2d_context.EndDraw(None, None)?;
             d2d_context.SetTarget(None);
             let _bh = bitmap;
             dcomp_surface.EndDraw()?;
@@ -567,81 +869,4 @@ fn run_render_loop(
         }
         Ok(())
     }
-}
-
-// ── 绘制函数 ──────────────────────────────────────────────────
-
-unsafe fn render_scanning(
-    ctx: &ID2D1DeviceContext, bg: &ID2D1Brush, arc_brush: &ID2D1Brush,
-    arc_geom: &ID2D1Geometry, angle: f32,
-) -> windows_core::Result<()> {
-    ctx.DrawEllipse(&D2D1_ELLIPSE { point: D2D_POINT_2F { x: RING_CENTER_X, y: RING_CENTER_Y }, radiusX: RING_RADIUS, radiusY: RING_RADIUS }, bg, BG_STROKE_WIDTH, None::<&ID2D1StrokeStyle>);
-    let rot = mat_rotation(angle, RING_CENTER_X, RING_CENTER_Y);
-    ctx.SetTransform(&rot);
-    ctx.DrawGeometry(arc_geom, arc_brush, ARC_STROKE_WIDTH, None::<&ID2D1StrokeStyle>);
-    ctx.SetTransform(&mat_identity());
-    Ok(())
-}
-
-unsafe fn render_idle(
-    ctx: &ID2D1DeviceContext, bg: &ID2D1Brush, arc_brush: &ID2D1Brush,
-    arc_geom: &ID2D1Geometry, angle: f32,
-) -> windows_core::Result<()> {
-    let pulse = 0.925 + 0.075 * (angle.to_radians() * 4.0).sin();
-    ctx.DrawEllipse(&D2D1_ELLIPSE { point: D2D_POINT_2F { x: RING_CENTER_X, y: RING_CENTER_Y }, radiusX: RING_RADIUS, radiusY: RING_RADIUS }, bg, BG_STROKE_WIDTH, None::<&ID2D1StrokeStyle>);
-    let rot = mat_rotation(angle, RING_CENTER_X, RING_CENTER_Y);
-    let scl = mat_scale(pulse, pulse, RING_CENTER_X, RING_CENTER_Y);
-    let xform = mat_mul(&rot, &scl);
-    ctx.SetTransform(&xform);
-    ctx.DrawGeometry(arc_geom, arc_brush, ARC_STROKE_WIDTH, None::<&ID2D1StrokeStyle>);
-    ctx.SetTransform(&mat_identity());
-    Ok(())
-}
-
-/// Success: 绿色圆 + 白色对号，2 秒淡出
-unsafe fn render_success(
-    ctx: &ID2D1DeviceContext, bg: &ID2D1Brush, fg: &ID2D1Brush,
-    check: &ID2D1Geometry, age: &Duration,
-) -> windows_core::Result<()> {
-    let progress = (age.as_secs_f32() / OUTCOME_TIMEOUT_SECS).clamp(0.0, 1.0);
-    let alpha = 1.0 - progress;
-
-    // 绿色填充圆
-    ctx.DrawEllipse(&D2D1_ELLIPSE { point: D2D_POINT_2F { x: RING_CENTER_X, y: RING_CENTER_Y }, radiusX: RING_RADIUS, radiusY: RING_RADIUS }, bg, 3.0, None::<&ID2D1StrokeStyle>);
-    // 对号
-    ctx.DrawGeometry(check, fg, 4.0, None::<&ID2D1StrokeStyle>);
-
-    // 全局透明度淡出（通过全表面覆盖半透明黑色）
-    if alpha < 1.0 {
-        let fade = 1.0 - alpha;
-        let overlay = ctx.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: fade }, None)?;
-        ctx.FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: ANIM_WIDTH as f32, bottom: ANIM_HEIGHT as f32 }, &overlay);
-    }
-    Ok(())
-}
-
-/// Failure: 红色圆 + 叉号 + 水平抖动，2 秒淡出
-unsafe fn render_failure(
-    ctx: &ID2D1DeviceContext, bg: &ID2D1Brush, fg: &ID2D1Brush,
-    cross: &ID2D1Geometry, age: &Duration,
-) -> windows_core::Result<()> {
-    let progress = (age.as_secs_f32() / OUTCOME_TIMEOUT_SECS).clamp(0.0, 1.0);
-    let alpha = 1.0 - progress;
-    // 水平抖动（前 0.5s 明显，之后衰减）
-    let shake = (age.as_secs_f32() * 30.0).sin() * 8.0 * (1.0 - progress).powi(2);
-
-    let xform = mat_mul(&mat_identity(), &Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: shake, M32: 0.0 });
-    ctx.SetTransform(&xform);
-
-    ctx.DrawEllipse(&D2D1_ELLIPSE { point: D2D_POINT_2F { x: RING_CENTER_X, y: RING_CENTER_Y }, radiusX: RING_RADIUS, radiusY: RING_RADIUS }, bg, 3.0, None::<&ID2D1StrokeStyle>);
-    ctx.DrawGeometry(cross, fg, 3.5, None::<&ID2D1StrokeStyle>);
-    ctx.SetTransform(&mat_identity());
-
-    // 淡出遮罩
-    if alpha < 1.0 {
-        let fade = 1.0 - alpha;
-        let overlay = ctx.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: fade }, None)?;
-        ctx.FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: ANIM_WIDTH as f32, bottom: ANIM_HEIGHT as f32 }, &overlay);
-    }
-    Ok(())
 }
