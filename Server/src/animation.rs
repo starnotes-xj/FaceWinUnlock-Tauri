@@ -44,6 +44,10 @@ use windows::Win32::{
             DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionVisual2,
         },
         Dxgi::{Common::DXGI_FORMAT_B8G8R8A8_UNORM, IDXGIDevice, IDXGISurface},
+        Gdi::{
+            EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromWindow,
+            DEVMODEW, ENUM_CURRENT_SETTINGS, MONITORINFOEXW, MONITOR_DEFAULTTOPRIMARY,
+        },
     },
     UI::WindowsAndMessaging::{
         EnumChildWindows, GetClassNameW, GetClientRect, GetDlgCtrlID, GetWindowLongW,
@@ -51,6 +55,8 @@ use windows::Win32::{
     },
 };
 use windows_core::Interface;
+
+use crate::read_facewinunlock_registry;
 
 // ── 常量 ──────────────────────────────────────────────────────
 
@@ -64,6 +70,7 @@ const ARC_SPAN_DEG: f32 = 120.0;
 const BG_STROKE_WIDTH: f32 = 2.0;
 const ARC_STROKE_WIDTH: f32 = 3.0;
 const ROTATION_SPEED: f32 = 180.0;
+const DEFAULT_FPS: u32 = 60;
 
 /// Success/Failure 动画持续后自动退回 Idle 的时间
 const OUTCOME_TIMEOUT_SECS: f32 = 2.0;
@@ -72,6 +79,43 @@ const TILE_FIND_RETRY_MS: u64 = 200;
 const TILE_FIND_MAX_RETRIES: u32 = 15;
 const TILE_MIN_SIZE: i32 = 64;
 const TILE_MAX_SIZE: i32 = 512;
+
+// ── 帧率检测 ─────────────────────────────────────────────────
+
+/// 查询 `hwnd` 所在显示器的刷新率（Hz）。
+/// 失败时返回 `DEFAULT_FPS`。
+fn query_monitor_refresh_rate(hwnd: HWND) -> u32 {
+    unsafe {
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+        let mut mi = MONITORINFOEXW::default();
+        mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+
+        if !GetMonitorInfoW(hmon, &mut mi as *mut MONITORINFOEXW as *mut _).as_bool() {
+            log::warn!("[anim] GetMonitorInfoW failed, fallback {DEFAULT_FPS} Hz");
+            return DEFAULT_FPS;
+        }
+
+        let mut dm = DEVMODEW::default();
+        dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+
+        if !EnumDisplaySettingsW(
+            windows_core::PCWSTR::from_raw(mi.szDevice.as_ptr()),
+            ENUM_CURRENT_SETTINGS,
+            &mut dm,
+        ).as_bool() {
+            log::warn!("[anim] EnumDisplaySettingsW failed, fallback {DEFAULT_FPS} Hz");
+            return DEFAULT_FPS;
+        }
+
+        let hz = dm.dmDisplayFrequency;
+        if hz == 0 || hz == 1 {
+            // 0/1 = 驱动未报告有效值
+            log::warn!("[anim] driver reported {hz} Hz, fallback {DEFAULT_FPS} Hz");
+            return DEFAULT_FPS;
+        }
+        hz
+    }
+}
 
 // ── 动画状态 ──────────────────────────────────────────────────
 
@@ -447,7 +491,15 @@ fn run_render_loop(
         let check_geom: ID2D1Geometry = geo.check.cast().unwrap();
         let cross_geom: ID2D1Geometry = geo.cross.cast().unwrap();
 
-        let frame_dur = Duration::from_micros(16667);
+        // 帧率：注册表 ANIMATION_FPS 覆盖 > 显示器刷新率 > 默认 60
+        let monitor_hz = query_monitor_refresh_rate(parent_hwnd);
+        let target_fps = read_facewinunlock_registry("ANIMATION_FPS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(monitor_hz)
+            .clamp(10, 240);
+        let frame_dur = Duration::from_micros(1_000_000 / target_fps as u64);
+        log::info!("[anim] monitor={monitor_hz} Hz, target FPS={target_fps} (frame_dur={frame_dur:?})");
         let app_start = Instant::now();
 
         loop {
