@@ -65,7 +65,9 @@
     );
     filter: blur(20px);
     z-index: -1;
-    animation: spin 0.5s linear infinite;
+    /* 1s 一圈 = 6 圈/6s，与 FRAME_PERIOD 对齐；
+       30fps 捕获时每帧 12° 跳变，肉眼看不到强频闪（0.5s 时是 24°/帧） */
+    animation: spin 1s linear infinite;
   }
 
   @keyframes spin {
