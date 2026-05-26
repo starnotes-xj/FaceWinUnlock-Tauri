@@ -21,7 +21,7 @@
 	const systemStatus = ref([
 		{ name: 'WinLogon 核心组件', desc: '系统登录凭据对接', active: true },
 		{ name: '解锁核心服务', desc: '', active: false },
-		{ name: '生物识别传感器', desc: '未知 前往设置页面设置', active: false },
+		{ name: '生物识别传感器', desc: '未配置，前往首选项页面设置', active: false },
 		{ name: '人脸识别模型', desc: 'OpenCV', active: true }
 	]);
 
@@ -62,8 +62,8 @@
 	invoke("check_process_running").then(()=>{
 		systemStatus.value[1].desc = '负责进行面容认证的服务';
 		systemStatus.value[1].active = true;
-	}).catch(error=>{
-		systemStatus.value[1].desc = formatObjectString(error);
+	}).catch(()=>{
+		systemStatus.value[1].desc = '服务未启动，请检查计划任务或手动启动';
 		systemStatus.value[1].active = false;
 	})
 </script>
