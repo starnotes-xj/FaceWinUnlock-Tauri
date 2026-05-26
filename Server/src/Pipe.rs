@@ -34,11 +34,30 @@ pub fn pipe_read_raw(pipe: HANDLE) -> windows::core::Result<Vec<u8>> {
 /// 连接到已存在的命名管道（Server EXE 侧，DLL 作为 Client）
 /// timeout_ms: 等待管道出现的最大毫秒数
 pub fn pipe_connect_to_server(name: &str, timeout_ms: u64) -> windows::core::Result<HANDLE> {
+    pipe_connect_to_server_with_stop(name, timeout_ms, None)
+}
+
+/// 同上，但额外接受 stop_flag，循环间隔 200ms 检查可提前退出，
+/// 用于 CPipeListener::stop_and_join 时不被多秒的 connect 超时卡住。
+pub fn pipe_connect_to_server_with_stop(
+    name: &str,
+    timeout_ms: u64,
+    stop: Option<&std::sync::atomic::AtomicBool>,
+) -> windows::core::Result<HANDLE> {
+    use std::sync::atomic::Ordering;
     let wide = to_wide(name);
     let ptr = PCWSTR::from_raw(wide.as_ptr());
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
 
     loop {
+        if let Some(s) = stop {
+            if s.load(Ordering::SeqCst) {
+                return Err(windows::core::Error::from_hresult(windows_core::HRESULT(
+                    0x800704c7u32 as i32, // ERROR_CANCELLED
+                )));
+            }
+        }
+
         // WaitNamedPipeW 最多等待 1 秒让管道出现
         let _ = unsafe { WaitNamedPipeW(ptr, 1000) };
 
@@ -60,7 +79,18 @@ pub fn pipe_connect_to_server(name: &str, timeout_ms: u64) -> windows::core::Res
                         0x800700e7u32 as i32, // ERROR_PIPE_BUSY -> timeout
                     )));
                 }
-                std::thread::sleep(Duration::from_millis(200));
+                // 200ms 重试间隔，拆为短轮询以响应 stop_flag
+                let retry_deadline = Instant::now() + Duration::from_millis(200);
+                while Instant::now() < retry_deadline {
+                    if let Some(s) = stop {
+                        if s.load(Ordering::SeqCst) {
+                            return Err(windows::core::Error::from_hresult(windows_core::HRESULT(
+                                0x800704c7u32 as i32,
+                            )));
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
             }
         }
     }

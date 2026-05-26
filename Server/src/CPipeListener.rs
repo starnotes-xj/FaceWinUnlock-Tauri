@@ -10,7 +10,7 @@ use crate::animation::{AnimState, AnimationSlot};
 use crate::{read_facewinunlock_registry, SharedCredentials};
 use crate::Pipe::{
     parse_credentials,
-    pipe_connect_to_server, pipe_read_raw, pipe_write_raw,
+    pipe_connect_to_server_with_stop, pipe_read_raw, pipe_write_raw,
     PIPE_SERVER_NAME, PIPE_UNLOCK_NAME,
 };
 
@@ -104,7 +104,7 @@ impl CPipeListener {
 
                     let is_first = first_connect;
                     let timeout: u64 = if is_first { 30_000 } else { 10_000 };
-                    let pipe = match pipe_connect_to_server(PIPE_SERVER_NAME, timeout) {
+                    let pipe = match pipe_connect_to_server_with_stop(PIPE_SERVER_NAME, timeout, Some(&stop_flag)) {
                         Ok(p)  => p,
                         Err(e) => {
                             if is_first {
@@ -214,8 +214,8 @@ impl CPipeListener {
                     if stop_flag.load(Ordering::SeqCst) { break; }
 
                     // 尝试连接到 Unlock EXE 的 MansonWindowsUnlockRustUnlock 管道
-                    // 使用 5 秒超时，超时后循环重试（保持对 stop_flag 响应）
-                    let pipe = match pipe_connect_to_server(PIPE_UNLOCK_NAME, 5_000) {
+                    // 使用 5 秒超时 + stop_flag 监听，避免关闭对话框时被 connect 卡住
+                    let pipe = match pipe_connect_to_server_with_stop(PIPE_UNLOCK_NAME, 5_000, Some(&stop_flag)) {
                         Ok(p)  => p,
                         Err(_) => {
                             // Unlock EXE 可能尚未运行，继续等待
