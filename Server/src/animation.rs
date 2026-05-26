@@ -23,7 +23,7 @@ use windows::Win32::{
     Graphics::{
         Direct2D::{
             Common::{
-                D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D_RECT_F,
+                D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
                 D2D1_PIXEL_FORMAT,
             },
             D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
@@ -192,7 +192,6 @@ impl AnimationContext {
             // ── 7. D2D Factory + Device + DeviceContext ───────────────────
             let d2d_factory: ID2D1Factory1 = D2D1CreateFactory(
                 D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                &ID2D1Factory1::IID,
                 None,
             )?;
             let d2d_device = d2d_factory.CreateDevice(&dxgi_device)?;
@@ -227,7 +226,7 @@ impl AnimationContext {
                 bottom: ANIM_HEIGHT as i32,
             };
             let dxgi_surface: IDXGISurface =
-                self.dcomp_surface.BeginDraw(Some(&update_rect), &IDXGISurface::IID)?;
+                self.dcomp_surface.BeginDraw(Some(&update_rect), &mut offset)?;
 
             // 把 DXGI Surface 转成 D2D Bitmap
             let bitmap_props = D2D1_BITMAP_PROPERTIES1 {
@@ -244,17 +243,8 @@ impl AnimationContext {
                 .d2d_context
                 .CreateBitmapFromDxgiSurface(&dxgi_surface, Some(&bitmap_props))?;
 
-            // 设置渲染目标 + 偏移变换（DComp Surface 不一定从 0,0 开始）
+            // 设置渲染目标（DComp BeginDraw 已通过 offset 告知偏移，PoC 阶段 offset=0,0 无需变换）
             self.d2d_context.SetTarget(&bitmap);
-            self.d2d_context.SetTransform(&windows::Win32::Graphics::Direct2D::Common::Matrix3x2 {
-                M11: 1.0,
-                M12: 0.0,
-                M21: 0.0,
-                M22: 1.0,
-                M31: offset.x as f32,
-                M32: offset.y as f32,
-            });
-
             self.d2d_context.BeginDraw();
             self.d2d_context.Clear(Some(&D2D1_COLOR_F { r, g, b, a }));
             self.d2d_context.EndDraw(None, None)?;

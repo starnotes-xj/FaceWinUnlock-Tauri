@@ -37,8 +37,8 @@
     "resources": {
       "../../target/release/FaceWinUnlock_Tauri.dll": "resources/FaceWinUnlock-Tauri.dll",
       "../../target/release/FaceWinUnlock-Server.exe": "FaceWinUnlock-Server.exe",
-      "D:\\OpenCV\\build\\x64\\vc16\\bin\\opencv_world490.dll": "opencv_world490.dll",
-      "D:\\OpenCV\\build\\x64\\vc16\\bin\\opencv_videoio_ffmpeg490_64.dll": "opencv_videoio_ffmpeg490_64.dll",
+      "D:\\OpenCV\\build\\x64\\vc16\\bin\\opencv_world4120.dll": "opencv_world4120.dll",
+      "D:\\OpenCV\\build\\x64\\vc16\\bin\\opencv_videoio_ffmpeg4120_64.dll": "opencv_videoio_ffmpeg4120_64.dll",
       "../resources/face_detection_yunet_2023mar.onnx": "resources/face_detection_yunet_2023mar.onnx",
       "../resources/face_recognition_sface_2021dec.onnx": "resources/face_recognition_sface_2021dec.onnx",
       "../resources/face_liveness.onnx": "resources/face_liveness.onnx"
