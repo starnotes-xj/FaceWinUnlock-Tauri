@@ -134,61 +134,90 @@ UI 使用管道做健康检查：
 
 ---
 
-## 六、动画管线（Server/src/animation.rs）— 当前阶段 A
+## 六、动画管线（Server/src/animation.rs）— 阶段 C
 
-### 管线层次
+### 架构（路径 C：DComp Topmost Layer）
+
+放弃了阶段 A 的独立子窗口方案，改为 DComp topmost 层直接绑定 LogonUI 父 HWND：
 
 ```
 LogonUI 父 HWND（OnCreatingWindow 返回）
-├── CreateWindowExW → 子窗口 HWND（128×128，WS_CHILD）
-├── D3D11CreateDevice（BGRA_SUPPORT）→ ID3D11Device
-├── IDXGIDevice（cast from D3D11）
-├── DCompositionCreateDevice2 → IDCompositionDesktopDevice
-│   ├── CreateTargetForHwnd(child_hwnd, topmost=true) → IDCompositionTarget
-│   ├── CreateVisual → IDCompositionVisual2
-│   │   └── SetContent(surface)
-│   └── CreateVirtualSurface(128, 128, BGRA_UNORM, Premultiplied)
-│       └── BeginDraw() → IDXGISurface
-│           └── CreateBitmapFromDxgiSurface → ID2D1Bitmap1
-└── D2D1Factory → ID2D1Device → ID2D1DeviceContext
-    ├── SetTarget(bitmap)
-    ├── BeginDraw
-    ├── Clear(color)          ← PoC：亮蓝色 (0.2, 0.6, 0.9, 1.0)
-    └── EndDraw → DComp Commit
+│
+├── [DComp Topmost Layer] ← 我们的动画（topmost=true）
+│   └── DComp Visual { SetOffsetX2/Y2 = 磁贴位置 }
+│       └── DComp VirtualSurface (128×128)
+│           └── BeginDraw → IDXGISurface → ID2D1Bitmap1
+│               └── D2D 旋转环 / 状态动画 (60 FPS GPU)
+│
+├── [Child Windows Layer] ← LogonUI 正常内容
+│   ├── 用户磁贴
+│   └── 凭据磁贴 ← EnumChildWindows 尺寸启发式定位
+│
+└── GPU 管线初始化：
+    ├── D3D11CreateDevice（BGRA_SUPPORT）→ ID3D11Device
+    ├── IDXGIDevice → DCompositionCreateDevice2 → IDCompositionDesktopDevice
+    ├── CreateTargetForHwnd(parent_hwnd, topmost=true) → IDCompositionTarget
+    ├── CreateVisual → IDCompositionVisual2 → SetContent(surface)
+    └── D2D1Factory → ID2D1Device → ID2D1DeviceContext
 ```
+
+### 状态机
+
+```
+    ┌──────┐   CPipeListener "run"   ┌──────────┐
+    │ Idle │ ───────────────────►   │ Scanning │
+    └──────┘                         └────┬─────┘
+       ▲                     凭据到达  │   │ 重试3次未匹配
+       │                    ┌──────────┘   └──────────┐
+       │                    ▼                          ▼
+       │               ┌─────────┐              ┌─────────┐
+       └───────────────│ Success │              │ Failure │
+          2 秒后退回   └─────────┘              └─────────┘
+```
+
+驱动方式：`CPipeListener` 的 Client 线程（发 "run" → Scanning）和 Creds 线程（收凭据 → Success）通过 `AnimationSlot` 推送状态变化。
+
+### 磁贴定位策略
+
+`find_tile_position()` 按优先级尝试：
+1. **尺寸+可见性启发式** — EnumChildWindows 枚举子窗口，按尺寸接近 128-384px 的可见正方形窗口打分，上半区 +50 分（偏好头像区域）
+2. **注册表偏移** — `ANIMATION_OFFSET_X/Y`（保留，未实现）
+3. **兜底** — 父窗口 client 区域水平居中、垂直 **1/4** 处（VM 实测：2/3 = PIN 输入区；1/3 = 与用户头像重合；1/4 = 头像上方，位置最佳）
 
 ### AnimationContext 结构
 
 ```rust
+pub enum AnimState { Idle, Scanning, Success, Failure }
+
+pub type AnimationSlot = Arc<Mutex<Option<AnimationContext>>>;
+
 pub struct AnimationContext {
     parent_hwnd: HWND,                      // LogonUI 父窗口（不拥有）
-    child_hwnd: HWND,                       // 子窗口（Drop 时 DestroyWindow）
-    d2d_bitmap: Option<ID2D1Bitmap1>,       // 当前渲染帧 bitmap
-    d2d_context: ID2D1DeviceContext,
-    d2d_device: ID2D1Device,
-    d2d_factory: ID2D1Factory1,
-    dcomp_surface: IDCompositionVirtualSurface,
-    dcomp_visual: IDCompositionVisual2,
-    dcomp_target: IDCompositionTarget,
-    dcomp_device: IDCompositionDesktopDevice,
-    d3d_device: ID3D11Device,
+    render_state: Arc<RenderState>,         // 原子 stop flag + 状态机数据
+    render_thread: Option<JoinHandle<()>>,  // 渲染线程句柄
 }
-unsafe impl Send for AnimationContext {}    // LogonUI 串行化 Advise/UnAdvise 调用
+unsafe impl Send for AnimationContext {}
+
+// RenderState 内部：
+//   stop: AtomicBool              — Drop 时设置，渲染线程退出
+//   anim: Mutex<AnimStateData>    — 当前状态 + 进入时间（用于动画过渡）
 ```
+
+GPU 资源（DComp/D3D/D2D）全部在渲染线程内创建和销毁，`AnimationContext` 主线程侧只保留 HWND 和线程句柄。`Drop` 时 signal stop + join 线程，确保无资源泄漏。
 
 ### 当前进度
 
 | 阶段 | 任务 | 状态 |
 |------|------|------|
-| A1-A6 | 子窗口 + DComp/D3D/D2D 管线 + PoC 纯色填充 | ✅ 编译通过 |
+| A1-A6 | DComp/D3D/D2D 管线 + PoC 纯色填充 | ✅ |
 | A7 | 亮度功能从 Unlock.exe 迁移到 DLL | ⏸️ 延后 |
 | A8 | UnAdvise 清理（Drop AnimationContext） | ✅ |
 | A9 | 灰度开关 ANIMATION_UI_ENABLED | ✅ |
-| B | D2D 旋转环动画 60 FPS | ✅ 已实现（DComp topmost 路径 C）|
-| C | 状态机（Idle/Scanning/Success/Failure） | 🔄 已实现，待 VM 回归验证 |
+| B | DComp topmost 路径 C + D2D 旋转环 60 FPS | ✅ |
+| C | 状态机（Idle/Scanning/Success/Failure）+ 管道驱动 | ✅ 已实现，VM 修复两个 Bug（弧截断 + 位置偏低），待回归验证 |
 | D | 摄像头预览到磁贴 | ⏳ 可选 |
 
-**下一步（阶段 B）**：用 Opus 设计旋转环渲染方案，Sonnet 实现后编译验证。
+**下一步**：VM 回归验证 4 状态动画，通过后考虑合并主分支或进入阶段 D。
 
 ---
 

@@ -237,22 +237,22 @@ LogonUI 父 HWND (OnCreatingWindow 返回)
 │   └── DComp Visual → Surface ← D2D 旋转环 (60 FPS GPU)
 │
 └── [Child Windows] ← LogonUI 正常内容
-    └── 凭据磁贴 ← EnumChildWindows 文本匹配定位
+    └── 凭据磁贴 ← EnumChildWindows 尺寸启发式定位
 ```
 
 核心改动：
 - **不再创建独立子窗口** — 直接绑定 DComp 到 LogonUI 父 HWND（`topmost=true`），动画渲染在所有凭据磁贴之上
-- **`EnumChildWindows` 定位磁贴** — 搜索子窗口文本 "FaceWinUnlock" 匹配凭据磁贴，`GetWindowRect` 拿到屏幕坐标后换算为父窗口 client 坐标
+- **`EnumChildWindows` 定位磁贴** — 枚举子窗口，按尺寸（128-384px 可见近正方形）+ 位置（上半区优先）启发式打分定位凭据磁贴；`GetWindowRect` 拿到屏幕坐标后换算为父窗口 client 坐标（文本匹配在现代 DComp/XAML LogonUI 上不可靠，已弃用）
 - **`IDCompositionVisual::SetOffsetX2/Y2` 定位** — 将 128×128 动画表面精确放到磁贴中心位置
-- **重试机制** — 启动时最多重试 15 次（3 秒），等待 LogonUI 创建磁贴窗口；失败后回退到父窗口 client 区域 **1/3** 高度居中位置（VM 测试证明 2/3 高度 = PIN 输入区，偏低；1/3 高度 ≈ 磁贴图像区）
+- **重试机制** — 启动时最多重试 15 次（3 秒），等待 LogonUI 创建磁贴窗口；失败后回退到父窗口 client 区域 **1/4** 高度居中位置（VM 实测：2/3 高度 = PIN 输入区；1/3 高度 = 与用户头像重合；1/4 高度 = 头像上方，位置最佳）
 - **无 GDI 泄漏风险** — 不再创建窗口类/HWND/HBITMAP，纯 COM 对象由 Rust Drop 自动管理
 
 **已落地文件：**
-- `Server/src/animation.rs`（~340 行）：
+- `Server/src/animation.rs`（~595 行）：
   - DComp target 绑定父 HWND（`topmost=true`）
   - `find_tile_position()` + `enum_child_callback()` — EnumChildWindows 定位
   - 矩阵辅助函数（identity/rotation/scale/mul）手动实现（windows-rs 0.59 的 Matrix3x2 是纯数据 struct）
-  - `render_scanning()` / `render_idle()` — 旋转环 + 呼吸脉冲
+  - `render_idle()` / `render_scanning()` / `render_success()` / `render_failure()` — 4 状态渲染
   - 弧几何体预创建（`ID2D1PathGeometry1`），每帧 `SetTransform` 旋转
   - 帧率控制（~16.67ms/帧）
 - `Server/src/CSampleCredential.rs`：`Advise()` 传父 HWND + 磁贴文本 "FaceWinUnlock" 给 AnimationContext
@@ -260,7 +260,7 @@ LogonUI 父 HWND (OnCreatingWindow 返回)
 
 **编译状态：** `cargo check -p winlogon` 通过（只有项目原有的命名规范警告）
 
-**VM 实测：** 待用户启用注册表开关 `ANIMATION_UI_ENABLED=1` 后在 VM 内验证
+**VM 实测：** 已在 VMware Win11 上验证，发现并修复两个 Bug：(1) 弧几何体坐标未偏移圆心导致只显示 1/4 弧；(2) 兜底位置从 2/3 → 1/3 → 最终 1/4 高度（2/3 落在 PIN 区，1/3 与头像重合）
 
 ### 阶段 C 完成情况（状态机动画 + 管道驱动）
 

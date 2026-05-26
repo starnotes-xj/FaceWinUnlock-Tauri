@@ -329,9 +329,9 @@ Models are loaded into `APP_STATE` by `load_opencv_model(backend, target)`. All 
 
 ### 核心约束
 
-- **技术方案**：DirectComposition 自定义子窗口（"我们的窗口"）+ Direct2D 原生绘制（路径 ②）
+- **技术方案**：路径 C — DComp Topmost Layer 绑定 LogonUI 父 HWND + Direct2D 原生绘制（60 FPS GPU）
 - **绝不使用**：WebView2（已实证在 winlogon 不工作）、Sciter/Ultralight（未验证 + 体积大）、Hook 内部 API（不稳定）
-- **当前阶段**：A — DComp 子窗口管线打通 + 亮度功能从 Unlock.exe 迁移到 DLL
+- **当前阶段**：C — 状态机动画（Idle/Scanning/Success/Failure）+ 管道驱动已实现，VM 测试修复两个 Bug 后待回归验证
 - **测试要求**：所有阶段必须在 VM（Hyper-V/VMware）内连续 100 次锁屏/解锁验证后才能合并主分支
 - **灰度开关**：注册表 `ANIMATION_UI_ENABLED`（默认 `"0"`），用于安全启用/禁用
 
@@ -345,12 +345,12 @@ Models are loaded into `APP_STATE` by `load_opencv_model(backend, target)`. All 
 
 每次开始新阶段前先用 Opus 设计方案，再切到 Sonnet 实施。详细切换规则见 [docs/animation-development.md](docs/animation-development.md) 第 5 节。
 
-### 阶段 A 关键改动点
+### 关键改动文件
 
 | 文件 | 变更 |
 |---|---|
-| `Server/src/CSampleCredential.rs` | 实现 `OnCreatingWindow`，创建 DComp 子窗口 |
-| `Server/src/CPipeListener.rs` | 接收亮度调节指令（从 Unlock.exe 迁移而来） |
-| `Server/Cargo.toml` | 添加 `Win32_Graphics_*` features（DComp/D2D/D3D11/DXGI） |
-| `Unlock/src/main.rs` | 移除亮度逻辑（功能上移到 DLL） |
-| 新文件 `Server/src/animation.rs` | DComp 子窗口、D2D 渲染线程、状态机 |
+| `Server/src/animation.rs`（~595 行） | DComp topmost 管线、D2D 旋转环渲染、4 状态机（Idle/Scanning/Success/Failure）、磁贴定位（尺寸启发式 + 1/4 兜底）、弧几何体预创建、帧率控制 |
+| `Server/src/CSampleCredential.rs` | `Advise()` → `OnCreatingWindow` 获取父 HWND → 创建 `AnimationContext`；接受外部 `AnimationSlot` |
+| `Server/src/CPipeListener.rs` | 接受 `AnimationSlot` 参数；Client 线程发 "run" → Scanning，3 次未匹配 → Failure；Creds 线程收凭据 → Success |
+| `Server/src/CSampleProvider.rs` | 创建 `AnimationSlot`（`Arc<Mutex<Option<AnimationContext>>>`），传递给 CPipeListener 和 SampleCredential |
+| `Server/Cargo.toml` | 添加 `Win32_Graphics_*` + `Foundation_Numerics` features |
