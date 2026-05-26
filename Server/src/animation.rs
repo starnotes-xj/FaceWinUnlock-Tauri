@@ -750,12 +750,18 @@ unsafe fn fallback_position(parent: HWND) -> RECT {
     RECT { left: cx - ANIM_WIDTH as i32 / 2, top: cy - ANIM_HEIGHT as i32 / 2, right: cx + ANIM_WIDTH as i32 / 2, bottom: cy + ANIM_HEIGHT as i32 / 2 }
 }
 
-unsafe fn find_tile_position(parent: HWND, search_text: &[u16]) -> (RECT, &'static str) {
+unsafe fn find_tile_position(parent: HWND, search_text: &[u16], stop: &AtomicBool) -> (RECT, &'static str) {
     dump_child_windows(parent);
     for _ in 0..TILE_FIND_MAX_RETRIES {
+        if stop.load(Ordering::SeqCst) { return (fallback_position(parent), "stopped"); }
         if let Some(r) = find_by_text(parent, search_text) { return (r, "text_match"); }
         if let Some(r) = find_by_size_heuristic(parent) { return (r, "size_heuristic"); }
-        std::thread::sleep(Duration::from_millis(TILE_FIND_RETRY_MS));
+        // 拆分 sleep 为短轮询，便于 AnimationContext::drop 时快速响应
+        let deadline = Instant::now() + Duration::from_millis(TILE_FIND_RETRY_MS);
+        while Instant::now() < deadline {
+            if stop.load(Ordering::SeqCst) { return (fallback_position(parent), "stopped"); }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     if let Some(r) = find_by_registry_offset(parent) { return (r, "registry_offset"); }
     (fallback_position(parent), "fallback")
@@ -769,12 +775,22 @@ fn run_render_loop(
     state: Arc<RenderState>,
 ) -> windows_core::Result<()> {
     unsafe {
+        // 各 init 步骤之间检查 stop_flag，避免长初始化（资源加载、磁贴搜索）
+        // 期间用户关闭对话框时 AnimationContext::drop 的 join() 卡住
+        macro_rules! check_stop { () => {
+            if state.stop.load(Ordering::SeqCst) {
+                log::info!("[anim] stop requested during init, aborting");
+                return Ok(());
+            }
+        }; }
+
         log::info!("[anim] initializing D3D11 device...");
         let mut d3d_device: Option<ID3D11Device> = None;
         let mut feature_level = D3D_FEATURE_LEVEL::default();
         D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut d3d_device), Some(&mut feature_level), None)?;
         let d3d_device = d3d_device.ok_or_else(|| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, "D3D11 设备为空"))?;
         log::info!("[anim] D3D11 device created");
+        check_stop!();
 
         let dxgi_device: IDXGIDevice = d3d_device.cast()?;
         let dcomp_device: IDCompositionDesktopDevice = DCompositionCreateDevice2(&dxgi_device)?;
@@ -782,8 +798,10 @@ fn run_render_loop(
         let dcomp_visual: IDCompositionVisual2 = dcomp_device.CreateVisual()?.cast()?;
         dcomp_target.SetRoot(&dcomp_visual)?;
         log::info!("[anim] DComp target created");
+        check_stop!();
 
-        let (tile_rect, strategy) = find_tile_position(parent_hwnd, tile_search_text);
+        let (tile_rect, strategy) = find_tile_position(parent_hwnd, tile_search_text, &state.stop);
+        check_stop!();
         log::info!("[anim] tile strategy={strategy} rect=({},{})-({},{})", tile_rect.left, tile_rect.top, tile_rect.right, tile_rect.bottom);
         let tile_cx = (tile_rect.left + tile_rect.right) / 2;
         let tile_cy = (tile_rect.top + tile_rect.bottom) / 2;
@@ -793,15 +811,18 @@ fn run_render_loop(
         let dcomp_surface = dcomp_device.CreateVirtualSurface(ANIM_WIDTH, ANIM_HEIGHT, DXGI_FORMAT_B8G8R8A8_UNORM, windows::Win32::Graphics::Dxgi::Common::DXGI_ALPHA_MODE_PREMULTIPLIED)?;
         dcomp_visual.SetContent(&dcomp_surface)?;
         dcomp_device.Commit()?;
+        check_stop!();
 
         let d2d_factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
         let d2d_device = d2d_factory.CreateDevice(&dxgi_device)?;
         let d2d_context = d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+        check_stop!();
 
         let rt: ID2D1RenderTarget = d2d_context.cast()?;
         log::info!("[anim] loading resources...");
         let res = create_all_resources(&d2d_factory, &d2d_context, &rt)?;
         log::info!("[anim] resources loaded, entering render loop");
+        check_stop!();
 
         let monitor_hz = query_monitor_refresh_rate(parent_hwnd);
         let target_fps = read_facewinunlock_registry("ANIMATION_FPS")
