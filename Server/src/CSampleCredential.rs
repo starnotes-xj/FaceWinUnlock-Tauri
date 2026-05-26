@@ -17,6 +17,7 @@ use windows::Win32::{
 };
 use windows_core::{implement, PCWSTR, PWSTR};
 use windows::Win32::Foundation::BOOL;
+use crate::animation::{make_slot, AnimationContext, AnimationSlot};
 use crate::{CLSID_SampleProvider, SharedCredentials};
 
 /// 凭据实现类，代表登录界面上的一个磁贴
@@ -26,7 +27,10 @@ pub struct SampleCredential {
     // 用于接收系统事件通知的接口（互斥锁保护线程安全）
     events: Mutex<Option<ICredentialProviderCredentialEvents>>,
     shared_creds: Arc<Mutex<SharedCredentials>>,
-    auth_package_id: u32
+    auth_package_id: u32,
+    /// 动画 UI 上下文（阶段 A）。Advise 时在 LogonUI 进程内创建子窗口+DComp 管线，
+    /// UnAdvise 时释放。失败不影响登录功能。
+    animation: AnimationSlot,
 }
 
 impl SampleCredential {
@@ -36,10 +40,11 @@ impl SampleCredential {
         // 引用计数不在此处管理了
         // 原因是：当 SampleCredential 转换为 ICredentialProviderCredential COM 接口后，它的生命周期由 Windows COM 运行时管理，而不是 Rust
         // 所以 SampleCredential 的Drop永远不会被调用，在new中创建的引用计数也永远不会减少
-        Self { 
+        Self {
             events: Mutex::new(None),
             shared_creds: shared_creds,
-            auth_package_id: auth_package_id
+            auth_package_id: auth_package_id,
+            animation: make_slot(),
         }
     }
 }
@@ -57,12 +62,57 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         info!("SampleCredential::Advise - 注册事件通知");
         let mut events = self.events.lock().unwrap();
         *events = pcpce.clone(); // 保存事件接口
+
+        // ── 阶段 A：拉起动画 UI 管线 ─────────────────────────────────
+        // 通过 events.OnCreatingWindow 拿 LogonUI 父窗口 HWND，
+        // 然后创建 DComp 子窗口 + D3D11 + D2D 渲染管线（PoC：纯蓝色填充）
+        if let Some(ev) = events.as_ref() {
+            // 仅在注册表 ANIMATION_UI_ENABLED == "1" 时启用（默认关闭，灰度上线）
+            if is_animation_enabled() {
+                match unsafe { ev.OnCreatingWindow() } {
+                    Ok(parent_hwnd) => {
+                        info!("SampleCredential::Advise - 拿到 LogonUI 父 HWND: {:?}", parent_hwnd);
+                        match AnimationContext::new(parent_hwnd) {
+                            Ok(mut ctx) => {
+                                // A6 PoC：渲染亮蓝色方块（BGRA premul：R=0.2, G=0.6, B=0.9, A=1.0）
+                                if let Err(e) = ctx.render_solid_color(0.2, 0.6, 0.9, 1.0) {
+                                    warn!("SampleCredential::Advise - PoC 渲染失败: {:?}", e);
+                                } else {
+                                    info!("SampleCredential::Advise - DComp 管线就绪，已渲染 PoC 蓝色方块");
+                                }
+                                *self.animation.lock().unwrap() = Some(ctx);
+                            }
+                            Err(e) => {
+                                warn!("SampleCredential::Advise - AnimationContext 初始化失败（不影响登录）: {:?}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("SampleCredential::Advise - OnCreatingWindow 失败（不影响登录）: {:?}", e);
+                    }
+                }
+            } else {
+                info!("SampleCredential::Advise - 动画 UI 未启用（ANIMATION_UI_ENABLED=0），跳过");
+            }
+        }
+
         Ok(())
     }
 
     /// 取消事件通知
     fn UnAdvise(&self) -> windows_core::Result<()> {
         info!("SampleCredential::UnAdvise - 取消事件通知");
+
+        // 先释放动画上下文（销毁子窗口、Release COM 对象）
+        // 必须在 events 清空前完成，避免 DComp Commit 时 LogonUI 已经卸载
+        {
+            let mut animation = self.animation.lock().unwrap();
+            if animation.is_some() {
+                info!("SampleCredential::UnAdvise - 释放动画 UI 资源");
+                *animation = None; // 触发 AnimationContext 的 Drop
+            }
+        }
+
         let mut events = self.events.lock().unwrap();
         *events = None; // 清除事件接口
         Ok(())
@@ -331,4 +381,12 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
 // 将 String 转换为符合 Win32 要求的 UTF-16 向量（带 null 结尾）
 fn to_wide_vec(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// A9：动画 UI 灰度开关 — 注册表 ANIMATION_UI_ENABLED == "1" 才启用
+/// 默认 "0"（不启用），保护开发期 LogonUI 不被未稳定的动画管线影响。
+fn is_animation_enabled() -> bool {
+    crate::read_facewinunlock_registry("ANIMATION_UI_ENABLED")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
 }

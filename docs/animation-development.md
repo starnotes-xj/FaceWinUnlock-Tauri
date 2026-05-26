@@ -212,20 +212,42 @@ windows = { version = "0.59", features = [
 
 | 阶段 | 任务 | 状态 | 完成日期 | 提交哈希 |
 |---|---|---|---|---|
-| A | A1 OnCreatingWindow | ⏳ 待开始 | - | - |
-| A | A2 CreateWindowEx | ⏳ 待开始 | - | - |
-| A | A3 D3D11 设备 | ⏳ 待开始 | - | - |
-| A | A4 DComp Device + Target | ⏳ 待开始 | - | - |
-| A | A5 D2D 渲染目标 | ⏳ 待开始 | - | - |
-| A | A6 纯色填充 PoC | ⏳ 待开始 | - | - |
-| A | A7 亮度功能迁移 | ⏳ 待开始 | - | - |
-| A | A8 资源清理 | ⏳ 待开始 | - | - |
-| A | A9 注册表开关 | ⏳ 待开始 | - | - |
+| A | A1 OnCreatingWindow | ✅ 完成 | 2026-05-26 | （本次） |
+| A | A2 CreateWindowEx | ✅ 完成 | 2026-05-26 | （本次） |
+| A | A3 D3D11 设备 | ✅ 完成 | 2026-05-26 | （本次） |
+| A | A4 DComp Device + Target | ✅ 完成 | 2026-05-26 | （本次） |
+| A | A5 D2D 渲染目标 | ✅ 完成 | 2026-05-26 | （本次） |
+| A | A6 纯色填充 PoC | ✅ 完成 | 2026-05-26 | （本次） |
+| A | A7 亮度功能迁移到 DLL | ⏸️ 延后 | - | (issue #99 当前 Unlock 侧实现工作中，B/C 之后再做) |
+| A | A8 资源清理 | ✅ 完成 | 2026-05-26 | （本次） |
+| A | A9 注册表开关 ANIMATION_UI_ENABLED | ✅ 完成 | 2026-05-26 | （本次） |
 | B | B1-B6 旋转环 PoC | ⏳ 阶段 A 完成后 | - | - |
 | C | C1-C6 状态机 | ⏳ 阶段 B 完成后 | - | - |
 | D | D1-D4 摄像头预览 | ⏳ 可选 | - | - |
 
 状态图例：⏳ 待开始 / 🔄 进行中 / ✅ 完成 / ⏸️ 阻塞 / ❌ 取消
+
+### 阶段 A 完成情况
+
+**已落地：**
+- `Server/Cargo.toml`: 新增 `Win32_Graphics_*` features（D2D/D3D11/DComp/DXGI/WindowsAndMessaging/LibraryLoader）
+- `Server/src/animation.rs`: 完整 DComp 子窗口管线（约 220 行）
+  - 自定义窗口类 + `CreateWindowExW` 子窗口
+  - D3D11 设备 → DXGI Device → DComp Device → Target → Visual → Surface
+  - D2D Factory → Device → DeviceContext → Bitmap from DXGI Surface
+  - `render_solid_color()` 验证管线
+  - `Drop` 自动 DestroyWindow + Release COM 对象
+- `Server/src/CSampleCredential.rs`:
+  - `Advise()`: 检查灰度开关 → `OnCreatingWindow()` 拿 HWND → 创建 `AnimationContext` → 渲染蓝色方块 PoC
+  - `UnAdvise()`: 先 drop 动画上下文，再清空 events（避免 LogonUI 卸载时序问题）
+  - 所有失败路径都不影响登录主流程（fallback 到原磁贴）
+- `Server/src/lib.rs`: 注册 `mod animation;`
+
+**编译状态：** `cargo check -p winlogon` 通过（只有项目原有的命名规范警告）
+
+**VM 实测：** 待用户启用注册表开关 `ANIMATION_UI_ENABLED=1` 后在 VM 内验证
+
+**A7 延后原因：** issue #99 亮度功能当前在 Unlock.exe 侧实现工作正常，迁移到 DLL 需要替换 PowerShell 调用为 WMI COM（无 rusqlite 依赖、避免子进程开销），优先级低于 B 阶段动画实现。
 
 ---
 
@@ -309,5 +331,5 @@ windows = { version = "0.59", features = [
 ---
 
 **最后更新**：2026-05-26
-**当前阶段**：A（DComp 子窗口管线 + 亮度迁移）
-**下一里程碑**：A6 锁屏纯色方块 PoC
+**当前阶段**：A 已完成核心管线（A1-A6, A8, A9），等待 VM 实测
+**下一里程碑**：用户在 VM 中开启 `ANIMATION_UI_ENABLED=1` 验证锁屏蓝色方块 PoC，验证通过后进入阶段 B
