@@ -178,6 +178,9 @@
     .main-content {
         padding: 30px;
         overflow-y: auto;
+        /* flex 列容器：让子页面（如 Dashboard）可用 flex:1 撑满剩余高度 */
+        display: flex;
+        flex-direction: column;
     }
 
     .global-header {

@@ -156,7 +156,10 @@
 	.dashboard-wrapper {
 		display: flex;
 		flex-direction: column;
-		height: 100%;
+		/* flex:1 替代 height:100% — 路由 out-in 过渡期间百分比高度无法解析，
+		   flex 布局不依赖父元素定义 height，re-mount 后仍能撑满 el-main */
+		flex: 1;
+		min-height: 0;
 		color: #2c3e50;
 		animation: pageEnter 0.6s cubic-bezier(0.22, 1, 0.36, 1);
 	}

@@ -300,8 +300,9 @@ unsafe fn fallback_position(parent: HWND) -> RECT {
     let mut cr = RECT::default();
     let _ = GetClientRect(parent, &mut cr);
     let cx = (cr.right - cr.left) / 2;
-    // 凭据磁贴图像区在父窗口上方约 1/3 处（2/3 处是 PIN 输入区，偏低）
-    let cy = (cr.bottom - cr.top) / 3;
+    // 凭据磁贴图像区在父窗口上方约 1/4 处
+    // VM 实测：2/3 → PIN 输入区；1/3 → 与用户头像重合；1/4 → 头像上方
+    let cy = (cr.bottom - cr.top) / 4;
     RECT { left: cx - ANIM_WIDTH as i32 / 2, top: cy - ANIM_HEIGHT as i32 / 2, right: cx + ANIM_WIDTH as i32 / 2, bottom: cy + ANIM_HEIGHT as i32 / 2 }
 }
 
