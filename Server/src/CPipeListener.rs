@@ -34,6 +34,19 @@ fn set_anim_state(slot: &AnimationSlot, state: AnimState) {
     }
 }
 
+/// 可中断 sleep：按 200ms 轮询 stop_flag，避免 stop_and_join 时被长 sleep 卡死。
+/// 返回 true 表示因 stop_flag 提前结束，false 表示完整睡完。
+fn interruptible_sleep(duration: Duration, stop_flag: &AtomicBool) -> bool {
+    let deadline = Instant::now() + duration;
+    let tick = Duration::from_millis(200);
+    loop {
+        if stop_flag.load(Ordering::SeqCst) { return true; }
+        let now = Instant::now();
+        if now >= deadline { return false; }
+        thread::sleep(deadline.saturating_duration_since(now).min(tick));
+    }
+}
+
 pub struct CPipeListener {
     pub is_unlocked: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
@@ -99,7 +112,7 @@ impl CPipeListener {
                                 return;
                             }
                             warn!("重连管道服务器失败: {:?}，5秒后重试", e);
-                            thread::sleep(Duration::from_secs(5));
+                            if interruptible_sleep(Duration::from_secs(5), &stop_flag) { break; }
                             continue;
                         }
                     };
@@ -108,7 +121,7 @@ impl CPipeListener {
                     if let Err(e) = pipe_write_raw(pipe, b"prepare") {
                         error!("写入 prepare 失败: {:?}", e);
                         unsafe { let _ = CloseHandle(pipe); }
-                        thread::sleep(Duration::from_secs(5));
+                        if interruptible_sleep(Duration::from_secs(5), &stop_flag) { break; }
                         continue;
                     }
                     info!("向管道写入数据成功：prepare");
@@ -125,7 +138,11 @@ impl CPipeListener {
                     } else {
                         Duration::from_secs(1)
                     };
-                    thread::sleep(grace);
+                    // 可中断 sleep，避免 CredUI 场景下用户提前关闭对话框时 stop_and_join 卡死
+                    if interruptible_sleep(grace, &stop_flag) {
+                        unsafe { let _ = CloseHandle(pipe); }
+                        return;
+                    }
 
                     // 内层重试循环 — 定期发送 "run"，含指数退避策略 (#115)
                     let mut retry_count: u32 = 0;
