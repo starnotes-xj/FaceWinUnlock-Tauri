@@ -84,8 +84,10 @@ const TEXT_START_DEG: f32 = 230.0;
 const TEXT_PERIOD_IDLE: f32 = 8.0;
 const TEXT_PERIOD_SCAN: f32 = 3.0;
 
-// 预渲染帧参数（须与 capture_frames.js 一致）
-const FRAME_PERIOD: f64 = 6.0;
+// 预渲染帧循环周期（秒），必须等于 capture_frames.js 的 DURATION_SECS。
+// falcon 设计只有 1s 旋转一个动画，1s 就是完整周期，无需多录。
+// 若未来 HTML 加入第二个动画（例如 2s pulse），改为两者 LCM 并同步 capture 端。
+const FRAME_PERIOD: f64 = 1.0;
 
 const DEFAULT_FPS: u32 = 60;
 const OUTCOME_TIMEOUT_SECS: f32 = 2.0;
