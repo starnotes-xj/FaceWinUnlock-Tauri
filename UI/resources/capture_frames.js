@@ -8,6 +8,12 @@
  *   [u32 LE] frame_width
  *   [u32 LE] frame_height
  *   每帧: width * height * 4 bytes (BGRA8)
+ *
+ * 实现要点：
+ *   - 用 Web Animations API 暂停 CSS 动画并精确寻址 currentTime，
+ *     这样捕获节奏不受 page.screenshot() 真实耗时影响（每次截图约 30ms，
+ *     无法靠 setTimeout 达到 240fps 的 4.17ms 间距）
+ *   - PNG 直通 alpha 需要预乘后再写入，配合 D2D PREMULTIPLIED 表面
  */
 
 const puppeteer = require('puppeteer');
@@ -19,9 +25,12 @@ const path = require('path');
 //   - Server/src/animation.rs ANIM_WIDTH / ANIM_HEIGHT
 const WIDTH = 200;
 const HEIGHT = 200;
-const FPS = 30;
-const DURATION_SECS = 6; // LCM(2s pulse, 3s rotation) = 6s
-const TOTAL_FRAMES = FPS * DURATION_SECS; // 180 frames
+
+// CRITICAL: DURATION_SECS 必须等于 animation.rs 的 FRAME_PERIOD
+// falcon 设计只有 1s 旋转一个动画，1s 即可覆盖完整周期
+const FPS = 240;
+const DURATION_SECS = 1;
+const TOTAL_FRAMES = FPS * DURATION_SECS; // 240 frames
 
 async function main() {
     const { PNG } = require('pngjs');
@@ -44,8 +53,19 @@ async function main() {
         document.body.style.background = 'transparent';
     });
 
-    // 等待动画开始（确保 CSS 已注入并开始播放）
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)));
+    // 等待 CSS 动画注册（getAnimations() 需要先有动画存在）
+    await page.evaluate(() => new Promise(r => setTimeout(r, 200)));
+
+    // 暂停所有 CSS 动画，以便后续逐帧精确寻址
+    const animCount = await page.evaluate(() => {
+        const anims = document.getAnimations();
+        anims.forEach(a => a.pause());
+        return anims.length;
+    });
+    if (animCount === 0) {
+        throw new Error('页面没有任何 CSS 动画，无法逐帧捕获');
+    }
+    console.log(`  Paused ${animCount} animation(s) for deterministic seeking`);
 
     const outputPath = path.join(__dirname, 'animation_frames.bin');
     const fd = fs.openSync(outputPath, 'w');
@@ -58,15 +78,19 @@ async function main() {
     fs.writeSync(fd, header);
 
     const frameIntervalMs = 1000 / FPS;
-    let startTime = Date.now();
+    const startWall = Date.now();
 
     for (let i = 0; i < TOTAL_FRAMES; i++) {
-        const targetTime = startTime + i * frameIntervalMs;
-        const now = Date.now();
-        const delay = Math.max(0, targetTime - now);
-        if (delay > 0) {
-            await new Promise(r => setTimeout(r, delay));
-        }
+        const animTimeMs = i * frameIntervalMs;
+
+        // 把所有动画寻址到当前帧对应的时间点，不依赖真实墙钟
+        await page.evaluate((t) => {
+            for (const a of document.getAnimations()) {
+                a.currentTime = t;
+            }
+            // 强制 reflow，确保下一次截图反映新状态
+            void document.body.offsetHeight;
+        }, animTimeMs);
 
         // 截图（omitBackground: true 保留透明度）
         const screenshot = await page.screenshot({
@@ -75,12 +99,11 @@ async function main() {
             clip: { x: 0, y: 0, width: WIDTH, height: HEIGHT }
         });
 
-        // Puppeteer 返回 Uint8Array，转为 Buffer 供 pngjs 使用
         const pngBuffer = Buffer.from(screenshot);
         const png = PNG.sync.read(pngBuffer);
 
         // PNG 是 RGBA8 直通 alpha；D2D surface 用 D2D1_ALPHA_MODE_PREMULTIPLIED，
-        // 必须把 RGB 预乘 alpha，否则半透明像素会渲染为白色光环（颜色"过亮"）
+        // 必须把 RGB 预乘 alpha，否则半透明像素会渲染为白色光环
         const bgra = Buffer.alloc(WIDTH * HEIGHT * 4);
         for (let y = 0; y < HEIGHT; y++) {
             for (let x = 0; x < WIDTH; x++) {
@@ -90,17 +113,18 @@ async function main() {
                 const g = png.data[srcIdx + 1];
                 const b = png.data[srcIdx + 2];
                 const a = png.data[srcIdx + 3];
-                bgra[dstIdx]     = Math.round(b * a / 255); // B 预乘
-                bgra[dstIdx + 1] = Math.round(g * a / 255); // G 预乘
-                bgra[dstIdx + 2] = Math.round(r * a / 255); // R 预乘
-                bgra[dstIdx + 3] = a;                       // A
+                bgra[dstIdx]     = Math.round(b * a / 255);
+                bgra[dstIdx + 1] = Math.round(g * a / 255);
+                bgra[dstIdx + 2] = Math.round(r * a / 255);
+                bgra[dstIdx + 3] = a;
             }
         }
 
         fs.writeSync(fd, bgra);
 
-        if ((i + 1) % 30 === 0) {
-            console.log(`  Captured ${i + 1}/${TOTAL_FRAMES} frames`);
+        if ((i + 1) % 60 === 0 || i + 1 === TOTAL_FRAMES) {
+            const elapsed = ((Date.now() - startWall) / 1000).toFixed(1);
+            console.log(`  Captured ${i + 1}/${TOTAL_FRAMES} frames (${elapsed}s elapsed)`);
         }
     }
 
@@ -108,7 +132,8 @@ async function main() {
     await browser.close();
 
     const fileSize = fs.statSync(outputPath).size;
-    console.log(`Done. Output: ${outputPath} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
+    const totalSecs = ((Date.now() - startWall) / 1000).toFixed(1);
+    console.log(`Done in ${totalSecs}s. Output: ${outputPath} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
 }
 
 main().catch(err => {
