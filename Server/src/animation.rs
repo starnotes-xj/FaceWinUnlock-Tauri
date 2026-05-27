@@ -40,7 +40,8 @@ use windows::Win32::{
             D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
         },
         DirectComposition::{
-            DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionVisual2,
+            DCompositionCreateDevice2, DCompositionWaitForCompositorClock,
+            IDCompositionDesktopDevice, IDCompositionVisual2,
         },
         DirectWrite::{
             DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
@@ -852,14 +853,15 @@ fn run_render_loop(
             .and_then(|s| s.trim().parse::<u32>().ok())
             .unwrap_or(monitor_hz)
             .clamp(10, 240);
-        let frame_dur = Duration::from_micros(1_000_000 / target_fps as u64);
-        log::info!("[anim] monitor={monitor_hz} Hz, target FPS={target_fps} (frame_dur={frame_dur:?})");
+        // 一帧等几次 compositor 心跳：target_fps=monitor_hz 时为 1（每次心跳渲染），
+        // 用户把 ANIMATION_FPS 设低于显示器刷新率时跳过 N-1 次心跳节流
+        let ticks_per_frame = ((monitor_hz as f64 / target_fps as f64).round() as u32).max(1);
+        log::info!("[anim] monitor={monitor_hz} Hz, target={target_fps} fps, vsync-lock {ticks_per_frame} tick(s)/frame");
         let app_start = Instant::now();
 
         loop {
             if state.stop.load(Ordering::SeqCst) { break; }
 
-            let frame_start = Instant::now();
             let elapsed = app_start.elapsed().as_secs_f64();
 
             let (current_state, state_age) = {
@@ -907,8 +909,13 @@ fn run_render_loop(
             dcomp_surface.EndDraw()?;
             dcomp_device.Commit()?;
 
-            let ft = frame_start.elapsed();
-            if ft < frame_dur { std::thread::sleep(frame_dur - ft); }
+            // vsync 锁相：等 ticks_per_frame 次 compositor 心跳，让渲染节拍与 DWM 同相，
+            // 消除 thread::sleep 的 ~15ms timer 分辨率抖动（240Hz 下 sleep 抖动是频闪根因）。
+            // 200ms 超时让 stop_flag 能在该频率响应（compositor 正常情况每 1/Hz 秒触发）
+            for _ in 0..ticks_per_frame {
+                if state.stop.load(Ordering::SeqCst) { return Ok(()); }
+                let _ = DCompositionWaitForCompositorClock(None, 200);
+            }
         }
         Ok(())
     }
