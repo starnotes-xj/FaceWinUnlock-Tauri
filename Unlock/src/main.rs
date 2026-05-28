@@ -32,7 +32,7 @@ use opencv::{
     prelude::*,
     videoio::VideoCapture,
 };
-use rusqlite::Connection;
+use rusqlite::{types::ValueRef, Connection};
 use serde::Deserialize;
 use windows::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
@@ -93,7 +93,7 @@ impl State {
 struct FaceRecord {
     user_name:  String,
     user_pwd:   String,
-    face_token: String,
+    feature_bytes: Vec<u8>,
     threshold:  i64,   // 0~100，对应余弦相似度
     domain:     String,
 }
@@ -296,7 +296,7 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
 
 // ─── Database ─────────────────────────────────────────────────────────────────
 
-fn load_face_records(db_path: &Path) -> Vec<FaceRecord> {
+fn load_face_records(exe_dir: &Path, db_path: &Path) -> Vec<FaceRecord> {
     let conn = match Connection::open(db_path) { Ok(c) => c, Err(_) => return vec![] };
     let mut stmt = match conn.prepare(
         "SELECT user_name, user_pwd, account_type, face_token, json_data FROM faces",
@@ -325,7 +325,12 @@ fn load_face_records(db_path: &Path) -> Vec<FaceRecord> {
                     "online" => String::new(),
                     _ => ".".to_string(),
                 });
-                Some(FaceRecord { user_name: u, user_pwd: p, face_token: t, threshold: thr, domain: dm })
+                let feature_path = exe_dir.join("faces").join(format!("{}.face", t));
+                let feature_bytes = std::fs::read(feature_path).ok()?;
+                if feature_bytes.is_empty() {
+                    return None;
+                }
+                Some(FaceRecord { user_name: u, user_pwd: p, feature_bytes, threshold: thr, domain: dm })
             })
             .collect()
     })
@@ -443,6 +448,39 @@ fn load_camera_rotation(db_path: &Path) -> i32 {
     0
 }
 
+fn load_camera_index(db_path: &Path) -> Option<i32> {
+    let conn = Connection::open(db_path).ok()?;
+    let index = conn
+        .prepare("SELECT val FROM options WHERE key = 'camera'")
+        .ok()?
+        .query_row([], |row| {
+            let raw = row.get_ref(0)?;
+            let index = match raw {
+                ValueRef::Integer(v) => i32::try_from(v).ok(),
+                ValueRef::Real(v) if v.is_finite() && v >= 0.0 && v <= i32::MAX as f64 => {
+                    Some(v as i32)
+                }
+                ValueRef::Text(v) => std::str::from_utf8(v)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<i32>().ok()),
+                _ => None,
+            };
+            Ok(index)
+        })
+        .ok()??;
+    (index >= 0).then_some(index)
+}
+
+fn camera_candidates(db_path: &Path) -> Vec<i32> {
+    let mut candidates: Vec<i32> = load_camera_index(db_path).into_iter().collect();
+    for idx in 0..4i32 {
+        if !candidates.contains(&idx) {
+            candidates.push(idx);
+        }
+    }
+    candidates
+}
+
 /// 旋转帧（rotation: 0/90/180/270）
 fn rotate_frame(frame: &Mat, rotation: i32) -> Option<Mat> {
     if rotation == 0 {
@@ -517,7 +555,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
         // 定期重新加载人脸记录和配置
         if records.is_empty() || last_reload.elapsed() > Duration::from_secs(30) {
-            records = load_face_records(&db_path);
+            records = load_face_records(&exe_dir, &db_path);
             camera_rotation = load_camera_rotation(&db_path);
             unlock_brightness = load_unlock_brightness(&db_path);
             last_reload = Instant::now();
@@ -530,7 +568,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
         // 打开摄像头（首次或重新打开）
         if cam.is_none() {
-            for idx in 0..4i32 {
+            for idx in camera_candidates(&db_path) {
                 if let Ok(mut c) = VideoCapture::new(idx, opencv::videoio::CAP_ANY) {
                     if c.is_opened().unwrap_or(false) {
                         // 设置默认帧尺寸 + 多帧预热（虚拟摄像头兼容 #94）
@@ -567,8 +605,6 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         for _ in 0..60 {
             if state.should_exit.load(Ordering::SeqCst)
                 || state.release_requested.load(Ordering::SeqCst) { break; }
-            state.run_requested.store(false, Ordering::SeqCst);
-
             let mut frame = Mat::default();
             if cap.read(&mut frame).is_err() || frame.empty() {
                 thread::sleep(Duration::from_millis(100));
@@ -583,9 +619,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             let cam_bytes = feature_to_bytes(&cam_feat);
 
             for rec in &records {
-                let face_path = exe_dir.join("faces").join(format!("{}.face", rec.face_token));
-                let stored_bytes = match std::fs::read(&face_path) { Ok(b) => b, Err(_) => continue };
-                let score = cosine_sim(&cam_bytes, &stored_bytes);
+                let score = cosine_sim(&cam_bytes, &rec.feature_bytes);
                 let threshold = rec.threshold as f64 / 100.0;
                 if score >= threshold {
                     *state.matched_creds.lock().unwrap() = Some((rec.user_name.clone(), rec.user_pwd.clone(), rec.domain.clone()));
@@ -606,7 +640,9 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             set_brightness(orig);
         }
 
-        if !matched && !state.release_requested.load(Ordering::SeqCst) {
+        if matched {
+            state.run_requested.store(false, Ordering::SeqCst);
+        } else if !state.release_requested.load(Ordering::SeqCst) {
             log_service(&exe_dir, "WARN", "face recognition finished without a match");
         }
         cam = None;
@@ -730,14 +766,14 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
 
         // 重新加载人脸记录
         if last_record_reload.elapsed() > Duration::from_secs(60) {
-            records = load_face_records(&db_path);
+            records = load_face_records(&exe_dir, &db_path);
             last_record_reload = Instant::now();
         }
         if records.is_empty() { continue; } // 无人脸记录，不锁屏
 
         // 打开摄像头做一次验证（最多 15 帧 ≈ 2~3 秒）
         let mut cam: Option<VideoCapture> = None;
-        for idx in 0..4i32 {
+        for idx in camera_candidates(&db_path) {
             if let Ok(mut c) = VideoCapture::new(idx, opencv::videoio::CAP_ANY) {
                 if c.is_opened().unwrap_or(false) {
                     let _ = c.set(opencv::videoio::CAP_PROP_FRAME_WIDTH, 640.0);
@@ -767,9 +803,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             if let Some(feat) = detect_and_extract(models, &frame) {
                 let cam_bytes = feature_to_bytes(&feat);
                 for rec in &records {
-                    let face_path = exe_dir.join("faces").join(format!("{}.face", rec.face_token));
-                    let stored_bytes = match std::fs::read(&face_path) { Ok(b) => b, Err(_) => continue };
-                    let score = cosine_sim(&cam_bytes, &stored_bytes);
+                    let score = cosine_sim(&cam_bytes, &rec.feature_bytes);
                     let threshold = rec.threshold as f64 / 100.0;
                     if score >= threshold {
                         authorized = true;
