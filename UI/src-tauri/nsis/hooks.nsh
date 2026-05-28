@@ -46,7 +46,7 @@
   WriteRegStr HKLM "Software\facewinunlock-tauri" "DLL_LOG_PATH" "$INSTDIR\logs"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "ANIMATION_FRAMES_PATH" "$INSTDIR\resources\animation_frames.bin"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "UNLOCK_GRACE_PERIOD" "0.0"
-  WriteRegStr HKLM "Software\facewinunlock-tauri" "RETRY_DELAY" "2.0"
+  WriteRegStr HKLM "Software\facewinunlock-tauri" "RETRY_DELAY" "1.0"
 
   DetailPrint "FaceWinUnlock 安装完成"
 !macroend

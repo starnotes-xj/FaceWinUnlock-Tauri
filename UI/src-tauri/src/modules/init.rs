@@ -163,7 +163,7 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         ("UNLOCK_SCENE", "1,2,4"),
         ("SHOW_TILE", "1"),
         ("CONNECT_TO_PIPE", "1"),
-        ("RETRY_DELAY", "2.0"),
+        ("RETRY_DELAY", "1.0"),
         ("UNLOCK_GRACE_PERIOD", "0.0"),
         ("CREDUI_ALLOW_GENERIC", "0"),
         ("DLL_LOG_PATH", log_dir_value),
@@ -198,9 +198,9 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
     }
 
     if let Ok(current) = app_key.get_value::<String, _>("RETRY_DELAY") {
-        if current.trim() == "10.0" || current.trim() == "10" {
+        if matches!(current.trim(), "10.0" | "10" | "2.0" | "2") {
             app_key
-                .set_value("RETRY_DELAY", &"2.0")
+                .set_value("RETRY_DELAY", &"1.0")
                 .map_err(|e| CustomResult::error(Some(format!("迁移 RETRY_DELAY 失败: {e}")), None))?;
         }
     }

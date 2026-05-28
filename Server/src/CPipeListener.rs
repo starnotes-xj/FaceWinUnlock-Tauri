@@ -92,7 +92,7 @@ impl CPipeListener {
                 let retry_secs: f64 = read_facewinunlock_registry("RETRY_DELAY")
                     .ok()
                     .and_then(|s| s.trim().parse().ok())
-                    .unwrap_or(10.0);
+                    .unwrap_or(1.0);
                 let retry_delay = Duration::from_secs_f64(retry_secs.max(1.0));
 
                 let mut first_connect = true;
@@ -192,7 +192,7 @@ impl CPipeListener {
                                 return;
                             }
                             if Instant::now() >= deadline { break; }
-                            thread::sleep(Duration::from_millis(200));
+                            thread::sleep(Duration::from_millis(100));
                         }
                         info!("管道重试: 再次发送 run（第{}次）", retry_count);
                     }
@@ -219,7 +219,7 @@ impl CPipeListener {
                         Ok(p)  => p,
                         Err(_) => {
                             // Unlock EXE 可能尚未运行，继续等待
-                            thread::sleep(Duration::from_millis(500));
+                            thread::sleep(Duration::from_millis(100));
                             continue;
                         }
                     };

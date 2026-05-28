@@ -56,6 +56,8 @@ use windows_core::PCWSTR;
 const PIPE_SERVER_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustServer";
 const PIPE_UNLOCK_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustUnlock";
 const BUF_SIZE: u32 = 4096;
+const CAMERA_WARMUP_MAX_FRAMES: usize = 10;
+const CAMERA_WARMUP_READY_FRAMES: usize = 3;
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
 
@@ -164,7 +166,7 @@ fn peek_has_data(pipe: HANDLE, timeout: Duration) -> bool {
             return true;
         }
         if Instant::now() >= deadline { return false; }
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -206,13 +208,19 @@ fn run_control_server(state: Arc<State>) {
 
         if wait_for_client(pipe).is_err() { close_handle(pipe); continue; }
 
+        let mut control_buf = String::new();
         loop {
             if state.should_exit.load(Ordering::SeqCst) { break; }
             match pipe_read(pipe) {
                 Ok(data) if !data.is_empty() => {
                     let cmd = String::from_utf8_lossy(&data);
-                    if cmd.trim() == "run" {
+                    control_buf.push_str(&cmd);
+                    if control_buf.contains("run") {
                         state.run_requested.store(true, Ordering::SeqCst);
+                        control_buf.clear();
+                    } else if control_buf.len() > 32 {
+                        let keep_from = control_buf.len().saturating_sub(8);
+                        control_buf = control_buf[keep_from..].to_string();
                     }
                 }
                 _ => break,
@@ -244,7 +252,7 @@ fn run_unlock_server(state: Arc<State>) {
 }
 
 fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
-    if peek_has_data(pipe, Duration::from_millis(200)) {
+    if peek_has_data(pipe, Duration::from_millis(50)) {
         // UI 客户端：读取命令
         if let Ok(data) = pipe_read(pipe) {
             let msg = String::from_utf8_lossy(&data);
@@ -281,7 +289,7 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                 let _ = pipe_write(pipe, payload.as_bytes());
                 break;
             }
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(30));
         }
 
         state.dll_creds_pipe.compare_exchange(
@@ -481,6 +489,22 @@ fn camera_candidates(db_path: &Path) -> Vec<i32> {
     candidates
 }
 
+fn warm_up_camera(cam: &mut VideoCapture) {
+    let mut dummy = Mat::default();
+    let mut ready_frames = 0usize;
+
+    for _ in 0..CAMERA_WARMUP_MAX_FRAMES {
+        if cam.read(&mut dummy).is_ok() && !dummy.empty() {
+            ready_frames += 1;
+            if ready_frames >= CAMERA_WARMUP_READY_FRAMES {
+                break;
+            }
+        } else {
+            ready_frames = 0;
+        }
+    }
+}
+
 /// 旋转帧（rotation: 0/90/180/270）
 fn rotate_frame(frame: &Mat, rotation: i32) -> Option<Mat> {
     if rotation == 0 {
@@ -548,7 +572,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         }
 
         if !state.run_requested.load(Ordering::SeqCst) {
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(30));
             continue;
         }
         state.run_requested.store(false, Ordering::SeqCst);
@@ -574,8 +598,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                         // 设置默认帧尺寸 + 多帧预热（虚拟摄像头兼容 #94）
                         let _ = c.set(opencv::videoio::CAP_PROP_FRAME_WIDTH, 640.0);
                         let _ = c.set(opencv::videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
-                        let mut dummy = Mat::default();
-                        for _ in 0..10 { let _ = c.read(&mut dummy); }
+                        warm_up_camera(&mut c);
                         cam = Some(c);
                         log_service(&exe_dir, "INFO", &format!("camera opened at index {}", idx));
                         break;
@@ -607,14 +630,14 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 || state.release_requested.load(Ordering::SeqCst) { break; }
             let mut frame = Mat::default();
             if cap.read(&mut frame).is_err() || frame.empty() {
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(Duration::from_millis(30));
                 continue;
             }
             let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
 
             let cam_feat = match detect_and_extract(&mut models, &frame) {
                 Some(f) => f,
-                None => { thread::sleep(Duration::from_millis(100)); continue; }
+                None => { thread::sleep(Duration::from_millis(30)); continue; }
             };
             let cam_bytes = feature_to_bytes(&cam_feat);
 
@@ -632,7 +655,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 }
             }
             if matched { break; }
-            thread::sleep(Duration::from_millis(80));
+            thread::sleep(Duration::from_millis(30));
         }
 
         // 识别结束，恢复原始亮度
@@ -713,7 +736,7 @@ fn user_input_trigger_loop(state: Arc<State>) {
             last_seen_tick = get_last_input_tick();
         }
 
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(30));
     }
 }
 
@@ -778,8 +801,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
                 if c.is_opened().unwrap_or(false) {
                     let _ = c.set(opencv::videoio::CAP_PROP_FRAME_WIDTH, 640.0);
                     let _ = c.set(opencv::videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
-                    let mut dummy = Mat::default();
-                    for _ in 0..10 { let _ = c.read(&mut dummy); }
+                    warm_up_camera(&mut c);
                     cam = Some(c);
                     break;
                 }

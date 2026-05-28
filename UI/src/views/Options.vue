@@ -43,7 +43,7 @@
 		faceRecogDelay: parseFloat(optionsStore.getOptionValueByKey('faceRecogDelay')) || 10.0,
 		faceRecogType: optionsStore.getOptionValueByKey('faceRecogType') || 'operation',
 		silentRun: optionsStore.getOptionValueByKey('silentRun') ? (optionsStore.getOptionValueByKey('silentRun') == 'false' ? false : true) : false,
-		retryDelay: parseFloat(optionsStore.getOptionValueByKey('retryDelay')) || 2.0,
+		retryDelay: parseFloat(optionsStore.getOptionValueByKey('retryDelay')) || 1.0,
 		notFaceDelay: parseFloat(optionsStore.getOptionValueByKey('notFaceDelay')) || 3,
 		// 是否开机面容识别
 		isAutoFaceRecogOnStart: false,
@@ -176,7 +176,7 @@
 			return invoke("write_to_registry", {items: [
 				{
 					key: "RETRY_DELAY",
-					value: String(Math.max(1, Number(config.retryDelay) || 2.0))
+					value: String(Math.max(1, Number(config.retryDelay) || 1.0))
 				}
 			]}).catch((error)=>{
 				warn(formatObjectString("同步 RETRY_DELAY 至注册表失败：", error));
