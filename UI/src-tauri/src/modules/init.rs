@@ -1,6 +1,7 @@
-use std::path::Path;
+use std::{fs, path::Path};
 
 use opencv::videoio::{VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst};
+use tauri_plugin_log::log;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
@@ -150,15 +151,23 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         .create_subkey_with_flags(app_reg_path, KEY_WRITE)
         .map_err(|e| CustomResult::error(Some(format!("创建应用注册表键失败: {}", e)), None))?;
 
+    let log_dir = ROOT_DIR.join("logs");
+    let _ = fs::create_dir_all(&log_dir);
+    let root_dir_value = ROOT_DIR.to_str().unwrap_or(r"C:\Program Files\facewinunlock-tauri");
+    let log_dir_value = log_dir.to_str().unwrap_or(root_dir_value);
+    let animation_frames_path = ROOT_DIR.join("resources").join("animation_frames.bin");
+    let animation_frames_value = animation_frames_path.to_str().unwrap_or("");
+
     // 默认配置（仅写入尚未存在的键，避免覆盖用户自定义设置）
     let defaults: &[(&str, &str)] = &[
         ("UNLOCK_SCENE", "1,2,4"),
         ("SHOW_TILE", "1"),
         ("CONNECT_TO_PIPE", "1"),
         ("RETRY_DELAY", "10.0"),
-        ("UNLOCK_GRACE_PERIOD", "5.0"),
+        ("UNLOCK_GRACE_PERIOD", "0.0"),
         ("CREDUI_ALLOW_GENERIC", "0"),
-        ("DLL_LOG_PATH", ROOT_DIR.to_str().unwrap_or(r"C:\Program Files\facewinunlock-tauri")),
+        ("DLL_LOG_PATH", log_dir_value),
+        ("ANIMATION_FRAMES_PATH", animation_frames_value),
         // 动画 UI（阶段 B/C）— 默认启用以便 VM 测试
         ("ANIMATION_UI_ENABLED", "1"),
     ];
@@ -170,6 +179,48 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
                 .set_value(name, &value)
                 .map_err(|e| CustomResult::error(Some(format!("写 {name} 失败: {e}")), None))?;
         }
+    }
+
+    if let Ok(current) = app_key.get_value::<String, _>("DLL_LOG_PATH") {
+        if current.trim_end_matches(['\\', '/']) == root_dir_value.trim_end_matches(['\\', '/']) {
+            app_key
+                .set_value("DLL_LOG_PATH", &log_dir_value)
+                .map_err(|e| CustomResult::error(Some(format!("迁移 DLL_LOG_PATH 失败: {e}")), None))?;
+        }
+    }
+
+    if let Ok(current) = app_key.get_value::<String, _>("UNLOCK_GRACE_PERIOD") {
+        if current.trim() == "5.0" {
+            app_key
+                .set_value("UNLOCK_GRACE_PERIOD", &"0.0")
+                .map_err(|e| CustomResult::error(Some(format!("迁移 UNLOCK_GRACE_PERIOD 失败: {e}")), None))?;
+        }
+    }
+
+    if !animation_frames_value.is_empty() {
+        app_key
+            .set_value("ANIMATION_FRAMES_PATH", &animation_frames_value)
+            .map_err(|e| CustomResult::error(Some(format!("写 ANIMATION_FRAMES_PATH 失败: {e}")), None))?;
+    }
+
+    // 5. 自动创建 Unlock EXE 的定时任务（BootTrigger + SessionUnlock）
+    //    用户安装后无需手动去 Options 页点"同步"，就能让面容识别自动可用
+    //    add_scheduled_task 内部会把相对路径解析为 ROOT_DIR 下的绝对路径
+    if let Err(e) = crate::utils::api::add_scheduled_task(
+        "FaceWinUnlock-Server.exe".to_string(),
+        "FaceWinUnlockServer".to_string(),
+        true,  // is_server: SYSTEM 账户运行
+        false, // silent
+        true,  // run_on_system_start: BootTrigger
+        true,  // run_immediately: 部署完立即启动一次
+    ) {
+        // 任务创建失败不阻断部署，仅日志警告——用户仍可去 Options 手动创建
+        log::warn!(
+            "deploy_core_components: 创建定时任务失败（不影响 DLL 部署）: {:?}",
+            e.msg
+        );
+    } else {
+        log::info!("deploy_core_components: 定时任务 FaceWinUnlockServer 已创建并启动");
     }
 
     Ok(CustomResult::success(None, None))

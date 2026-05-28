@@ -325,10 +325,11 @@
 
 	// 开机面容识别切换
 	const handleAutoFaceRecogOnStartChange = ()=>{
+		const expectedAutoFaceRecogOnStart = config.isAutoFaceRecogOnStart;
 		// 不管切换成什么，都要删除计划任务重新创建
 		const loadingInstance = ElLoading.service({ fullscreen: true });
-		invoke("disable_scheduled_task", {taskName: 'FaceWinUnlockServer'}).then(()=>{{
-			if(config.isAutoFaceRecogOnStart){
+		invoke("disable_scheduled_task", {taskName: 'FaceWinUnlockServer'}).catch(()=>null).then(()=>{
+			if(expectedAutoFaceRecogOnStart){
 				return invoke("add_scheduled_task", {
 					path: 'FaceWinUnlock-Server.exe', taskName: 'FaceWinUnlockServer', isServer: true, silent: false, runOnSystemStart: true, runImmediately: false
 				})
@@ -337,8 +338,9 @@
 					path: 'FaceWinUnlock-Server.exe', taskName: 'FaceWinUnlockServer', isServer: true, silent: false, runOnSystemStart: false, runImmediately: false
 				})
 			}
-		}}).then(()=>{
-			checkAutoFaceRecogOnStart(loadingInstance, "开机面容识别已" + (config.isAutoFaceRecogOnStart ? "开启" : "关闭"));
+		}).then(()=>{
+			config.isAutoFaceRecogOnStart = expectedAutoFaceRecogOnStart;
+			checkAutoFaceRecogOnStart(loadingInstance, "开机面容识别已" + (expectedAutoFaceRecogOnStart ? "开启" : "关闭"), expectedAutoFaceRecogOnStart);
 		}).catch(()=>{
 			config.isAutoFaceRecogOnStart = false;
 			ElMessage.error("取消开机面容识别失败，请重新尝试");
@@ -392,19 +394,28 @@
 	}
 
 	// 检查开机面容识别
-	function checkAutoFaceRecogOnStart(loadingInstance, msg = ""){
+	function checkAutoFaceRecogOnStart(loadingInstance, msg = "", expectedState = null){
 		invoke("check_trigger_via_xml", {taskName: 'FaceWinUnlockServer'}).then((result)=>{
-			if(msg != ""){
-				ElMessage.success(msg);
-			}
-
 			if(result == "OnStart"){
 				config.isAutoFaceRecogOnStart = true;
+				if(msg != ""){
+					ElMessage.success(msg);
+				}
 			}else if(result == "OnLogon"){
 				config.isAutoFaceRecogOnStart = false;
+				if(msg != ""){
+					ElMessage.success(msg);
+				}
 			} else {
-				ElMessage.warning("未检测到开机面容识别任务触发器，可能未设置或已损坏");
-				config.isAutoFaceRecogOnStart = false;
+				if(expectedState !== null){
+					config.isAutoFaceRecogOnStart = expectedState;
+					if(msg != ""){
+						ElMessage.success(msg);
+					}
+				}else{
+					ElMessage.warning("未检测到开机面容识别任务触发器，可能未设置或已损坏");
+					config.isAutoFaceRecogOnStart = false;
+				}
 			}
 		}).catch((error)=>{
 			ElMessage.warning(formatObjectString("查询开机面容识别状态失败 ", error));

@@ -2,14 +2,24 @@ import { exists as existsFile, readFile, remove as removeFile, readTextFile, rea
 import { formatObjectString } from '../utils/function';
 import { error as errorLog } from '@tauri-apps/plugin-log';
 export function useFile() {
-    const baseDir = localStorage.getItem("exe_dir") + "\\";
+    const getBaseDir = () => {
+        const dir = localStorage.getItem("exe_dir") || "";
+        return dir ? dir.replace(/[\\/]+$/, "") + "\\" : "";
+    };
+
+    const joinPath = (path) => {
+        if (/^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("\\\\")) {
+            return path;
+        }
+        return getBaseDir() + path.replace(/^[\\/]+/, "");
+    };
     /**
      * 判断文件是否存在
      * @param {String} path 文件路径
      * @returns {Promise<Boolean>}
      */
     const exists = (path) => {
-        return existsFile(baseDir + path);
+        return existsFile(joinPath(path));
     };
 
     /**
@@ -18,7 +28,7 @@ export function useFile() {
      * @returns {Promise<void>}
      */
     const reomve = (path) => {
-        return removeFile(baseDir + path);
+        return removeFile(joinPath(path));
     };
 
     /**
@@ -29,12 +39,17 @@ export function useFile() {
      * @returns {Promise<string | Blob>} 对应类型的图片数据，base64返回字符串，blob返回Blob对象
      */
     const read = (path, type = 'base64', format = 'jpg') => {
-        const fullPath = baseDir + path;
+        const fullPath = joinPath(path);
         return new Promise((resolve, reject) => {
-            existsFile(fullPath).then(()=>{
+            existsFile(fullPath).then((exists)=>{
+                if (!exists) {
+                    reject(`文件不存在：${fullPath}`);
+                    return null;
+                }
                 // 读取文件
                 return readFile(fullPath);
             }).then((fileData)=>{
+                if (fileData === null) return;
                 // 判断输出类型
                 if (type === 'base64') {
                     // Uint8Array 转成 二进制字符串
@@ -69,13 +84,19 @@ export function useFile() {
      * @returns {Promise<string>} 文本数据
      */
     const readText = (path) => {
-        const fullPath = baseDir + path;
+        const fullPath = joinPath(path);
         return new Promise((resolve, reject) => {
-            existsFile(fullPath).then(()=>{
+            existsFile(fullPath).then((exists)=>{
+                if (!exists) {
+                    resolve('');
+                    return null;
+                }
                 // 读取文件
                 return readTextFile(fullPath);
             }).then((data)=>{
-                resolve(data);
+                if (data !== null) {
+                    resolve(data);
+                }
             }).catch((error)=>{
                 const info = formatObjectString("文件读取失败：", error);
                 errorLog(info);

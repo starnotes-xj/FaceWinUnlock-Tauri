@@ -14,6 +14,8 @@
 
 use std::{
     ffi::OsStr,
+    fs::{create_dir_all, OpenOptions},
+    io::Write,
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::{
@@ -58,8 +60,10 @@ const BUF_SIZE: u32 = 4096;
 // ─── Shared state ─────────────────────────────────────────────────────────────
 
 struct State {
+    exe_dir:           PathBuf,
     should_exit:      AtomicBool,
     run_requested:    AtomicBool,
+    release_requested: AtomicBool,
     /// DLL 在 MansonWindowsUnlockRustUnlock 上等待凭据的连接句柄（raw isize）
     dll_creds_pipe:   AtomicIsize,
     /// 人脸匹配到的 (username, password, domain)
@@ -69,11 +73,13 @@ struct State {
 }
 
 impl State {
-    fn new() -> Arc<Self> {
+    fn new(exe_dir: PathBuf) -> Arc<Self> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
         Arc::new(Self {
+            exe_dir,
             should_exit:     AtomicBool::new(false),
             run_requested:   AtomicBool::new(false),
+            release_requested: AtomicBool::new(false),
             dll_creds_pipe:  AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize),
             matched_creds:   Mutex::new(None),
             last_user_active: AtomicI64::new(now),
@@ -92,7 +98,7 @@ struct FaceRecord {
     domain:     String,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct JsonData {
     threshold: Option<i64>,
     view: Option<bool>,
@@ -166,6 +172,27 @@ fn close_handle(h: HANDLE) {
     if !h.is_invalid() { unsafe { let _ = CloseHandle(h); } }
 }
 
+fn log_service(exe_dir: &Path, level: &str, message: &str) {
+    let logs_dir = exe_dir.join("logs");
+    let _ = create_dir_all(&logs_dir);
+    let log_path = logs_dir.join("unlock.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let seconds = elapsed % 86_400;
+        let hour = seconds / 3_600;
+        let minute = (seconds % 3_600) / 60;
+        let second = seconds % 60;
+        let _ = writeln!(
+            file,
+            "{:02}:{:02}:{:02} [{}] {}",
+            hour, minute, second, level, message
+        );
+    }
+}
+
 // ─── Control pipe server（MansonWindowsUnlockRustServer）─────────────────────
 
 fn run_control_server(state: Arc<State>) {
@@ -221,8 +248,19 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
         // UI 客户端：读取命令
         if let Ok(data) = pipe_read(pipe) {
             let msg = String::from_utf8_lossy(&data);
-            if msg.trim() == "exit" {
-                state.should_exit.store(true, Ordering::SeqCst);
+            match msg.trim() {
+                "exit" => {
+                    log_service(&state.exe_dir, "INFO", "received exit command");
+                    state.release_requested.store(true, Ordering::SeqCst);
+                    state.should_exit.store(true, Ordering::SeqCst);
+                }
+                "release" => {
+                    log_service(&state.exe_dir, "INFO", "received release command, closing camera");
+                    state.run_requested.store(false, Ordering::SeqCst);
+                    state.release_requested.store(true, Ordering::SeqCst);
+                    *state.matched_creds.lock().unwrap() = None;
+                }
+                _ => {}
             }
         }
     } else {
@@ -231,9 +269,12 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
         if old != INVALID_HANDLE_VALUE.0 as isize {
             close_handle(HANDLE(old as *mut _));
         }
+        log_service(&state.exe_dir, "INFO", "credential client connected");
 
         loop {
             if state.should_exit.load(Ordering::SeqCst) { break; }
+            if state.release_requested.load(Ordering::SeqCst) { break; }
+            if state.dll_creds_pipe.load(Ordering::SeqCst) != pipe.0 as isize { break; }
             let creds = state.matched_creds.lock().unwrap().take();
             if let Some((username, password, domain)) = creds {
                 let payload = format!("{}\0{}\0{}\0", username, password, domain);
@@ -258,7 +299,7 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
 fn load_face_records(db_path: &Path) -> Vec<FaceRecord> {
     let conn = match Connection::open(db_path) { Ok(c) => c, Err(_) => return vec![] };
     let mut stmt = match conn.prepare(
-        "SELECT user_name, user_pwd, face_token, json_data FROM faces",
+        "SELECT user_name, user_pwd, account_type, face_token, json_data FROM faces",
     ) { Ok(s) => s, Err(_) => return vec![] };
 
     stmt.query_map([], |row| {
@@ -266,20 +307,24 @@ fn load_face_records(db_path: &Path) -> Vec<FaceRecord> {
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
-            row.get::<_, String>(3).unwrap_or_default(),
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4).unwrap_or_default(),
         ))
     })
     .ok()
     .map(|rows| {
         rows.filter_map(|r| r.ok())
-            .filter_map(|(u, p, t, j)| {
-                let json = serde_json::from_str::<JsonData>(&j).ok()?;
+            .filter_map(|(u, p, account_type, t, j)| {
+                let json = serde_json::from_str::<JsonData>(&j).unwrap_or_default();
                 // 过滤已禁用（view=false）或已锁定（lock=true）的面容 (#103)
                 if !json.view.unwrap_or(true) || json.lock.unwrap_or(false) {
                     return None;
                 }
                 let thr = json.threshold.unwrap_or(60);
-                let dm = json.domain.unwrap_or_else(|| ".".to_string());
+                let dm = json.domain.unwrap_or_else(|| match account_type.as_str() {
+                    "online" => String::new(),
+                    _ => ".".to_string(),
+                });
                 Some(FaceRecord { user_name: u, user_pwd: p, face_token: t, threshold: thr, domain: dm })
             })
             .collect()
@@ -444,6 +489,14 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
 
+        if state.release_requested.swap(false, Ordering::SeqCst) {
+            cam = None;
+            log_service(&exe_dir, "INFO", "camera released");
+            state.run_requested.store(false, Ordering::SeqCst);
+            *state.matched_creds.lock().unwrap() = None;
+            continue;
+        }
+
         // 轮询 test_creds.tmp（UI 测试模式）
         if let Some((user, pwd)) = check_test_creds(&exe_dir) {
             *state.matched_creds.lock().unwrap() = Some((user, pwd, ".".to_string()));
@@ -463,13 +516,17 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         state.run_requested.store(false, Ordering::SeqCst);
 
         // 定期重新加载人脸记录和配置
-        if last_reload.elapsed() > Duration::from_secs(30) {
+        if records.is_empty() || last_reload.elapsed() > Duration::from_secs(30) {
             records = load_face_records(&db_path);
             camera_rotation = load_camera_rotation(&db_path);
             unlock_brightness = load_unlock_brightness(&db_path);
             last_reload = Instant::now();
         }
-        if records.is_empty() { continue; }
+        if records.is_empty() {
+            log_service(&exe_dir, "WARN", "run requested but no enabled face records found");
+            cam = None;
+            continue;
+        }
 
         // 打开摄像头（首次或重新打开）
         if cam.is_none() {
@@ -482,12 +539,19 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                         let mut dummy = Mat::default();
                         for _ in 0..10 { let _ = c.read(&mut dummy); }
                         cam = Some(c);
+                        log_service(&exe_dir, "INFO", &format!("camera opened at index {}", idx));
                         break;
                     }
                 }
             }
         }
-        let cap = match cam.as_mut() { Some(c) => c, None => continue };
+        let cap = match cam.as_mut() {
+            Some(c) => c,
+            None => {
+                log_service(&exe_dir, "ERROR", "failed to open camera");
+                continue;
+            }
+        };
 
         // 解锁前提升屏幕亮度（仅笔记本内置屏），识别结束后恢复
         let saved_brightness = if unlock_brightness > 0 {
@@ -501,7 +565,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         // 识别循环（最多 60 帧 ≈ 5~10 秒）
         let mut matched = false;
         for _ in 0..60 {
-            if state.should_exit.load(Ordering::SeqCst) { break; }
+            if state.should_exit.load(Ordering::SeqCst)
+                || state.release_requested.load(Ordering::SeqCst) { break; }
             state.run_requested.store(false, Ordering::SeqCst);
 
             let mut frame = Mat::default();
@@ -524,6 +589,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 let threshold = rec.threshold as f64 / 100.0;
                 if score >= threshold {
                     *state.matched_creds.lock().unwrap() = Some((rec.user_name.clone(), rec.user_pwd.clone(), rec.domain.clone()));
+                    log_service(&exe_dir, "INFO", &format!("face matched for {}", rec.user_name));
                     // 更新活跃时间：人脸识别成功说明用户在
                     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
                     state.last_user_active.store(now, Ordering::SeqCst);
@@ -539,6 +605,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         if let Some(orig) = saved_brightness {
             set_brightness(orig);
         }
+
+        if !matched && !state.release_requested.load(Ordering::SeqCst) {
+            log_service(&exe_dir, "WARN", "face recognition finished without a match");
+        }
+        cam = None;
     }
 }
 
@@ -575,6 +646,39 @@ fn get_idle_millis() -> u32 {
     unsafe { let _ = GetLastInputInfo(&mut lii); }
     let tick = unsafe { windows::Win32::System::SystemInformation::GetTickCount() };
     tick.wrapping_sub(lii.dwTime)
+}
+
+fn get_last_input_tick() -> u32 {
+    let mut lii = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    unsafe { let _ = GetLastInputInfo(&mut lii); }
+    lii.dwTime
+}
+
+fn user_input_trigger_loop(state: Arc<State>) {
+    let mut last_seen_tick = get_last_input_tick();
+
+    loop {
+        if state.should_exit.load(Ordering::SeqCst) { break; }
+
+        let has_waiting_dll = state.dll_creds_pipe.load(Ordering::SeqCst)
+            != INVALID_HANDLE_VALUE.0 as isize;
+        if has_waiting_dll {
+            let tick = get_last_input_tick();
+            let idle_ms = get_idle_millis();
+            if tick != last_seen_tick && idle_ms <= 1_500 {
+                state.release_requested.store(false, Ordering::SeqCst);
+                state.run_requested.store(true, Ordering::SeqCst);
+            }
+            last_seen_tick = tick;
+        } else {
+            last_seen_tick = get_last_input_tick();
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// 自动锁屏监控线程
@@ -699,13 +803,17 @@ fn main() {
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let state = State::new();
+    let state = State::new(exe_dir.clone());
+    log_service(&exe_dir, "INFO", "FaceWinUnlock service started");
 
     let s1 = state.clone();
     thread::spawn(move || run_control_server(s1));
 
     let s2 = state.clone();
     thread::spawn(move || run_unlock_server(s2));
+
+    let s_input = state.clone();
+    thread::spawn(move || user_input_trigger_loop(s_input));
 
     let s3 = state.clone();
     let dir2 = exe_dir.clone();

@@ -307,14 +307,22 @@ fn load_frames_raw() -> Result<Vec<u8>, String> {
                 trimmed
             };
             let install_dir = stripped.trim_end_matches('\\');
-            for rel in &["resources\\animation_frames.bin", "animation_frames.bin"] {
-                let p = format!("{}\\{}", install_dir, rel);
-                match std::fs::read(&p) {
-                    Ok(data) => {
-                        log::info!("[anim] loaded frames from install dir: {p}");
-                        return Ok(data);
+            let mut dirs = vec![install_dir.to_string()];
+            if install_dir.ends_with("\\logs") || install_dir.ends_with("/logs") {
+                if let Some(parent) = std::path::Path::new(install_dir).parent() {
+                    dirs.push(parent.to_string_lossy().to_string());
+                }
+            }
+            for dir in dirs {
+                for rel in &["resources\\animation_frames.bin", "animation_frames.bin"] {
+                    let p = format!("{}\\{}", dir, rel);
+                    match std::fs::read(&p) {
+                        Ok(data) => {
+                            log::info!("[anim] loaded frames from install dir: {p}");
+                            return Ok(data);
+                        }
+                        Err(e) => log::info!("[anim] tried {}: {}", p, e),
                     }
-                    Err(e) => log::info!("[anim] tried {}: {}", p, e),
                 }
             }
         }

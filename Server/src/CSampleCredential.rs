@@ -154,7 +154,7 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
     fn GetStringValue(&self, dwfieldid: u32) -> windows_core::Result<PWSTR> {
         info!("SampleCredential::GetStringValue - 获取字段 {} 的文本内容", dwfieldid);
         let val = match dwfieldid {
-            1 => "FaceWinUnlock-Tauri-请勿点击此磁贴",  // 字段1的文本内容
+            1 => "FaceWinUnlock - 触碰鼠标或按下键盘即可启动人脸识别",  // 字段1的文本内容
             _ => {
                 warn!("SampleCredential::GetStringValue - 字段 {} 无文本内容", dwfieldid);
                 ""
@@ -247,8 +247,16 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
 
         info!("SampleCredential::GetSerialization - 开始序列化凭据");
 
-        // 本地账户使用 ".\username"，域账户使用 "domain\username"
-        let qualified_user = if creds.domain.is_empty() || creds.domain == "." {
+        // 本地账户使用 ".\username"，域账户使用 "domain\username"。
+        // 初始化测试链路会显式传 ".\username"，普通面容记录只保存裸用户名；
+        // 两条链路必须打包出一致的本地账户格式，否则 Windows 会返回 0xC000006D。
+        let qualified_user = if creds.domain == "." {
+            if creds.username.contains('\\') || creds.username.contains('@') {
+                creds.username.clone()
+            } else {
+                format!(".\\{}", creds.username)
+            }
+        } else if creds.domain.is_empty() {
             creds.username.clone()
         } else {
             format!("{}\\{}", creds.domain, creds.username)

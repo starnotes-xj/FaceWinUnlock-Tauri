@@ -131,7 +131,7 @@ impl CPipeListener {
                         let secs: f64 = read_facewinunlock_registry("UNLOCK_GRACE_PERIOD")
                             .ok()
                             .and_then(|s| s.trim().parse().ok())
-                            .unwrap_or(5.0);
+                            .unwrap_or(0.0);
                         let d = Duration::from_secs_f64(secs.max(0.0));
                         info!("首次连接，宽限期 {} 秒后开始面容识别", d.as_secs());
                         d
@@ -320,7 +320,7 @@ impl CPipeListener {
             info!("CPipeListener - 手动解锁检测到，通知 Unlock EXE 释放资源");
             use crate::Pipe::{pipe_connect_to_server, pipe_write_raw, PIPE_UNLOCK_NAME};
             if let Ok(pipe) = pipe_connect_to_server(PIPE_UNLOCK_NAME, 3_000) {
-                let _ = pipe_write_raw(pipe, b"exit");
+                let _ = pipe_write_raw(pipe, b"release");
                 unsafe { let _ = CloseHandle(pipe); }
             }
         }

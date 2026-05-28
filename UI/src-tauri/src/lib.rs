@@ -30,10 +30,10 @@ use proc::wnd_proc_subclass;
 use tauri_plugin_log::{Target, TargetKind};
 use utils::api::{
     add_scheduled_task, check_process_running, check_scheduled_task, close_app,
-    delete_process_running, disable_scheduled_task, get_camera, get_now_username, init_model,
-    load_opencv_model, open_camera, open_directory, restart_unlock_service, stop_camera,
-    test_win_logon, unload_model, get_uuid_v4, get_cache_dir, run_scheduled_task,
-    check_trigger_via_xml
+    delete_process_running, disable_scheduled_task, get_camera, get_install_dir,
+    get_now_username, init_model, load_opencv_model, open_camera, open_directory,
+    restart_unlock_service, stop_camera, test_win_logon, unload_model, get_uuid_v4,
+    get_cache_dir, run_scheduled_task, check_trigger_via_xml
 };
 mod tray;
 use tray::create_system_tray;
@@ -182,6 +182,7 @@ pub fn run() {
                 // 配置模块
                 write_to_registry,
                 // 通用api
+                get_install_dir,
                 get_now_username,
                 test_win_logon,
                 init_model,

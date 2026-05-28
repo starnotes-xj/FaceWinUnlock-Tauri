@@ -42,7 +42,8 @@
     let authForm = reactive({
         accountType: 'local',
         username: '',
-        password: ''
+        password: '',
+        domain: ''
     });
 
     const isEditMode = computed(() => route.query.mode === 'edit');
@@ -75,6 +76,7 @@
                 authForm.username = editFaceData.user_name;
                 authForm.password = editFaceData.user_pwd;
                 authForm.accountType = editFaceData.account_type;
+                authForm.domain = editFaceData.json_data.domain || '';
                 // 添加其他信息
                 faceName.value = editFaceData.json_data.alias;
                 threshold.value = editFaceData.json_data.threshold;
@@ -313,6 +315,7 @@
                 authForm.username == editFaceData.user_name &&
                 authForm.password == editFaceData.user_pwd &&
                 authForm.accountType == editFaceData.account_type &&
+                authForm.domain == (editFaceData.json_data.domain || '') &&
                 faceName.value == editFaceData.json_data.alias &&
                 threshold.value == editFaceData.json_data.threshold &&
                 getFaceDetectionThresholdValue() == editFaceData.json_data.faceDetectionThreshold &&
@@ -359,6 +362,7 @@
                         alias: faceName.value || '',
                         view: true, // 默认可见
                         lock: false, // 默认不锁
+                        domain: authForm.accountType === 'domain' ? (authForm.domain || '.') : (authForm.accountType === 'online' ? '' : '.'),
                         faceDetectionThreshold: getFaceDetectionThresholdValue()
                     })
                 });
@@ -372,7 +376,8 @@
                         threshold: threshold.value,
                         alias: faceName.value || '',
                         view: editFaceData.json_data.view != undefined ? editFaceData.json_data.view : true,
-                        lock: editFaceData.json_data.lock != undefined ? editFaceData.json_data.lock : true,
+                        lock: editFaceData.json_data.lock != undefined ? editFaceData.json_data.lock : false,
+                        domain: authForm.accountType === 'domain' ? (authForm.domain || '.') : (authForm.accountType === 'online' ? '' : '.'),
                         faceDetectionThreshold: getFaceDetectionThresholdValue()
                     })
                 }, targetId);

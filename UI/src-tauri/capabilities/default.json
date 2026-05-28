@@ -23,7 +23,8 @@
       "allow": [
         { "path": "$RESOURCE/faces/**" },
         { "path": "$RESOURCE/logs/**" },
-        { "path": "$RESOURCE/block/**" }
+        { "path": "$RESOURCE/block/**" },
+        { "path": "$RESOURCE/facewinunlock.log" }
       ]
     },
     {
@@ -35,7 +36,10 @@
     },
     {
       "identifier": "fs:allow-read-text-file",
-      "allow": [{ "path": "$RESOURCE/logs/**" }]
+      "allow": [
+        { "path": "$RESOURCE/logs/**" },
+        { "path": "$RESOURCE/facewinunlock.log" }
+      ]
     },
     {
       "identifier": "fs:allow-remove",

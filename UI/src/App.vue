@@ -10,7 +10,9 @@
 	import { info, warn } from '@tauri-apps/plugin-log';
 	import { useFacesStore } from './stores/faces.js';
 	import { attachConsole } from "@tauri-apps/plugin-log";
-	import { resourceDir } from '@tauri-apps/api/path';
+	// 注意：不用 @tauri-apps/api/path 的 resourceDir()，
+	// 它返回 resources\ 子目录而非安装根（database.db/faces\/logs\ 都在根）
+	// 改用后端 get_install_dir 命令返回 ROOT_DIR
 	import { getVersion } from '@tauri-apps/api/app';
 	import { getCurrentWindow } from '@tauri-apps/api/window';
 	import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -25,11 +27,33 @@
 	// 打包时注释
 	attachConsole();
 
-	resourceDir().then((result)=>{
-		localStorage.setItem('exe_dir', result);
+	invoke('get_install_dir').then((res)=>{
+		// CustomResult: { code, msg, data }；data 是 JSON.stringify 过的 install root 字符串
+		const dir = typeof res?.data === 'string' ? res.data : (res?.data ?? '');
+		if (!dir) {
+			throw new Error('get_install_dir 返回空');
+		}
+		localStorage.setItem('exe_dir', dir);
 		return connect();
 	}).then(()=>{
 		return optionsStore.init();
+	}).then(async ()=>{
+		if (!optionsStore.getOptionValueByKey('cameraList') || !optionsStore.getOptionValueByKey('camera')) {
+			try {
+				const result = await invoke("get_camera");
+				const cameraList = Array.isArray(result.data) ? result.data : [];
+				const firstValid = cameraList.find(item => item.is_valid) || cameraList[0];
+				await optionsStore.saveOptions({
+					cameraList: JSON.stringify(cameraList),
+					camera: firstValid ? firstValid.capture_index : "-1"
+				});
+				if (firstValid) {
+					info(`自动检测并选择摄像头: ${firstValid.camera_name} (${firstValid.capture_index})`);
+				}
+			} catch (error) {
+				warn(formatObjectString("自动检测摄像头失败：", error));
+			}
+		}
 	}).then(()=>{
 		return invoke("init_model");
 	}).then(()=>{

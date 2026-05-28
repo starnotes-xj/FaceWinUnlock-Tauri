@@ -59,6 +59,16 @@ impl From<CameraBackend> for i32 {
     }
 }
 
+// 获取安装根目录（database.db、faces\、logs\ 都在这里，
+// 不是 Tauri resourceDir()——后者是 resources\ 子目录）
+#[tauri::command]
+pub fn get_install_dir() -> Result<CustomResult, CustomResult> {
+    let dir = ROOT_DIR
+        .to_str()
+        .ok_or_else(|| CustomResult::error(Some("ROOT_DIR 不是有效 UTF-8".to_string()), None))?;
+    Ok(CustomResult::success(None, Some(json!(dir))))
+}
+
 // 获取当前用户名
 #[tauri::command]
 pub fn get_now_username() -> Result<CustomResult, CustomResult> {
@@ -162,12 +172,11 @@ pub fn get_camera() -> Result<CustomResult, CustomResult> {
         Ok(devices) => {
             let valid_cameras: Vec<ValidCameraInfo> = devices
                 .into_iter()
-                .enumerate()
-                .map(|(i, (name, index))| {
+                .map(|(name, index)| {
                     let is_valid = is_camera_index_valid(index).unwrap_or(false);
                     ValidCameraInfo {
                         camera_name: name,
-                        capture_index: i.to_string(),
+                        capture_index: index.to_string(),
                         is_valid,
                     }
                 })
@@ -295,7 +304,22 @@ pub fn add_scheduled_task(
         ""
     };
 
-    let exe_path = quote_exe_path_with_args(&path, None);
+    // 相对路径解析为绝对路径（基于 ROOT_DIR），避免 SYSTEM 账户 CWD=System32 找不到 exe
+    let path_obj = std::path::Path::new(&path);
+    let abs_path = if path_obj.is_absolute() {
+        path_obj.to_path_buf()
+    } else {
+        ROOT_DIR.join(path_obj)
+    };
+    let abs_path_str = abs_path
+        .to_str()
+        .ok_or_else(|| CustomResult::error(Some("无法转换 exe 路径为 UTF-8".to_string()), None))?
+        .to_string();
+    let working_dir = ROOT_DIR
+        .to_str()
+        .unwrap_or(r"C:\Program Files\facewinunlock-tauri");
+
+    let exe_path = quote_exe_path_with_args(&abs_path_str, None);
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -318,6 +342,7 @@ pub fn add_scheduled_task(
     <Exec>
       <Command>{exe}</Command>
       {args}
+      <WorkingDirectory>{wd}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>"#,
@@ -325,6 +350,7 @@ pub fn add_scheduled_task(
         principal = principal_xml,
         exe = exe_path,
         args = args_xml,
+        wd = working_dir,
     );
 
     // 写 XML 到临时文件
@@ -465,12 +491,17 @@ pub fn check_trigger_via_xml(task_name: &str) -> Result<String, String> {
         .output()
         .map_err(|e| format!("执行系统命令失败: {}", e))?;
 
-    let xml_content = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        let err_msg = fix_gbk_encoding(&output.stderr);
+        return Err(format!("查询计划任务失败: {}", err_msg));
+    }
 
-    if xml_content.contains("<LogonTrigger>") {
-        Ok("OnLogon".to_string())
-    } else if xml_content.contains("<BootTrigger>") {
+    let xml_content = decode_schtasks_xml(&output.stdout);
+
+    if xml_content.contains("BootTrigger") {
         Ok("OnStart".to_string())
+    } else if xml_content.contains("LogonTrigger") {
+        Ok("OnLogon".to_string())
     } else {
         Ok("Unknown".to_string())
     }
@@ -638,6 +669,53 @@ fn quote_exe_path_with_args(exe_path: &str, args: Option<&str>) -> String {
 fn fix_gbk_encoding(bytes: &[u8]) -> String {
     let (s, _, _) = encoding_rs::GBK.decode(bytes);
     s.trim().to_string()
+}
+
+fn decode_schtasks_xml(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        return decode_utf16_bytes(&bytes[2..], true);
+    }
+
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        return decode_utf16_bytes(&bytes[2..], false);
+    }
+
+    let sample_len = bytes.len().min(200);
+    if sample_len >= 4 {
+        let sample = &bytes[..sample_len];
+        let le_zeroes = sample
+            .chunks_exact(2)
+            .filter(|chunk| chunk[1] == 0)
+            .count();
+        let be_zeroes = sample
+            .chunks_exact(2)
+            .filter(|chunk| chunk[0] == 0)
+            .count();
+        let units = sample_len / 2;
+
+        if le_zeroes > units / 2 {
+            return decode_utf16_bytes(bytes, true);
+        }
+        if be_zeroes > units / 2 {
+            return decode_utf16_bytes(bytes, false);
+        }
+    }
+
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+fn decode_utf16_bytes(bytes: &[u8], little_endian: bool) -> String {
+    let units = bytes.chunks_exact(2).map(|chunk| {
+        if little_endian {
+            u16::from_le_bytes([chunk[0], chunk[1]])
+        } else {
+            u16::from_be_bytes([chunk[0], chunk[1]])
+        }
+    });
+
+    std::char::decode_utf16(units)
+        .map(|result| result.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect::<String>()
 }
 
 // 使用指定后端尝试打开摄像头并验证读取帧

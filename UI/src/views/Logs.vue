@@ -27,6 +27,14 @@
 
 	const logs = ref([]);
 
+	const readFirstExistingText = async (paths) => {
+		for (const path of paths) {
+			const text = await readText(path);
+			if (text) return text;
+		}
+		return '';
+	};
+
 	// 解析登录日志
 	const parseUnlockLogs = (data) => {
 		if (!Array.isArray(data)) return [];
@@ -132,8 +140,8 @@
 				total.value = allLogs.length;
 				logData = allLogs.reverse();;
 			} else if (logsType.value === 'dll') {
-				// 读取文件并解析
-				const res = await readText('logs/facewinunlock.log');
+				// 新版本写入 logs\，旧版本可能写在安装根目录，两个路径都兼容
+				const res = await readFirstExistingText(['logs/facewinunlock.log', 'facewinunlock.log']);
 				const allLogs = parseDllLogs(res);
 				total.value = allLogs.length;
 				logData = allLogs.reverse();;
@@ -146,7 +154,8 @@
 			}
 			logs.value = logData;
 		} catch (error) {
-			ElMessage.error(`获取日志失败：${error.message}`);
+			const message = error?.message || String(error || '未知错误');
+			ElMessage.error(`获取日志失败：${message}`);
 			logs.value = [];
 			total.value = 0;
 		} finally {

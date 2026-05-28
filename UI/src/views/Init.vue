@@ -34,7 +34,8 @@
     let authForm = reactive({
         username: '',
         password: '',
-        accountType: 'local'
+        accountType: 'local',
+        domain: ''
     });
 
     // 获取当前用户名
@@ -96,10 +97,37 @@
         riskDialogVisible.value = true;
     };
 
+    const detectAndSaveCamera = async () => {
+        try {
+            const result = await invoke("get_camera");
+            const cameraList = Array.isArray(result.data) ? result.data : [];
+            const firstValid = cameraList.find(item => item.is_valid) || cameraList[0];
+            await optionsStore.saveOptions({
+                cameraList: JSON.stringify(cameraList),
+                camera: firstValid ? firstValid.capture_index : "-1"
+            });
+
+            if (firstValid) {
+                checks.camera = true;
+                checks.camera_msg = '';
+                info(`初始化部署已自动选择摄像头: ${firstValid.camera_name} (${firstValid.capture_index})`);
+            } else {
+                checks.camera = false;
+                checks.camera_msg = '未检测到可用摄像头';
+                warn('初始化部署未检测到可用摄像头');
+            }
+        } catch (error) {
+            checks.camera = false;
+            checks.camera_msg = '摄像头自动检测失败';
+            warn(formatObjectString("初始化部署自动检测摄像头失败：", error));
+        }
+    };
+
     const confirmDeployment = () => {
         riskDialogVisible.value = false;
         isDeploying.value = true;
-        invoke('deploy_core_components').then(()=>{
+        invoke('deploy_core_components').then(async ()=>{
+            await detectAndSaveCamera();
             // 模拟进度条
             let progress = 0;
             const timer = setInterval(() => {

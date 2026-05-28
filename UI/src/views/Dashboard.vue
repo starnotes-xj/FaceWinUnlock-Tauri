@@ -55,8 +55,11 @@
 	let tempCameraIndex = optionsStore.getOptionValueByKey('camera');
 	if(tempCameraList && tempCameraIndex){
 		let tempList = JSON.parse(tempCameraList);
-		systemStatus.value[2].desc = tempList[tempCameraIndex].camera_name;
-		systemStatus.value[2].active = true;
+		const camera = tempList.find(item => item.capture_index == tempCameraIndex);
+		if(camera){
+			systemStatus.value[2].desc = camera.camera_name;
+			systemStatus.value[2].active = true;
+		}
 	} else {
 		console.warn('[Dashboard] 摄像头未配置: cameraList=', tempCameraList, 'camera=', tempCameraIndex);
 	}
