@@ -58,9 +58,6 @@ const PIPE_UNLOCK_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustUnlock";
 const BUF_SIZE: u32 = 4096;
 const CAMERA_WARMUP_MAX_FRAMES: usize = 10;
 const CAMERA_WARMUP_READY_FRAMES: usize = 3;
-const INPUT_ARM_QUIET_MS: u32 = 600;
-const INPUT_TRIGGER_IDLE_MS: u32 = 1_000;
-const INPUT_TRIGGER_DEBOUNCE_MS: u64 = 800;
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
 
@@ -106,6 +103,7 @@ struct FaceRecord {
 #[derive(Default, Deserialize)]
 struct JsonData {
     threshold: Option<i64>,
+    view: Option<bool>,
     lock: Option<bool>,
     domain: Option<String>,
 }
@@ -326,8 +324,8 @@ fn load_face_records(exe_dir: &Path, db_path: &Path) -> Vec<FaceRecord> {
         rows.filter_map(|r| r.ok())
             .filter_map(|(u, p, account_type, t, j)| {
                 let json = serde_json::from_str::<JsonData>(&j).unwrap_or_default();
-                // lock=true 才表示禁用面容；view 只控制前端缩略图显示。
-                if json.lock.unwrap_or(false) {
+                // 过滤已禁用（view=false）或已锁定（lock=true）的面容 (#103)
+                if !json.view.unwrap_or(true) || json.lock.unwrap_or(false) {
                     return None;
                 }
                 let thr = json.threshold.unwrap_or(60);
@@ -721,8 +719,6 @@ fn get_last_input_tick() -> u32 {
 fn user_input_trigger_loop(state: Arc<State>) {
     let mut last_seen_tick = get_last_input_tick();
     let mut had_waiting_dll = false;
-    let mut input_armed = false;
-    let mut last_trigger_at = Instant::now() - Duration::from_millis(INPUT_TRIGGER_DEBOUNCE_MS);
 
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -731,38 +727,20 @@ fn user_input_trigger_loop(state: Arc<State>) {
             != INVALID_HANDLE_VALUE.0 as isize;
         if has_waiting_dll {
             let tick = get_last_input_tick();
-            let idle_ms = get_idle_millis();
             if !had_waiting_dll {
                 last_seen_tick = tick;
                 had_waiting_dll = true;
-                input_armed = false;
                 thread::sleep(Duration::from_millis(30));
                 continue;
             }
-
-            if !input_armed {
-                last_seen_tick = tick;
-                if idle_ms >= INPUT_ARM_QUIET_MS {
-                    input_armed = true;
-                    log_service(&state.exe_dir, "INFO", "lock-screen input trigger armed");
-                }
-                thread::sleep(Duration::from_millis(30));
-                continue;
-            }
-
-            if tick != last_seen_tick
-                && idle_ms <= INPUT_TRIGGER_IDLE_MS
-                && last_trigger_at.elapsed() >= Duration::from_millis(INPUT_TRIGGER_DEBOUNCE_MS)
-            {
+            let idle_ms = get_idle_millis();
+            if tick != last_seen_tick && idle_ms <= 1_500 {
                 state.release_requested.store(false, Ordering::SeqCst);
                 state.run_requested.store(true, Ordering::SeqCst);
-                last_trigger_at = Instant::now();
-                log_service(&state.exe_dir, "INFO", "user input triggered face recognition");
             }
             last_seen_tick = tick;
         } else {
             had_waiting_dll = false;
-            input_armed = false;
             last_seen_tick = get_last_input_tick();
         }
 
