@@ -4,7 +4,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::Shell::ICredentialProviderEvents;
 
 use crate::animation::{AnimState, AnimationSlot};
@@ -48,15 +47,6 @@ fn interruptible_sleep(duration: Duration, stop_flag: &AtomicBool) -> bool {
     }
 }
 
-fn get_last_input_tick() -> u32 {
-    let mut lii = LASTINPUTINFO {
-        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
-        dwTime: 0,
-    };
-    unsafe { let _ = GetLastInputInfo(&mut lii); }
-    lii.dwTime
-}
-
 pub struct CPipeListener {
     pub is_unlocked: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
@@ -70,7 +60,8 @@ pub struct CPipeListener {
 
 impl CPipeListener {
     /// 启动管道监听：
-    ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，发送 "prepare" 并在鼠标/键盘输入后发送 "run"
+    ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，仅发送 "prepare" 并保持连接；
+    ///     真正的 "run" 由 Unlock EXE 在鼠标/键盘输入后自行触发
     ///   - Creds 线程：阻塞等待凭据推送，收到后设置动画为 Success
     pub fn start(
         events: ICredentialProviderEvents,
@@ -84,10 +75,9 @@ impl CPipeListener {
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
 
-        // ── Client 线程（prepare + 锁屏桌面输入触发 run）────────────
+        // ── Client 线程（仅发送 prepare；触发识别交给 Unlock EXE 的输入监听）────────────
         let client_thread = {
             let stop_flag = stop_flag.clone();
-            let anim_slot = animation_slot.clone();
             thread::spawn(move || {
                 let connect_enabled = read_facewinunlock_registry("CONNECT_TO_PIPE")
                     .unwrap_or_else(|_| "1".to_string());
@@ -129,43 +119,21 @@ impl CPipeListener {
                     }
                     info!("向管道写入数据成功：prepare");
 
-                    let mut last_input_tick = get_last_input_tick();
-                    let mut last_prepare_at = Instant::now();
-                    let mut last_run_at = Instant::now() - Duration::from_secs(2);
-
-                    // 保持控制管道连接；忽略连接前的 Win+L 输入，只对后续鼠标/键盘变化发送 run。
+                    // 保持控制管道连接，但不主动发送 run。
+                    // 鼠标/键盘输入由 Unlock EXE 监听后触发识别，避免 Win+L 后自动开摄像头。
                     loop {
                         if stop_flag.load(Ordering::SeqCst) {
                             unsafe { let _ = CloseHandle(pipe); }
                             return;
                         }
-                        if interruptible_sleep(Duration::from_millis(30), &stop_flag) {
+                        if interruptible_sleep(Duration::from_secs(1), &stop_flag) {
                             unsafe { let _ = CloseHandle(pipe); }
                             return;
                         }
-
-                        let tick = get_last_input_tick();
-                        if tick != last_input_tick {
-                            last_input_tick = tick;
-                            if last_run_at.elapsed() >= Duration::from_millis(800) {
-                                if let Err(e) = pipe_write_raw(pipe, b"run") {
-                                    warn!("输入触发 run 失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
-                                    unsafe { let _ = CloseHandle(pipe); }
-                                    break;
-                                }
-                                info!("检测到鼠标/键盘输入，向管道写入数据成功：run");
-                                set_anim_state(&anim_slot, AnimState::Scanning);
-                                last_run_at = Instant::now();
-                            }
-                        }
-
-                        if last_prepare_at.elapsed() >= Duration::from_secs(1) {
-                            if let Err(e) = pipe_write_raw(pipe, b"prepare") {
-                                warn!("prepare 心跳失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
-                                unsafe { let _ = CloseHandle(pipe); }
-                                break;
-                            }
-                            last_prepare_at = Instant::now();
+                        if let Err(e) = pipe_write_raw(pipe, b"prepare") {
+                            warn!("prepare 心跳失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
+                            unsafe { let _ = CloseHandle(pipe); }
+                            break;
                         }
                     }
                 }
