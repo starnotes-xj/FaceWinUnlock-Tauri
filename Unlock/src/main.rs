@@ -30,7 +30,7 @@ use opencv::{
     core::{Mat, Ptr, Size},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     prelude::*,
-    videoio::VideoCapture,
+    videoio::{self, VideoCapture},
 };
 use rusqlite::{types::ValueRef, Connection};
 use serde::Deserialize;
@@ -56,14 +56,15 @@ use windows_core::PCWSTR;
 const PIPE_SERVER_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustServer";
 const PIPE_UNLOCK_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustUnlock";
 const BUF_SIZE: u32 = 4096;
-const CAMERA_WARMUP_MAX_FRAMES: usize = 10;
-const CAMERA_WARMUP_READY_FRAMES: usize = 3;
+const CAMERA_WARMUP_MAX_FRAMES: usize = 4;
+const CAMERA_WARMUP_READY_FRAMES: usize = 1;
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
 
 struct State {
     exe_dir:           PathBuf,
     should_exit:      AtomicBool,
+    prepare_requested: AtomicBool,
     run_requested:    AtomicBool,
     recognition_active: AtomicBool,
     release_requested: AtomicBool,
@@ -81,6 +82,7 @@ impl State {
         Arc::new(Self {
             exe_dir,
             should_exit:     AtomicBool::new(false),
+            prepare_requested: AtomicBool::new(false),
             run_requested:   AtomicBool::new(false),
             recognition_active: AtomicBool::new(false),
             release_requested: AtomicBool::new(false),
@@ -224,6 +226,9 @@ fn run_control_server(state: Arc<State>) {
                             state.run_requested.store(true, Ordering::SeqCst);
                             log_service(&state.exe_dir, "INFO", "run requested from credential provider");
                         }
+                        control_buf.clear();
+                    } else if control_buf.contains("prepare") {
+                        state.prepare_requested.store(true, Ordering::SeqCst);
                         control_buf.clear();
                     } else if control_buf.len() > 32 {
                         let keep_from = control_buf.len().saturating_sub(8);
@@ -487,14 +492,8 @@ fn load_camera_index(db_path: &Path) -> Option<i32> {
     (index >= 0).then_some(index)
 }
 
-fn camera_candidates(db_path: &Path) -> Vec<i32> {
-    let mut candidates: Vec<i32> = load_camera_index(db_path).into_iter().collect();
-    for idx in 0..4i32 {
-        if !candidates.contains(&idx) {
-            candidates.push(idx);
-        }
-    }
-    candidates
+fn configured_camera_index(db_path: &Path) -> i32 {
+    load_camera_index(db_path).unwrap_or(0)
 }
 
 fn warm_up_camera(cam: &mut VideoCapture) {
@@ -511,6 +510,25 @@ fn warm_up_camera(cam: &mut VideoCapture) {
             ready_frames = 0;
         }
     }
+}
+
+fn open_configured_camera(index: i32) -> Option<(VideoCapture, &'static str)> {
+    // DShow 通常比 CAP_ANY 少一次后端枚举；失败时再退到 MSMF/Any，但始终只打开用户选择的索引。
+    for (backend_name, backend) in [
+        ("DShow", videoio::CAP_DSHOW),
+        ("MSMF", videoio::CAP_MSMF),
+        ("Any", videoio::CAP_ANY),
+    ] {
+        if let Ok(mut c) = VideoCapture::new(index, backend) {
+            if c.is_opened().unwrap_or(false) {
+                let _ = c.set(videoio::CAP_PROP_FRAME_WIDTH, 640.0);
+                let _ = c.set(videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
+                warm_up_camera(&mut c);
+                return Some((c, backend_name));
+            }
+        }
+    }
+    None
 }
 
 /// 旋转帧（rotation: 0/90/180/270）
@@ -553,6 +571,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let mut cam: Option<VideoCapture> = None;
     let mut records: Vec<FaceRecord> = vec![];
     let mut last_reload = Instant::now() - Duration::from_secs(60);
+    let mut camera_index = configured_camera_index(&db_path);
     let mut camera_rotation = load_camera_rotation(&db_path);
     let mut unlock_brightness = load_unlock_brightness(&db_path);
 
@@ -562,6 +581,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         if state.release_requested.swap(false, Ordering::SeqCst) {
             cam = None;
             log_service(&exe_dir, "INFO", "camera released");
+            state.prepare_requested.store(false, Ordering::SeqCst);
             state.run_requested.store(false, Ordering::SeqCst);
             state.recognition_active.store(false, Ordering::SeqCst);
             *state.matched_creds.lock().unwrap() = None;
@@ -580,6 +600,17 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             continue;
         }
 
+        if state.prepare_requested.swap(false, Ordering::SeqCst) {
+            if records.is_empty() || last_reload.elapsed() > Duration::from_secs(5) {
+                records = load_face_records(&exe_dir, &db_path);
+                camera_index = configured_camera_index(&db_path);
+                camera_rotation = load_camera_rotation(&db_path);
+                unlock_brightness = load_unlock_brightness(&db_path);
+                last_reload = Instant::now();
+                log_service(&exe_dir, "INFO", &format!("prepared unlock config for camera {}", camera_index));
+            }
+        }
+
         if !state.run_requested.swap(false, Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(30));
             continue;
@@ -589,6 +620,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         // 定期重新加载人脸记录和配置
         if records.is_empty() || last_reload.elapsed() > Duration::from_secs(30) {
             records = load_face_records(&exe_dir, &db_path);
+            camera_index = configured_camera_index(&db_path);
             camera_rotation = load_camera_rotation(&db_path);
             unlock_brightness = load_unlock_brightness(&db_path);
             last_reload = Instant::now();
@@ -601,20 +633,15 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             continue;
         }
 
-        // 打开摄像头（首次或重新打开）
+        // 打开首选项中保存的摄像头索引，避免每次解锁都扫描 0-3 号设备。
         if cam.is_none() {
-            for idx in camera_candidates(&db_path) {
-                if let Ok(mut c) = VideoCapture::new(idx, opencv::videoio::CAP_ANY) {
-                    if c.is_opened().unwrap_or(false) {
-                        // 设置默认帧尺寸 + 多帧预热（虚拟摄像头兼容 #94）
-                        let _ = c.set(opencv::videoio::CAP_PROP_FRAME_WIDTH, 640.0);
-                        let _ = c.set(opencv::videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
-                        warm_up_camera(&mut c);
-                        cam = Some(c);
-                        log_service(&exe_dir, "INFO", &format!("camera opened at index {}", idx));
-                        break;
-                    }
-                }
+            if let Some((c, backend_name)) = open_configured_camera(camera_index) {
+                cam = Some(c);
+                log_service(
+                    &exe_dir,
+                    "INFO",
+                    &format!("camera opened at configured index {} via {}", camera_index, backend_name),
+                );
             }
         }
         let cap = match cam.as_mut() {
@@ -778,16 +805,9 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
 
         // 打开摄像头做一次验证（最多 15 帧 ≈ 2~3 秒）
         let mut cam: Option<VideoCapture> = None;
-        for idx in camera_candidates(&db_path) {
-            if let Ok(mut c) = VideoCapture::new(idx, opencv::videoio::CAP_ANY) {
-                if c.is_opened().unwrap_or(false) {
-                    let _ = c.set(opencv::videoio::CAP_PROP_FRAME_WIDTH, 640.0);
-                    let _ = c.set(opencv::videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
-                    warm_up_camera(&mut c);
-                    cam = Some(c);
-                    break;
-                }
-            }
+        let camera_index = configured_camera_index(&db_path);
+        if let Some((c, _)) = open_configured_camera(camera_index) {
+            cam = Some(c);
         }
         let cap = match cam.as_mut() { Some(c) => c, None => continue };
 

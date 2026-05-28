@@ -220,7 +220,7 @@ impl CPipeListener {
                     info!("向管道写入数据成功：prepare");
 
                     let mut hooks_armed = !use_input_hooks;
-                    let arm_after = Instant::now() + Duration::from_millis(500);
+                    let arm_after = Instant::now() + Duration::from_millis(250);
                     let mut last_run_at = Instant::now() - Duration::from_secs(5);
                     let mut last_prepare_at = Instant::now();
                     if use_input_hooks {
@@ -243,7 +243,7 @@ impl CPipeListener {
 
                         if hooks_armed
                             && INPUT_RUN_REQUESTED.swap(false, Ordering::SeqCst)
-                            && last_run_at.elapsed() >= Duration::from_millis(900)
+                            && last_run_at.elapsed() >= Duration::from_millis(500)
                         {
                             if let Err(e) = pipe_write_raw(pipe, b"run") {
                                 warn!("输入触发 run 失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
@@ -255,7 +255,7 @@ impl CPipeListener {
                             info!("检测到锁屏鼠标/键盘输入，已发送 run");
                         }
 
-                        if interruptible_sleep(Duration::from_millis(50), &stop_flag) {
+                        if interruptible_sleep(Duration::from_millis(20), &stop_flag) {
                             unsafe { let _ = CloseHandle(pipe); }
                             return;
                         }
