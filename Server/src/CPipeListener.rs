@@ -3,8 +3,14 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows::Win32::UI::Shell::ICredentialProviderEvents;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::UI::{
+    Shell::ICredentialProviderEvents,
+    WindowsAndMessaging::{
+        CallNextHookEx, HHOOK, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+        WH_MOUSE_LL,
+    },
+};
 
 use crate::animation::{AnimState, AnimationSlot};
 use crate::{read_facewinunlock_registry, SharedCredentials};
@@ -47,6 +53,95 @@ fn interruptible_sleep(duration: Duration, stop_flag: &AtomicBool) -> bool {
     }
 }
 
+// 0.3.3 的核心经验：锁屏桌面运行在 winlogon 中，Credential Provider DLL
+// 直接安装低级鼠标/键盘 hook 才能稳定拿到锁屏输入事件。
+static MOUSE_HOOK_RAW: AtomicIsize = AtomicIsize::new(0);
+static KEYBOARD_HOOK_RAW: AtomicIsize = AtomicIsize::new(0);
+static IS_MOUSE_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+static IS_KEYBOARD_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+static INPUT_HOOKS_ARMED: AtomicBool = AtomicBool::new(false);
+static INPUT_RUN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "system" fn mouse_hook_fn(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 && INPUT_HOOKS_ARMED.load(Ordering::SeqCst) {
+        INPUT_RUN_REQUESTED.store(true, Ordering::SeqCst);
+    }
+    let raw = MOUSE_HOOK_RAW.load(Ordering::SeqCst);
+    let hook = (raw != 0).then(|| HHOOK(raw as *mut _));
+    unsafe { CallNextHookEx(hook, code, wparam, lparam) }
+}
+
+unsafe extern "system" fn keyboard_hook_fn(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 && INPUT_HOOKS_ARMED.load(Ordering::SeqCst) {
+        INPUT_RUN_REQUESTED.store(true, Ordering::SeqCst);
+    }
+    let raw = KEYBOARD_HOOK_RAW.load(Ordering::SeqCst);
+    let hook = (raw != 0).then(|| HHOOK(raw as *mut _));
+    unsafe { CallNextHookEx(hook, code, wparam, lparam) }
+}
+
+fn install_input_hooks() {
+    INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
+    INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+
+    if IS_MOUSE_HOOK_INSTALLED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_fn), None, 0) } {
+            Ok(hook) => {
+                MOUSE_HOOK_RAW.store(hook.0 as isize, Ordering::SeqCst);
+                info!("锁屏鼠标输入 Hook 已安装");
+            }
+            Err(e) => {
+                IS_MOUSE_HOOK_INSTALLED.store(false, Ordering::SeqCst);
+                error!("设置鼠标 Hook 失败: {:?}", e);
+            }
+        }
+    }
+
+    if IS_KEYBOARD_HOOK_INSTALLED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_fn), None, 0) } {
+            Ok(hook) => {
+                KEYBOARD_HOOK_RAW.store(hook.0 as isize, Ordering::SeqCst);
+                info!("锁屏键盘输入 Hook 已安装");
+            }
+            Err(e) => {
+                IS_KEYBOARD_HOOK_INSTALLED.store(false, Ordering::SeqCst);
+                error!("设置键盘 Hook 失败: {:?}", e);
+            }
+        }
+    }
+}
+
+fn uninstall_input_hooks() {
+    INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
+    INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+
+    if IS_MOUSE_HOOK_INSTALLED
+        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        let raw = MOUSE_HOOK_RAW.swap(0, Ordering::SeqCst);
+        if raw != 0 {
+            let _ = unsafe { UnhookWindowsHookEx(HHOOK(raw as *mut _)) };
+        }
+    }
+
+    if IS_KEYBOARD_HOOK_INSTALLED
+        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        let raw = KEYBOARD_HOOK_RAW.swap(0, Ordering::SeqCst);
+        if raw != 0 {
+            let _ = unsafe { UnhookWindowsHookEx(HHOOK(raw as *mut _)) };
+        }
+    }
+}
+
 pub struct CPipeListener {
     pub is_unlocked: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
@@ -60,8 +155,8 @@ pub struct CPipeListener {
 
 impl CPipeListener {
     /// 启动管道监听：
-    ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，仅发送 "prepare" 并保持连接；
-    ///     真正的 "run" 由 Unlock EXE 在鼠标/键盘输入后自行触发
+    ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，先发送 "prepare"；
+    ///     主登录/解锁场景中由 DLL 低级输入 Hook 捕获鼠标/键盘事件后发送 "run"
     ///   - Creds 线程：阻塞等待凭据推送，收到后设置动画为 Success
     pub fn start(
         events: ICredentialProviderEvents,
@@ -74,10 +169,15 @@ impl CPipeListener {
         let stop_flag      = Arc::new(AtomicBool::new(false));
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
+        let use_input_hooks = is_primary_scenario;
+        if use_input_hooks {
+            install_input_hooks();
+        }
 
-        // ── Client 线程（仅发送 prepare；触发识别交给 Unlock EXE 的输入监听）────────────
+        // ── Client 线程（发送 prepare；输入 Hook 触发后发送 run）────────────────────
         let client_thread = {
             let stop_flag = stop_flag.clone();
+            let anim_slot = animation_slot.clone();
             thread::spawn(move || {
                 let connect_enabled = read_facewinunlock_registry("CONNECT_TO_PIPE")
                     .unwrap_or_else(|_| "1".to_string());
@@ -119,21 +219,54 @@ impl CPipeListener {
                     }
                     info!("向管道写入数据成功：prepare");
 
-                    // 保持控制管道连接，但不主动发送 run。
-                    // 鼠标/键盘输入由 Unlock EXE 监听后触发识别，避免 Win+L 后自动开摄像头。
+                    let mut hooks_armed = !use_input_hooks;
+                    let arm_after = Instant::now() + Duration::from_millis(500);
+                    let mut last_run_at = Instant::now() - Duration::from_secs(5);
+                    let mut last_prepare_at = Instant::now();
+                    if use_input_hooks {
+                        INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
+                        INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+                    }
+
                     loop {
                         if stop_flag.load(Ordering::SeqCst) {
                             unsafe { let _ = CloseHandle(pipe); }
                             return;
                         }
-                        if interruptible_sleep(Duration::from_secs(1), &stop_flag) {
+
+                        if use_input_hooks && !hooks_armed && Instant::now() >= arm_after {
+                            INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+                            INPUT_HOOKS_ARMED.store(true, Ordering::SeqCst);
+                            hooks_armed = true;
+                            info!("锁屏输入 Hook 已就绪，等待鼠标/键盘触发识别");
+                        }
+
+                        if hooks_armed
+                            && INPUT_RUN_REQUESTED.swap(false, Ordering::SeqCst)
+                            && last_run_at.elapsed() >= Duration::from_millis(900)
+                        {
+                            if let Err(e) = pipe_write_raw(pipe, b"run") {
+                                warn!("输入触发 run 失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
+                                unsafe { let _ = CloseHandle(pipe); }
+                                break;
+                            }
+                            last_run_at = Instant::now();
+                            set_anim_state(&anim_slot, AnimState::Scanning);
+                            info!("检测到锁屏鼠标/键盘输入，已发送 run");
+                        }
+
+                        if interruptible_sleep(Duration::from_millis(50), &stop_flag) {
                             unsafe { let _ = CloseHandle(pipe); }
                             return;
                         }
-                        if let Err(e) = pipe_write_raw(pipe, b"prepare") {
-                            warn!("prepare 心跳失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
-                            unsafe { let _ = CloseHandle(pipe); }
-                            break;
+
+                        if last_prepare_at.elapsed() >= Duration::from_secs(1) {
+                            if let Err(e) = pipe_write_raw(pipe, b"prepare") {
+                                warn!("prepare 心跳失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
+                                unsafe { let _ = CloseHandle(pipe); }
+                                break;
+                            }
+                            last_prepare_at = Instant::now();
                         }
                     }
                 }
@@ -244,6 +377,9 @@ impl CPipeListener {
     /// 停止两个后台线程并等待其退出
     pub fn stop_and_join(&mut self) {
         self.stop_flag.store(true, Ordering::SeqCst);
+        if self.is_primary_scenario {
+            uninstall_input_hooks();
+        }
 
         // 关闭凭据管道句柄，打断凭据线程中正在阻塞的 ReadFile
         let raw = self.creds_pipe_raw.swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
@@ -263,6 +399,14 @@ impl CPipeListener {
                 let _ = pipe_write_raw(pipe, b"release");
                 unsafe { let _ = CloseHandle(pipe); }
             }
+        }
+    }
+}
+
+impl Drop for CPipeListener {
+    fn drop(&mut self) {
+        if self.is_primary_scenario {
+            uninstall_input_hooks();
         }
     }
 }

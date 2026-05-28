@@ -3,7 +3,7 @@
  *
  * 管道拓扑:
  *   MansonWindowsUnlockRustServer  — 本进程作 Server，DLL 作 Client
- *       DLL 发送 "prepare" (初始化/心跳)，鼠标或键盘输入后本进程自行触发识别
+ *       DLL 发送 "prepare" (初始化/心跳)，锁屏鼠标或键盘输入后发送 "run"
  *
  *   MansonWindowsUnlockRustUnlock  — 本进程作 Server，DLL 和 UI 均作 Client
  *       DLL 连接后静默等待，本进程写入凭据到此连接完成解锁
@@ -65,6 +65,7 @@ struct State {
     exe_dir:           PathBuf,
     should_exit:      AtomicBool,
     run_requested:    AtomicBool,
+    recognition_active: AtomicBool,
     release_requested: AtomicBool,
     /// DLL 在 MansonWindowsUnlockRustUnlock 上等待凭据的连接句柄（raw isize）
     dll_creds_pipe:   AtomicIsize,
@@ -81,6 +82,7 @@ impl State {
             exe_dir,
             should_exit:     AtomicBool::new(false),
             run_requested:   AtomicBool::new(false),
+            recognition_active: AtomicBool::new(false),
             release_requested: AtomicBool::new(false),
             dll_creds_pipe:  AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize),
             matched_creds:   Mutex::new(None),
@@ -103,7 +105,6 @@ struct FaceRecord {
 #[derive(Default, Deserialize)]
 struct JsonData {
     threshold: Option<i64>,
-    view: Option<bool>,
     lock: Option<bool>,
     domain: Option<String>,
 }
@@ -216,7 +217,13 @@ fn run_control_server(state: Arc<State>) {
                     let cmd = String::from_utf8_lossy(&data);
                     control_buf.push_str(&cmd);
                     if control_buf.contains("run") {
-                        state.run_requested.store(true, Ordering::SeqCst);
+                        if state.recognition_active.load(Ordering::SeqCst) {
+                            log_service(&state.exe_dir, "INFO", "run ignored while recognition is active");
+                        } else {
+                            state.release_requested.store(false, Ordering::SeqCst);
+                            state.run_requested.store(true, Ordering::SeqCst);
+                            log_service(&state.exe_dir, "INFO", "run requested from credential provider");
+                        }
                         control_buf.clear();
                     } else if control_buf.len() > 32 {
                         let keep_from = control_buf.len().saturating_sub(8);
@@ -265,6 +272,7 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                 "release" => {
                     log_service(&state.exe_dir, "INFO", "received release command, closing camera");
                     state.run_requested.store(false, Ordering::SeqCst);
+                    state.recognition_active.store(false, Ordering::SeqCst);
                     state.release_requested.store(true, Ordering::SeqCst);
                     *state.matched_creds.lock().unwrap() = None;
                 }
@@ -324,8 +332,8 @@ fn load_face_records(exe_dir: &Path, db_path: &Path) -> Vec<FaceRecord> {
         rows.filter_map(|r| r.ok())
             .filter_map(|(u, p, account_type, t, j)| {
                 let json = serde_json::from_str::<JsonData>(&j).unwrap_or_default();
-                // 过滤已禁用（view=false）或已锁定（lock=true）的面容 (#103)
-                if !json.view.unwrap_or(true) || json.lock.unwrap_or(false) {
+                // 0.3.3 源码里 view 只控制缩略图显示；真正禁用识别的是 lock。
+                if json.lock.unwrap_or(false) {
                     return None;
                 }
                 let thr = json.threshold.unwrap_or(60);
@@ -555,6 +563,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             cam = None;
             log_service(&exe_dir, "INFO", "camera released");
             state.run_requested.store(false, Ordering::SeqCst);
+            state.recognition_active.store(false, Ordering::SeqCst);
             *state.matched_creds.lock().unwrap() = None;
             continue;
         }
@@ -571,11 +580,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             continue;
         }
 
-        if !state.run_requested.load(Ordering::SeqCst) {
+        if !state.run_requested.swap(false, Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(30));
             continue;
         }
-        state.run_requested.store(false, Ordering::SeqCst);
+        state.recognition_active.store(true, Ordering::SeqCst);
 
         // 定期重新加载人脸记录和配置
         if records.is_empty() || last_reload.elapsed() > Duration::from_secs(30) {
@@ -586,6 +595,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         }
         if records.is_empty() {
             log_service(&exe_dir, "WARN", "run requested but no enabled face records found");
+            state.run_requested.store(false, Ordering::SeqCst);
+            state.recognition_active.store(false, Ordering::SeqCst);
             cam = None;
             continue;
         }
@@ -610,6 +621,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             Some(c) => c,
             None => {
                 log_service(&exe_dir, "ERROR", "failed to open camera");
+                state.run_requested.store(false, Ordering::SeqCst);
+                state.recognition_active.store(false, Ordering::SeqCst);
                 continue;
             }
         };
@@ -668,6 +681,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         } else if !state.release_requested.load(Ordering::SeqCst) {
             log_service(&exe_dir, "WARN", "face recognition finished without a match");
         }
+        state.run_requested.store(false, Ordering::SeqCst);
+        state.recognition_active.store(false, Ordering::SeqCst);
         cam = None;
     }
 }
@@ -705,47 +720,6 @@ fn get_idle_millis() -> u32 {
     unsafe { let _ = GetLastInputInfo(&mut lii); }
     let tick = unsafe { windows::Win32::System::SystemInformation::GetTickCount() };
     tick.wrapping_sub(lii.dwTime)
-}
-
-fn get_last_input_tick() -> u32 {
-    let mut lii = LASTINPUTINFO {
-        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
-        dwTime: 0,
-    };
-    unsafe { let _ = GetLastInputInfo(&mut lii); }
-    lii.dwTime
-}
-
-fn user_input_trigger_loop(state: Arc<State>) {
-    let mut last_seen_tick = get_last_input_tick();
-    let mut had_waiting_dll = false;
-
-    loop {
-        if state.should_exit.load(Ordering::SeqCst) { break; }
-
-        let has_waiting_dll = state.dll_creds_pipe.load(Ordering::SeqCst)
-            != INVALID_HANDLE_VALUE.0 as isize;
-        if has_waiting_dll {
-            let tick = get_last_input_tick();
-            if !had_waiting_dll {
-                last_seen_tick = tick;
-                had_waiting_dll = true;
-                thread::sleep(Duration::from_millis(30));
-                continue;
-            }
-            let idle_ms = get_idle_millis();
-            if tick != last_seen_tick && idle_ms <= 1_500 {
-                state.release_requested.store(false, Ordering::SeqCst);
-                state.run_requested.store(true, Ordering::SeqCst);
-            }
-            last_seen_tick = tick;
-        } else {
-            had_waiting_dll = false;
-            last_seen_tick = get_last_input_tick();
-        }
-
-        thread::sleep(Duration::from_millis(30));
-    }
 }
 
 /// 自动锁屏监控线程
@@ -875,9 +849,6 @@ fn main() {
 
     let s2 = state.clone();
     thread::spawn(move || run_unlock_server(s2));
-
-    let s_input = state.clone();
-    thread::spawn(move || user_input_trigger_loop(s_input));
 
     let s3 = state.clone();
     let dir2 = exe_dir.clone();
