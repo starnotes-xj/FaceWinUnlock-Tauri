@@ -3,7 +3,7 @@
  *
  * 管道拓扑:
  *   MansonWindowsUnlockRustServer  — 本进程作 Server，DLL 作 Client
- *       DLL 发送 "prepare" (初始化) / "run" (开始识别)
+ *       DLL 发送 "prepare" (初始化/心跳)，鼠标或键盘输入后本进程自行触发识别
  *
  *   MansonWindowsUnlockRustUnlock  — 本进程作 Server，DLL 和 UI 均作 Client
  *       DLL 连接后静默等待，本进程写入凭据到此连接完成解锁
@@ -718,6 +718,7 @@ fn get_last_input_tick() -> u32 {
 
 fn user_input_trigger_loop(state: Arc<State>) {
     let mut last_seen_tick = get_last_input_tick();
+    let mut had_waiting_dll = false;
 
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -726,6 +727,12 @@ fn user_input_trigger_loop(state: Arc<State>) {
             != INVALID_HANDLE_VALUE.0 as isize;
         if has_waiting_dll {
             let tick = get_last_input_tick();
+            if !had_waiting_dll {
+                last_seen_tick = tick;
+                had_waiting_dll = true;
+                thread::sleep(Duration::from_millis(30));
+                continue;
+            }
             let idle_ms = get_idle_millis();
             if tick != last_seen_tick && idle_ms <= 1_500 {
                 state.release_requested.store(false, Ordering::SeqCst);
@@ -733,6 +740,7 @@ fn user_input_trigger_loop(state: Arc<State>) {
             }
             last_seen_tick = tick;
         } else {
+            had_waiting_dll = false;
             last_seen_tick = get_last_input_tick();
         }
 

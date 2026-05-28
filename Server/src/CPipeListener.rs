@@ -60,8 +60,8 @@ pub struct CPipeListener {
 
 impl CPipeListener {
     /// 启动管道监听：
-    ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，发送 "prepare" / "run"，
-    ///     同时通过 animation_slot 驱动动画状态 (Scanning/Failure)
+    ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，仅发送 "prepare" 并保持连接；
+    ///     真正的 "run" 由 Unlock EXE 在鼠标/键盘输入后自行触发
     ///   - Creds 线程：阻塞等待凭据推送，收到后设置动画为 Success
     pub fn start(
         events: ICredentialProviderEvents,
@@ -75,10 +75,9 @@ impl CPipeListener {
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
 
-        // ── Client 线程（发送 prepare / run + 驱动动画状态）────────────
+        // ── Client 线程（仅发送 prepare；触发识别交给 Unlock EXE 的输入监听）────────────
         let client_thread = {
             let stop_flag = stop_flag.clone();
-            let anim_slot = animation_slot.clone();
             thread::spawn(move || {
                 let connect_enabled = read_facewinunlock_registry("CONNECT_TO_PIPE")
                     .unwrap_or_else(|_| "1".to_string());
@@ -88,12 +87,6 @@ impl CPipeListener {
                 }
 
                 info!("CPipeListener::start - 进入管道Client线程");
-
-                let retry_secs: f64 = read_facewinunlock_registry("RETRY_DELAY")
-                    .ok()
-                    .and_then(|s| s.trim().parse().ok())
-                    .unwrap_or(1.0);
-                let retry_delay = Duration::from_secs_f64(retry_secs.max(1.0));
 
                 let mut first_connect = true;
 
@@ -126,75 +119,22 @@ impl CPipeListener {
                     }
                     info!("向管道写入数据成功：prepare");
 
-                    // 首次连接给予宽限期，避免用户锁屏后刚走开就被面容解锁（#116 动态锁兼容）
-                    let grace = if is_first {
-                        let secs: f64 = read_facewinunlock_registry("UNLOCK_GRACE_PERIOD")
-                            .ok()
-                            .and_then(|s| s.trim().parse().ok())
-                            .unwrap_or(0.0);
-                        let d = Duration::from_secs_f64(secs.max(0.0));
-                        info!("首次连接，宽限期 {} 秒后开始面容识别", d.as_secs());
-                        d
-                    } else {
-                        Duration::from_secs(1)
-                    };
-                    // 可中断 sleep，避免 CredUI 场景下用户提前关闭对话框时 stop_and_join 卡死
-                    if interruptible_sleep(grace, &stop_flag) {
-                        unsafe { let _ = CloseHandle(pipe); }
-                        return;
-                    }
-
-                    // 内层重试循环 — 定期发送 "run"，含指数退避策略 (#115)
-                    let mut retry_count: u32 = 0;
-
+                    // 保持控制管道连接，但不主动发送 run。
+                    // 鼠标/键盘输入由 Unlock EXE 监听后触发识别，避免 Win+L 后自动开摄像头。
                     loop {
                         if stop_flag.load(Ordering::SeqCst) {
                             unsafe { let _ = CloseHandle(pipe); }
                             return;
                         }
-
-                        if let Err(e) = pipe_write_raw(pipe, b"run") {
-                            warn!("写入 run 失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
+                        if interruptible_sleep(Duration::from_secs(1), &stop_flag) {
+                            unsafe { let _ = CloseHandle(pipe); }
+                            return;
+                        }
+                        if let Err(e) = pipe_write_raw(pipe, b"prepare") {
+                            warn!("prepare 心跳失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
                             unsafe { let _ = CloseHandle(pipe); }
                             break;
                         }
-                        info!("向管道写入数据成功：run");
-
-                        // 动画：进入扫描状态
-                        set_anim_state(&anim_slot, AnimState::Scanning);
-
-                        retry_count += 1;
-
-                        // 动画：连续 3 次未匹配 → 短暂 Failure，随后回 Scanning
-                        if retry_count == 3 {
-                            set_anim_state(&anim_slot, AnimState::Failure);
-                        }
-
-                        // 退避策略: 逐步降低人脸识别频率，减少无人锁屏时的CPU消耗 (#115)
-                        let delay = if retry_count <= 10 {
-                            retry_delay
-                        } else if retry_count <= 30 {
-                            if retry_count == 11 {
-                                info!("Client线程已重试10次未解锁，进入低频模式（{}秒间隔）", retry_delay.as_secs() * 5);
-                            }
-                            retry_delay * 5
-                        } else {
-                            if retry_count == 31 {
-                                info!("Client线程已重试30次未解锁，进入极低频模式（{}秒间隔）", retry_delay.as_secs() * 20);
-                            }
-                            retry_delay * 20
-                        };
-
-                        let deadline = Instant::now() + delay;
-                        loop {
-                            if stop_flag.load(Ordering::SeqCst) {
-                                unsafe { let _ = CloseHandle(pipe); }
-                                return;
-                            }
-                            if Instant::now() >= deadline { break; }
-                            thread::sleep(Duration::from_millis(100));
-                        }
-                        info!("管道重试: 再次发送 run（第{}次）", retry_count);
                     }
                 }
             })
