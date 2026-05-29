@@ -74,12 +74,20 @@ jobs:
           "D:\OpenCV\build\x64\vc16\bin" >> $env:GITHUB_PATH
 
       # ---- LLVM (required by clang-sys / opencv crate build) ----
-      - name: Install LLVM
+      # windows-latest runner has LLVM pre-installed; locate and set env
+      - name: Locate LLVM
         shell: pwsh
         run: |
-          choco install llvm --no-progress --version=19.1.7 -y
           $llvmBin = "C:\Program Files\LLVM\bin"
-          echo "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
+          if (-not (Test-Path (Join-Path $llvmBin "libclang.dll"))) {
+            Write-Host "LLVM not found, installing via chocolatey..."
+            choco install llvm --no-progress -y
+          }
+          if (-not (Test-Path (Join-Path $llvmBin "libclang.dll"))) {
+            throw "Cannot find libclang.dll in $llvmBin"
+          }
+          Write-Host "LLVM found at: $llvmBin"
+          "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
           echo "$llvmBin" >> $env:GITHUB_PATH
 
       # ---- Rust builds ----
