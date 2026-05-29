@@ -43,10 +43,9 @@
 				action: item.is_unlock == 1 ? '面容验证通过' : '未知面容',
 				status: item.is_unlock == 1 ? 'success' : 'error'
 			})
-
-			statistics[1].value = successCount;
-			statistics[2].value = filedCount;
 		})
+		statistics[1].value = successCount;
+		statistics[2].value = filedCount;
 	}).catch((error)=>{
 		ElMessage.warning(error);
 	})

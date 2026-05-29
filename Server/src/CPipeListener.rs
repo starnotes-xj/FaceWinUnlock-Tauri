@@ -223,6 +223,7 @@ impl CPipeListener {
                     let arm_after = Instant::now() + Duration::from_millis(250);
                     let mut last_run_at = Instant::now() - Duration::from_secs(5);
                     let mut last_prepare_at = Instant::now();
+                    let mut non_hook_run_sent = false;
                     if use_input_hooks {
                         INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
                         INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
@@ -241,18 +242,28 @@ impl CPipeListener {
                             info!("锁屏输入 Hook 已就绪，等待鼠标/键盘触发识别");
                         }
 
-                        if hooks_armed
-                            && INPUT_RUN_REQUESTED.swap(false, Ordering::SeqCst)
+                        let should_send_run = hooks_armed
                             && last_run_at.elapsed() >= Duration::from_millis(500)
-                        {
+                            && if use_input_hooks {
+                                INPUT_RUN_REQUESTED.swap(false, Ordering::SeqCst)
+                            } else {
+                                !non_hook_run_sent
+                            };
+
+                        if should_send_run {
                             if let Err(e) = pipe_write_raw(pipe, b"run") {
-                                warn!("输入触发 run 失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
+                                warn!("发送 run 失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
                                 unsafe { let _ = CloseHandle(pipe); }
                                 break;
                             }
                             last_run_at = Instant::now();
                             set_anim_state(&anim_slot, AnimState::Scanning);
-                            info!("检测到锁屏鼠标/键盘输入，已发送 run");
+                            if use_input_hooks {
+                                info!("检测到锁屏鼠标/键盘输入，已发送 run");
+                            } else {
+                                non_hook_run_sent = true;
+                                info!("CREDUI/UAC 场景已自动发送 run");
+                            }
                         }
 
                         if interruptible_sleep(Duration::from_millis(20), &stop_flag) {

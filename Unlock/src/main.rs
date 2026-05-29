@@ -32,7 +32,7 @@ use opencv::{
     prelude::*,
     videoio::{self, VideoCapture},
 };
-use rusqlite::{types::ValueRef, Connection};
+use rusqlite::{params, types::ValueRef, Connection};
 use serde::Deserialize;
 use windows::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
@@ -97,6 +97,7 @@ impl State {
 
 #[derive(Debug)]
 struct FaceRecord {
+    id:         i64,
     user_name:  String,
     user_pwd:   String,
     feature_bytes: Vec<u8>,
@@ -215,6 +216,39 @@ fn log_service(exe_dir: &Path, level: &str, message: &str) {
 
 // ─── Control pipe server（MansonWindowsUnlockRustServer）─────────────────────
 
+fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
+    let mut control_buf = String::new();
+    loop {
+        if state.should_exit.load(Ordering::SeqCst) { break; }
+        match pipe_read(pipe) {
+            Ok(data) if !data.is_empty() => {
+                let cmd = String::from_utf8_lossy(&data);
+                control_buf.push_str(&cmd);
+                if control_buf.contains("run") {
+                    if state.recognition_active.load(Ordering::SeqCst) {
+                        log_service(&state.exe_dir, "INFO", "run ignored while recognition is active");
+                    } else {
+                        state.release_requested.store(false, Ordering::SeqCst);
+                        state.run_requested.store(true, Ordering::SeqCst);
+                        log_service(&state.exe_dir, "INFO", "run requested from credential provider");
+                    }
+                    control_buf.clear();
+                } else if control_buf.contains("prepare") {
+                    state.prepare_requested.store(true, Ordering::SeqCst);
+                    control_buf.clear();
+                } else if control_buf.len() > 32 {
+                    let keep_from = control_buf.len().saturating_sub(8);
+                    control_buf = control_buf[keep_from..].to_string();
+                }
+            }
+            _ => break,
+        }
+    }
+
+    unsafe { let _ = DisconnectNamedPipe(pipe); }
+    close_handle(pipe);
+}
+
 fn run_control_server(state: Arc<State>) {
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -226,36 +260,9 @@ fn run_control_server(state: Arc<State>) {
 
         if wait_for_client(pipe).is_err() { close_handle(pipe); continue; }
 
-        let mut control_buf = String::new();
-        loop {
-            if state.should_exit.load(Ordering::SeqCst) { break; }
-            match pipe_read(pipe) {
-                Ok(data) if !data.is_empty() => {
-                    let cmd = String::from_utf8_lossy(&data);
-                    control_buf.push_str(&cmd);
-                    if control_buf.contains("run") {
-                        if state.recognition_active.load(Ordering::SeqCst) {
-                            log_service(&state.exe_dir, "INFO", "run ignored while recognition is active");
-                        } else {
-                            state.release_requested.store(false, Ordering::SeqCst);
-                            state.run_requested.store(true, Ordering::SeqCst);
-                            log_service(&state.exe_dir, "INFO", "run requested from credential provider");
-                        }
-                        control_buf.clear();
-                    } else if control_buf.contains("prepare") {
-                        state.prepare_requested.store(true, Ordering::SeqCst);
-                        control_buf.clear();
-                    } else if control_buf.len() > 32 {
-                        let keep_from = control_buf.len().saturating_sub(8);
-                        control_buf = control_buf[keep_from..].to_string();
-                    }
-                }
-                _ => break,
-            }
-        }
-
-        unsafe { let _ = DisconnectNamedPipe(pipe); }
-        close_handle(pipe);
+        let state2 = state.clone();
+        let sendable = SendHandle(pipe);
+        thread::spawn(move || handle_control_client(sendable.take(), state2));
     }
 }
 
@@ -335,22 +342,23 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
 fn load_face_records(exe_dir: &Path, db_path: &Path) -> Vec<FaceRecord> {
     let conn = match Connection::open(db_path) { Ok(c) => c, Err(_) => return vec![] };
     let mut stmt = match conn.prepare(
-        "SELECT user_name, user_pwd, account_type, face_token, json_data FROM faces",
+        "SELECT id, user_name, user_pwd, account_type, face_token, json_data FROM faces",
     ) { Ok(s) => s, Err(_) => return vec![] };
 
     stmt.query_map([], |row| {
         Ok((
-            row.get::<_, String>(0)?,
+            row.get::<_, i64>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, String>(3)?,
-            row.get::<_, String>(4).unwrap_or_default(),
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5).unwrap_or_default(),
         ))
     })
     .ok()
     .map(|rows| {
         rows.filter_map(|r| r.ok())
-            .filter_map(|(u, p, account_type, t, j)| {
+            .filter_map(|(id, u, p, account_type, t, j)| {
                 let json = serde_json::from_str::<JsonData>(&j).unwrap_or_default();
                 // 0.3.3 源码里 view 只控制缩略图显示；真正禁用识别的是 lock。
                 if json.lock.unwrap_or(false) {
@@ -366,11 +374,46 @@ fn load_face_records(exe_dir: &Path, db_path: &Path) -> Vec<FaceRecord> {
                 if feature_bytes.is_empty() {
                     return None;
                 }
-                Some(FaceRecord { user_name: u, user_pwd: p, feature_bytes, threshold: thr, domain: dm })
+                Some(FaceRecord { id, user_name: u, user_pwd: p, feature_bytes, threshold: thr, domain: dm })
             })
             .collect()
     })
     .unwrap_or_default()
+}
+
+fn ensure_unlock_log_table(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS unlock_log(
+            id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+            face_id INTEGER,
+            is_unlock INTEGER NOT NULL,
+            block_img TEXT,
+            lastTime TEXT DEFAULT (datetime('now', 'localtime'))
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+fn insert_unlock_log(db_path: &Path, exe_dir: &Path, face_id: Option<i64>, is_unlock: bool, block_img: Option<&str>) {
+    let conn = match Connection::open(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            log_service(exe_dir, "WARN", &format!("failed to open database for unlock_log: {:?}", e));
+            return;
+        }
+    };
+    let _ = conn.busy_timeout(Duration::from_secs(2));
+    if let Err(e) = ensure_unlock_log_table(&conn) {
+        log_service(exe_dir, "WARN", &format!("failed to ensure unlock_log table: {:?}", e));
+        return;
+    }
+    if let Err(e) = conn.execute(
+        "INSERT INTO unlock_log (face_id, is_unlock, block_img) VALUES (?1, ?2, ?3)",
+        params![face_id, if is_unlock { 1 } else { 0 }, block_img],
+    ) {
+        log_service(exe_dir, "WARN", &format!("failed to insert unlock_log: {:?}", e));
+    }
 }
 
 // ─── Face feature comparison ──────────────────────────────────────────────────
@@ -935,6 +978,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
         // 识别循环：无脸时按 UI 配置超时；有人脸但不匹配时保留硬上限，避免持续占用摄像头。
         let mut matched = false;
+        let mut matched_face_id: Option<i64> = None;
+        let mut saw_face = false;
         let hard_deadline = Instant::now() + Duration::from_secs(10);
         let mut no_face_since: Option<Instant> = None;
         while Instant::now() < hard_deadline {
@@ -965,6 +1010,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 }
             };
             no_face_since = None;
+            saw_face = true;
             let cam_bytes = feature_to_bytes(&cam_feat);
 
             for rec in &records {
@@ -973,6 +1019,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 if score >= threshold {
                     *state.matched_creds.lock().unwrap() = Some((rec.user_name.clone(), rec.user_pwd.clone(), rec.domain.clone()));
                     log_service(&exe_dir, "INFO", &format!("face matched for {}", rec.user_name));
+                    matched_face_id = Some(rec.id);
                     // 更新活跃时间：人脸识别成功说明用户在
                     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
                     state.last_user_active.store(now, Ordering::SeqCst);
@@ -990,9 +1037,13 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         }
 
         if matched {
+            insert_unlock_log(&db_path, &exe_dir, matched_face_id, true, None);
             last_failed_at = None;
             state.run_requested.store(false, Ordering::SeqCst);
         } else if !state.release_requested.load(Ordering::SeqCst) {
+            if saw_face {
+                insert_unlock_log(&db_path, &exe_dir, None, false, None);
+            }
             last_failed_at = Some(Instant::now());
             log_service(&exe_dir, "WARN", "face recognition finished without a match");
         }
