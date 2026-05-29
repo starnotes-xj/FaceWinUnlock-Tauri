@@ -281,8 +281,13 @@ pub fn add_scheduled_task(
 ) -> Result<CustomResult, CustomResult> {
     let use_system = is_server || run_on_system_start;
 
+    // 开机面容识别：同时使用 BootTrigger（延迟 15 秒）+ LogonTrigger（兜底）
+    // BootTrigger 有延迟是因为系统启动时任务计划程序可能在驱动/服务就绪前就触发任务，
+    // 导致 Unlock EXE 启动失败（OpenCV 模型加载、摄像头驱动等依赖未就绪）。
+    // LogonTrigger 作为兜底：如果 BootTrigger 因故未触发，用户登录后仍可启动后台服务，
+    // 配合 SessionUnlock 触发器保证后续锁屏解锁可用。
     let trigger_xml = if run_on_system_start {
-        "<BootTrigger><Enabled>true</Enabled></BootTrigger>"
+        "<BootTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></BootTrigger>\n    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
     } else {
         "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
     };

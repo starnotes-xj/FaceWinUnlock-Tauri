@@ -170,7 +170,10 @@ impl CPipeListener {
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
         let use_input_hooks = true;
-        let auto_run_on_connect = !is_primary_scenario;
+        // auto_run_on_connect 设为 false，所有场景（登录/解锁/CREDUI）统一由输入 Hook 触发 "run"。
+        // 之前的 CREDUI auto_run 会在连接后立即发送 "run"，但摄像头尚未预热（首帧偏暗/无人脸），
+        // 导致第一次识别必然失败，需要等第二次输入触发的 "run" 才能通过（Chrome 密码查看器等场景）。
+        let auto_run_on_connect = false;
         if use_input_hooks {
             install_input_hooks();
         }

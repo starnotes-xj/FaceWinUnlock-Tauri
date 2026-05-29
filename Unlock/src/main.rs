@@ -987,16 +987,6 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 );
             }
         }
-        let cap = match cam.as_mut() {
-            Some(c) => c,
-            None => {
-                log_service(&exe_dir, "ERROR", "failed to open camera");
-                state.run_requested.store(false, Ordering::SeqCst);
-                state.recognition_active.store(false, Ordering::SeqCst);
-                continue;
-            }
-        };
-
         // 解锁前提升屏幕亮度（仅笔记本内置屏），识别结束后恢复
         let saved_brightness = if unlock_brightness > 0 {
             let orig = get_brightness();
@@ -1007,58 +997,97 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         };
 
         // 识别循环：无脸时按 UI 配置超时；有人脸但不匹配时保留硬上限，避免持续占用摄像头。
+        // 摄像头冷启动时首帧偏暗/传感器未就绪，首轮识别可能无人脸。
+        // 允许最多 3 轮内部重试（无需 DLL 重发 "run"），消除 Chrome CREDUI 等场景的"第一次失败，第二次成功"问题。
+        const MAX_NO_FACE_RETRIES: u32 = 3;
         let mut matched = false;
         let mut matched_face_id: Option<i64> = None;
         let mut saw_face = false;
-        let hard_deadline = Instant::now() + Duration::from_secs(10);
-        let mut no_face_since: Option<Instant> = None;
-        while Instant::now() < hard_deadline {
+        let mut no_face_retries = 0u32;
+
+        while no_face_retries < MAX_NO_FACE_RETRIES {
             if state.should_exit.load(Ordering::SeqCst)
                 || state.release_requested.load(Ordering::SeqCst) { break; }
-            let mut frame = Mat::default();
-            if cap.read(&mut frame).is_err() || frame.empty() {
-                let since = no_face_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= not_face_delay {
-                    log_service(&exe_dir, "INFO", "no usable camera frame timeout reached");
-                    break;
-                }
-                thread::sleep(Duration::from_millis(30));
-                continue;
-            }
-            let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
 
-            let cam_feat = match detect_and_extract(&mut models, &frame) {
-                Some(f) => f,
-                None => {
-                    let since = no_face_since.get_or_insert_with(Instant::now);
-                    if since.elapsed() >= not_face_delay {
-                        log_service(&exe_dir, "INFO", "no face detected timeout reached");
+            // 每轮重新获取 cam 引用（块结束后 borrow 自动释放，允许后续 cam = None）
+            // 首轮使用已打开的 cam，重试轮从重新打开的 cam 获取
+            saw_face = false;
+            {
+                let cap = match cam.as_mut() {
+                    Some(c) => c,
+                    None => {
+                        log_service(&exe_dir, "ERROR", "camera not available for recognition round");
                         break;
                     }
-                    thread::sleep(Duration::from_millis(30));
-                    continue;
-                }
-            };
-            no_face_since = None;
-            saw_face = true;
-            let cam_bytes = feature_to_bytes(&cam_feat);
+                };
 
-            for rec in &records {
-                let score = cosine_sim(&cam_bytes, &rec.feature_bytes);
-                let threshold = rec.threshold as f64 / 100.0;
-                if score >= threshold {
-                    *state.matched_creds.lock().unwrap() = Some((rec.user_name.clone(), rec.user_pwd.clone(), rec.domain.clone()));
-                    log_service(&exe_dir, "INFO", &format!("face matched for {}", rec.user_name));
-                    matched_face_id = Some(rec.id);
-                    // 更新活跃时间：人脸识别成功说明用户在
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-                    state.last_user_active.store(now, Ordering::SeqCst);
-                    matched = true;
+                let hard_deadline = Instant::now() + Duration::from_secs(10);
+                let mut no_face_since: Option<Instant> = None;
+                while Instant::now() < hard_deadline {
+                    if state.should_exit.load(Ordering::SeqCst)
+                        || state.release_requested.load(Ordering::SeqCst) { break; }
+                    let mut frame = Mat::default();
+                    if cap.read(&mut frame).is_err() || frame.empty() {
+                        let since = no_face_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= not_face_delay {
+                            log_service(&exe_dir, "INFO", "no usable camera frame timeout reached");
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(30));
+                        continue;
+                    }
+                    let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
+
+                    let cam_feat = match detect_and_extract(&mut models, &frame) {
+                        Some(f) => f,
+                        None => {
+                            let since = no_face_since.get_or_insert_with(Instant::now);
+                            if since.elapsed() >= not_face_delay {
+                                log_service(&exe_dir, "INFO", "no face detected timeout reached");
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(30));
+                            continue;
+                        }
+                    };
+                    no_face_since = None;
+                    saw_face = true;
+                    let cam_bytes = feature_to_bytes(&cam_feat);
+
+                    for rec in &records {
+                        let score = cosine_sim(&cam_bytes, &rec.feature_bytes);
+                        let threshold = rec.threshold as f64 / 100.0;
+                        if score >= threshold {
+                            *state.matched_creds.lock().unwrap() = Some((rec.user_name.clone(), rec.user_pwd.clone(), rec.domain.clone()));
+                            log_service(&exe_dir, "INFO", &format!("face matched for {}", rec.user_name));
+                            matched_face_id = Some(rec.id);
+                            // 更新活跃时间：人脸识别成功说明用户在
+                            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+                            state.last_user_active.store(now, Ordering::SeqCst);
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if matched { break; }
+                    thread::sleep(Duration::from_millis(30));
+                }
+            } // cap 在这里释放，cam borrow 结束
+
+            if matched || saw_face { break; }
+            // 无人脸：摄像头可能尚未预热，内部重试
+            no_face_retries += 1;
+            if no_face_retries < MAX_NO_FACE_RETRIES {
+                log_service(&exe_dir, "INFO", &format!("no face in round {}, retrying ({}/{})", no_face_retries, no_face_retries + 1, MAX_NO_FACE_RETRIES));
+                // 释放当前摄像头，重新打开获取新数据流
+                cam = None;
+                if let Some((c, backend_name)) = open_configured_camera(camera_index) {
+                    cam = Some(c);
+                    log_service(&exe_dir, "INFO", &format!("camera reopened for retry via {}", backend_name));
+                } else {
+                    log_service(&exe_dir, "ERROR", "failed to reopen camera for retry");
                     break;
                 }
             }
-            if matched { break; }
-            thread::sleep(Duration::from_millis(30));
         }
 
         // 识别结束，恢复原始亮度
