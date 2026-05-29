@@ -149,8 +149,6 @@ pub struct CPipeListener {
     creds_thread: Option<JoinHandle<()>>,
     /// 保存凭据线程当前持有的管道句柄原始值（isize），用于 stop_and_join 时关闭句柄打断 ReadFile
     creds_pipe_raw: Arc<AtomicIsize>,
-    /// 登录/解锁场景（非 CREDUI），用于 stop_and_join 中决定是否通知 Unlock EXE 释放资源 (#117)
-    is_primary_scenario: bool,
     /// 是否安装了鼠标/键盘 Hook。所有已启用场景都可用 Hook 触发 run，CREDUI 额外保留自动 run 兜底。
     use_input_hooks: bool,
 }
@@ -203,12 +201,17 @@ impl CPipeListener {
                     let pipe = match pipe_connect_to_server_with_stop(PIPE_SERVER_NAME, timeout, Some(&stop_flag)) {
                         Ok(p)  => p,
                         Err(e) => {
-                            if is_first {
-                                error!("首次连接管道服务器失败（Unlock EXE 未启动？）: {:?}", e);
-                                return;
+                            if stop_flag.load(Ordering::SeqCst) {
+                                info!("连接管道服务器被取消");
+                                break;
                             }
-                            warn!("重连管道服务器失败: {:?}，5秒后重试", e);
-                            if interruptible_sleep(Duration::from_secs(5), &stop_flag) { break; }
+                            if is_first {
+                                warn!("首次连接管道服务器失败（Unlock EXE 可能尚未启动），继续重试: {:?}", e);
+                                first_connect = false;
+                            } else {
+                                warn!("重连管道服务器失败: {:?}，1秒后重试", e);
+                            }
+                            if interruptible_sleep(Duration::from_secs(1), &stop_flag) { break; }
                             continue;
                         }
                     };
@@ -393,7 +396,6 @@ impl CPipeListener {
             client_thread: Some(client_thread),
             creds_thread:  Some(creds_thread),
             creds_pipe_raw,
-            is_primary_scenario,
             use_input_hooks,
         }))
     }
@@ -415,9 +417,9 @@ impl CPipeListener {
         if let Some(t) = self.client_thread.take() { let _ = t.join(); }
         if let Some(t) = self.creds_thread.take()  { let _ = t.join(); }
 
-        // 主场景（登录/解锁）且用户手动解锁（非面容识别）时，通知 Unlock EXE 释放摄像头 (#117)
-        if self.is_primary_scenario && !self.is_unlocked.load(Ordering::SeqCst) {
-            info!("CPipeListener - 手动解锁检测到，通知 Unlock EXE 释放资源");
+        // 对话框关闭且不是面容识别成功时，通知 Unlock EXE 释放摄像头。
+        if !self.is_unlocked.load(Ordering::SeqCst) {
+            info!("CPipeListener - 手动验证/取消检测到，通知 Unlock EXE 释放资源");
             use crate::Pipe::{pipe_connect_to_server, pipe_write_raw, PIPE_UNLOCK_NAME};
             if let Ok(pipe) = pipe_connect_to_server(PIPE_UNLOCK_NAME, 3_000) {
                 let _ = pipe_write_raw(pipe, b"release");

@@ -35,7 +35,11 @@ use opencv::{
 use rusqlite::{params, types::ValueRef, Connection};
 use serde::Deserialize;
 use windows::Win32::{
-    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
+    Foundation::{CloseHandle, BOOL, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree},
+    Security::{
+        Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
+        PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    },
     Storage::FileSystem::{
         WriteFile, ReadFile, PIPE_ACCESS_DUPLEX,
     },
@@ -141,17 +145,43 @@ fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }
 
+fn pipe_security_attributes(sd: &mut PSECURITY_DESCRIPTOR) -> Option<SECURITY_ATTRIBUTES> {
+    let sddl = to_wide("D:(A;;GA;;;WD)");
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR::from_raw(sddl.as_ptr()),
+            SDDL_REVISION_1,
+            sd,
+            None,
+        )
+    }.is_err() {
+        return None;
+    }
+
+    Some(SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd.0 as *mut _,
+        bInheritHandle: BOOL::from(false),
+    })
+}
+
 fn create_named_pipe(name: &str) -> windows::core::Result<HANDLE> {
     let wide = to_wide(name);
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    let sa = pipe_security_attributes(&mut sd);
     let h = unsafe {
         CreateNamedPipeW(
             PCWSTR::from_raw(wide.as_ptr()),
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
-            BUF_SIZE, BUF_SIZE, 0, None,
+            BUF_SIZE, BUF_SIZE, 0,
+            sa.as_ref().map(|attrs| attrs as *const _),
         )
     };
+    if !sd.0.is_null() {
+        unsafe { let _ = LocalFree(Some(HLOCAL(sd.0))); }
+    }
     if h.is_invalid() { Err(windows::core::Error::from_win32()) } else { Ok(h) }
 }
 
