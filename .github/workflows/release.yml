@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '手动指定 tag（留空则使用当前 commit 生成）'
+        required: false
+        type: string
+      prerelease:
+        description: '标记为 pre-release'
+        type: boolean
+        default: false
+
+env:
+  OPENCV_VERSION: '4.12.0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build & Release (${{ github.ref_name }})
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-pc-windows-msvc
+
+      # ---- OpenCV (cached to avoid re-downloading 300MB+) ----
+      - name: Cache OpenCV
+        id: opencv-cache
+        uses: actions/cache@v4
+        with:
+          path: D:\OpenCV
+          key: opencv-${{ env.OPENCV_VERSION }}-v1
+
+      - name: Download & Extract OpenCV
+        if: steps.opencv-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Write-Host "Downloading OpenCV $env:OPENCV_VERSION..."
+          $url = "https://github.com/opencv/opencv/releases/download/$env:OPENCV_VERSION/opencv-$env:OPENCV_VERSION-windows.exe"
+          $installer = "$env:RUNNER_TEMP\opencv-installer.exe"
+          Invoke-WebRequest -Uri $url -OutFile $installer -RetryIntervalSec 10 -MaximumRetryCount 3
+          Write-Host "Extracting OpenCV (this may take a minute)..."
+          & 7z x $installer "-o$env:RUNNER_TEMP\opencv_tmp" -y | Out-Null
+          $extracted = Get-ChildItem "$env:RUNNER_TEMP\opencv_tmp" -Directory | Select-Object -First 1
+          Move-Item $extracted.FullName D:\OpenCV
+          Remove-Item "$env:RUNNER_TEMP\opencv_tmp" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "OpenCV installed:"
+          Get-ChildItem D:\OpenCV | Select-Object Name
+
+      - name: Set OpenCV environment
+        shell: pwsh
+        run: |
+          "OPENCV_LINK_PATHS=D:\OpenCV\build\x64\vc16\lib" >> $env:GITHUB_ENV
+          "OPENCV_INCLUDE_PATHS=D:\OpenCV\build\include" >> $env:GITHUB_ENV
+          "D:\OpenCV\build\x64\vc16\bin" >> $env:GITHUB_PATH
+
+      # ---- Rust builds ----
+      - name: Cache Rust artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-release-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Server DLL + Unlock EXE
+        shell: pwsh
+        run: cargo build --release -p winlogon -p unlock
+
+      - name: Verify Server DLL & Unlock EXE
+        shell: pwsh
+        run: |
+          $dll = "target\release\FaceWinUnlock_Tauri.dll"
+          $exe = "target\release\FaceWinUnlock-Server.exe"
+          if (-not (Test-Path $dll)) { throw "Missing: $dll" }
+          if (-not (Test-Path $exe)) { throw "Missing: $exe" }
+          Write-Host "Server DLL: $((Get-Item $dll).Length) bytes"
+          Write-Host "Unlock EXE: $((Get-Item $exe).Length) bytes"
+
+      # ---- Tauri UI build ----
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: UI/node_modules
+          key: npm-${{ runner.os }}-${{ hashFiles('UI/package-lock.json') }}
+
+      - name: Install npm dependencies
+        working-directory: UI
+        run: npm ci
+
+      - name: Build Tauri installer
+        working-directory: UI
+        run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # ---- Release ----
+      - name: Determine release metadata
+        id: release_meta
+        shell: pwsh
+        run: |
+          $refName = "${{ github.ref_name }}"
+          # Strip leading 'v' for display version
+          $version = $refName -replace '^v', ''
+          $isPrerelease = "${{ github.event.inputs.prerelease }}" -eq "true"
+          # Tag-driven releases are never prerelease unless the tag itself indicates it
+          if ($refName -match '-(alpha|beta|rc|pre|dev)') {
+            $isPrerelease = $true
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "is_prerelease=$isPrerelease" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: $version, Prerelease: $isPrerelease"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.release_meta.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ steps.release_meta.outputs.is_prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            Server/target/release/FaceWinUnlock_Tauri.dll
+            Unlock/target/release/FaceWinUnlock-Server.exe
+            UI/src-tauri/target/release/bundle/nsis/*.exe
+            UI/src-tauri/target/release/bundle/msi/*.msi
