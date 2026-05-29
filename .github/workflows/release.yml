@@ -74,19 +74,36 @@ jobs:
           "D:\OpenCV\build\x64\vc16\bin" >> $env:GITHUB_PATH
 
       # ---- LLVM (required by clang-sys / opencv crate build) ----
-      # windows-latest runner has LLVM pre-installed; locate and set env
-      - name: Locate LLVM
+      - name: Setup LLVM
         shell: pwsh
         run: |
-          $llvmBin = "C:\Program Files\LLVM\bin"
-          if (-not (Test-Path (Join-Path $llvmBin "libclang.dll"))) {
-            Write-Host "LLVM not found, installing via chocolatey..."
-            choco install llvm --no-progress -y
+          # Try common install paths first
+          $libclang = $null
+          $searchPaths = @(
+            "C:\Program Files\LLVM\bin\libclang.dll",
+            "C:\Program Files (x86)\LLVM\bin\libclang.dll"
+          )
+          foreach ($p in $searchPaths) {
+            if (Test-Path $p) { $libclang = $p; break }
           }
-          if (-not (Test-Path (Join-Path $llvmBin "libclang.dll"))) {
-            throw "Cannot find libclang.dll in $llvmBin"
+
+          if (-not $libclang) {
+            Write-Host "libclang.dll not found, searching entire system..."
+            $libclang = Get-ChildItem -Path C:\ -Filter libclang.dll -Recurse -ErrorAction SilentlyContinue -Depth 3 |
+              Select-Object -First 1 -ExpandProperty FullName
           }
-          Write-Host "LLVM found at: $llvmBin"
+
+          if (-not $libclang) {
+            Write-Host "Not found, installing LLVM via chocolatey..."
+            choco install llvm --no-progress -y --force
+            if (Test-Path "C:\Program Files\LLVM\bin\libclang.dll") {
+              $libclang = "C:\Program Files\LLVM\bin\libclang.dll"
+            }
+          }
+
+          if (-not $libclang) { throw "Cannot find libclang.dll" }
+          $llvmBin = Split-Path $libclang -Parent
+          Write-Host "LLVM bin: $llvmBin"
           "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
           echo "$llvmBin" >> $env:GITHUB_PATH
 
