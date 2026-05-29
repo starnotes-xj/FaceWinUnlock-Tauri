@@ -18,6 +18,7 @@ on:
 env:
   OPENCV_VERSION: '4.12.0'
   CARGO_TERM_COLOR: always
+  LLVM_ROOT: 'D:\LLVM'
 
 jobs:
   build:
@@ -74,36 +75,146 @@ jobs:
           "D:\OpenCV\build\x64\vc16\bin" >> $env:GITHUB_PATH
 
       # ---- LLVM (required by clang-sys / opencv crate build) ----
-      # Same as local dev: install LLVM so libclang.dll is findable
+      # clang-sys / opencv-binding-generator need a discoverable libclang.
       - name: Install LLVM
         shell: pwsh
         run: |
-          # Fast path: clang already on PATH with libclang next to it
-          $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
-          if ($clang) {
-            $dir = Split-Path $clang.Source -Parent
-            if (Test-Path (Join-Path $dir "libclang.dll")) {
-              Write-Host "libclang.dll found next to clang.exe: $dir"
-              "LIBCLANG_PATH=$dir" >> $env:GITHUB_ENV
-              echo "$dir" >> $env:GITHUB_PATH
-              return
+          $ErrorActionPreference = "Stop"
+
+          function Test-LlvmRoot {
+            param([string]$Root)
+
+            if (-not $Root -or -not (Test-Path $Root)) {
+              return $false
+            }
+
+            return (Test-Path (Join-Path $Root "bin\libclang.dll")) -and `
+              (Test-Path (Join-Path $Root "lib\libclang.lib"))
+          }
+
+          function Find-LlvmRoot {
+            $candidateRoots = @(
+              "$env:LLVM_ROOT",
+              "${env:ProgramFiles}\LLVM",
+              "${env:ProgramFiles(x86)}\LLVM",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\x64",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64"
+            ) | Where-Object { $_ -and (Test-Path $_) }
+
+            foreach ($root in $candidateRoots) {
+              if (Test-LlvmRoot $root) {
+                return (Resolve-Path $root).Path
+              }
+            }
+
+            $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
+            if ($clang) {
+              $bin = Split-Path $clang.Source -Parent
+              $root = Split-Path $bin -Parent
+              if (Test-LlvmRoot $root) {
+                return $root
+              }
+            }
+
+            return $null
+          }
+
+          $sourceRoot = Find-LlvmRoot
+          if (-not $sourceRoot) {
+            Write-Host "Installing LLVM..."
+            choco install llvm -y --no-progress --limit-output
+            $sourceRoot = Find-LlvmRoot
+          }
+
+          if (-not $sourceRoot) {
+            throw "LLVM with bin\libclang.dll and lib\libclang.lib was not found after installation."
+          }
+
+          $llvmRoot = $env:LLVM_ROOT
+          $sourceRoot = (Resolve-Path $sourceRoot).Path
+          $sameRoot = (Test-Path $llvmRoot) -and ((Resolve-Path $llvmRoot).Path -eq $sourceRoot)
+          if ((Test-Path $llvmRoot) -and -not $sameRoot) {
+            Remove-Item -LiteralPath $llvmRoot -Recurse -Force
+          }
+          if (-not (Test-Path $llvmRoot)) {
+            New-Item -ItemType Directory -Path $llvmRoot | Out-Null
+          }
+
+          if (-not $sameRoot) {
+            foreach ($dir in @("bin", "lib", "include")) {
+              $src = Join-Path $sourceRoot $dir
+              if (Test-Path $src) {
+                $dst = Join-Path $llvmRoot $dir
+                if (Test-Path $dst) {
+                  Remove-Item -LiteralPath $dst -Recurse -Force
+                }
+                Copy-Item -LiteralPath $src -Destination $dst -Recurse -Force
+              }
             }
           }
-          # Install LLVM (matching local dev setup)
-          Write-Host "Installing LLVM..."
-          choco install llvm -y --no-progress --limit-output
-          $llvmBin = "C:\Program Files\LLVM\bin"
-          if (Test-Path (Join-Path $llvmBin "libclang.dll")) {
-            Write-Host "LLVM installed: $llvmBin"
-          } else {
-            Write-Host "Forcing reinstall (package may be registered but files missing)..."
-            choco install llvm -y --no-progress --limit-output --force
-            if (-not (Test-Path (Join-Path $llvmBin "libclang.dll"))) {
-              throw "libclang.dll not found at $llvmBin after install + force"
-            }
+
+          $llvmBin = Join-Path $llvmRoot "bin"
+          $libclang = Join-Path $llvmBin "libclang.dll"
+          if (-not (Test-Path $libclang)) {
+            throw "Normalized LLVM is missing libclang.dll: $libclang"
           }
+          $libclangImportLib = Join-Path $llvmRoot "lib\libclang.lib"
+          if (-not (Test-Path $libclangImportLib)) {
+            throw "Normalized LLVM is missing libclang.lib: $libclangImportLib"
+          }
+
+          $llvmConfig = Join-Path $llvmBin "llvm-config.cmd"
+          @"
+          @echo off
+          if "%~1"=="--prefix" (
+            echo $llvmRoot
+            exit /b 0
+          )
+          if "%~1"=="--includedir" (
+            echo $llvmRoot\include
+            exit /b 0
+          )
+          echo $llvmRoot
+          "@ | Set-Content -Path $llvmConfig -Encoding ASCII
+
+          Write-Host "LLVM source: $sourceRoot"
+          Write-Host "LLVM root: $llvmRoot"
+          Get-Item $libclang | Select-Object FullName, Length
+          Get-Item $libclangImportLib | Select-Object FullName, Length
+
           "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
-          echo "$llvmBin" >> $env:GITHUB_PATH
+          "LLVM_CONFIG_PATH=$llvmConfig" >> $env:GITHUB_ENV
+          "LIBCLANG_STATIC=0" >> $env:GITHUB_ENV
+          $llvmBin >> $env:GITHUB_PATH
+
+      - name: Verify LLVM environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:LIBCLANG_PATH) {
+            throw "LIBCLANG_PATH is not set"
+          }
+          $libclang = Join-Path $env:LIBCLANG_PATH "libclang.dll"
+          if (-not (Test-Path $libclang)) {
+            throw "LIBCLANG_PATH does not contain libclang.dll: $env:LIBCLANG_PATH"
+          }
+          $llvmRoot = Split-Path $env:LIBCLANG_PATH -Parent
+          $libclangImportLib = Join-Path $llvmRoot "lib\libclang.lib"
+          if (-not (Test-Path $libclangImportLib)) {
+            throw "LLVM root does not contain libclang.lib: $libclangImportLib"
+          }
+          if (-not $env:LLVM_CONFIG_PATH -or -not (Test-Path $env:LLVM_CONFIG_PATH)) {
+            throw "LLVM_CONFIG_PATH is not set to the generated llvm-config shim"
+          }
+          $prefix = & $env:LLVM_CONFIG_PATH --prefix
+          if ($prefix.TrimEnd() -ne $env:LLVM_ROOT) {
+            throw "llvm-config --prefix returned '$prefix', expected '$env:LLVM_ROOT'"
+          }
+          Write-Host "Using LIBCLANG_PATH=$env:LIBCLANG_PATH"
+          Write-Host "Using LLVM_CONFIG_PATH=$env:LLVM_CONFIG_PATH"
+          Get-Item $libclang | Select-Object FullName, Length
+          Get-Item $libclangImportLib | Select-Object FullName, Length
 
       # ---- Rust builds ----
       - name: Cache Rust artifacts
@@ -117,7 +228,10 @@ jobs:
 
       - name: Build Server DLL + Unlock EXE
         shell: pwsh
-        run: cargo build --release -p winlogon -p unlock
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo clean -p clang-sys
+          cargo build --release -p winlogon -p unlock
 
       - name: Verify Server DLL & Unlock EXE
         shell: pwsh
@@ -174,7 +288,7 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            Server/target/release/FaceWinUnlock_Tauri.dll
-            Unlock/target/release/FaceWinUnlock-Server.exe
+            target/release/FaceWinUnlock_Tauri.dll
+            target/release/FaceWinUnlock-Server.exe
             UI/src-tauri/target/release/bundle/nsis/*.exe
             UI/src-tauri/target/release/bundle/msi/*.msi
