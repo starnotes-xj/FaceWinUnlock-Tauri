@@ -74,14 +74,39 @@ jobs:
           "D:\OpenCV\build\x64\vc16\bin" >> $env:GITHUB_PATH
 
       # ---- LLVM (required by clang-sys / opencv crate build) ----
+      # Cache installed LLVM (~2GB extracted) to avoid re-downloading
+      - name: Cache LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\Program Files\LLVM
+          key: llvm-19.1.7-v1
+
       - name: Install LLVM
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/LLVM-19.1.7-win64.exe"
           $installer = "$env:RUNNER_TEMP\llvm-installer.exe"
+          Write-Host "Downloading LLVM 19.1.7..."
           Invoke-WebRequest -Uri $url -OutFile $installer
-          Start-Process -FilePath $installer -ArgumentList "/S" -Wait
+          # WiX bundle installer uses /quiet (NOT /S which is NSIS-only)
+          Write-Host "Running installer (WiX /quiet)..."
+          $proc = Start-Process -FilePath $installer -ArgumentList "/quiet /norestart" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "LLVM installer exited with code $($proc.ExitCode)"
+          }
+          Write-Host "LLVM installed"
+
+      - name: Set LLVM env
+        shell: pwsh
+        run: |
           $llvmBin = "C:\Program Files\LLVM\bin"
+          $dll = Join-Path $llvmBin "libclang.dll"
+          if (-not (Test-Path $dll)) {
+            throw "libclang.dll not found at $llvmBin"
+          }
+          Write-Host "libclang.dll found: $dll"
           "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
           echo "$llvmBin" >> $env:GITHUB_PATH
 
