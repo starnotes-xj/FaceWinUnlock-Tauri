@@ -576,6 +576,56 @@ fn load_camera_rotation(db_path: &Path) -> i32 {
     0
 }
 
+fn load_option_value(db_path: &Path, key: &str) -> Option<String> {
+    let conn = Connection::open(db_path).ok()?;
+    let mut stmt = conn.prepare("SELECT val FROM options WHERE key = ?1").ok()?;
+    let value = stmt.query_row([key], |row| {
+        let raw = row.get_ref(0)?;
+        let value = match raw {
+            ValueRef::Integer(v) => Some(v.to_string()),
+            ValueRef::Real(v) if v.is_finite() => Some(v.to_string()),
+            ValueRef::Text(v) => std::str::from_utf8(v).ok().map(|s| s.to_string()),
+            _ => None,
+        };
+        Ok(value)
+    }).ok()?;
+    value
+}
+
+fn load_face_recog_type(db_path: &Path) -> String {
+    match load_option_value(db_path, "faceRecogType").as_deref() {
+        Some("delay") => "delay".to_string(),
+        _ => "operation".to_string(),
+    }
+}
+
+fn load_seconds_option(
+    db_path: &Path,
+    key: &str,
+    default_seconds: f64,
+    min_seconds: f64,
+    max_seconds: f64,
+) -> Duration {
+    let seconds = load_option_value(db_path, key)
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(default_seconds)
+        .clamp(min_seconds, max_seconds);
+    Duration::from_millis((seconds * 1000.0).round() as u64)
+}
+
+fn load_face_recog_delay(db_path: &Path) -> Duration {
+    load_seconds_option(db_path, "faceRecogDelay", 10.0, 0.1, 120.0)
+}
+
+fn load_retry_delay(db_path: &Path) -> Duration {
+    load_seconds_option(db_path, "retryDelay", 1.0, 1.0, 120.0)
+}
+
+fn load_not_face_delay(db_path: &Path) -> Duration {
+    load_seconds_option(db_path, "notFaceDelay", 3.0, 1.0, 120.0)
+}
+
 fn inference_backend_from_key(key: &str) -> InferenceBackend {
     match key {
         "opencl" => InferenceBackend {
@@ -719,12 +769,20 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let mut camera_index = configured_camera_index(&db_path);
     let mut camera_rotation = load_camera_rotation(&db_path);
     let mut unlock_brightness = load_unlock_brightness(&db_path);
+    let mut retry_delay = load_retry_delay(&db_path);
+    let mut not_face_delay = load_not_face_delay(&db_path);
+    let mut delayed_run_at: Option<Instant> = None;
+    let mut delay_session_armed = false;
+    let mut last_failed_at: Option<Instant> = None;
 
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
 
         if state.release_requested.swap(false, Ordering::SeqCst) {
             cam = None;
+            delayed_run_at = None;
+            delay_session_armed = false;
+            last_failed_at = None;
             log_service(&exe_dir, "INFO", "camera released");
             state.prepare_requested.store(false, Ordering::SeqCst);
             state.run_requested.store(false, Ordering::SeqCst);
@@ -745,7 +803,18 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             continue;
         }
 
+        let has_credential_client =
+            state.dll_creds_pipe.load(Ordering::SeqCst) != INVALID_HANDLE_VALUE.0 as isize;
+        if !has_credential_client && !state.recognition_active.load(Ordering::SeqCst) {
+            delayed_run_at = None;
+            delay_session_armed = false;
+        }
+
         if state.prepare_requested.swap(false, Ordering::SeqCst) {
+            let face_recog_type = load_face_recog_type(&db_path);
+            let face_recog_delay = load_face_recog_delay(&db_path);
+            retry_delay = load_retry_delay(&db_path);
+            not_face_delay = load_not_face_delay(&db_path);
             if records.is_empty() || last_reload.elapsed() > Duration::from_secs(5) {
                 records = load_face_records(&exe_dir, &db_path);
                 camera_index = configured_camera_index(&db_path);
@@ -761,11 +830,51 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 last_reload = Instant::now();
                 log_service(&exe_dir, "INFO", &format!("prepared unlock config for camera {}", camera_index));
             }
+            if face_recog_type == "delay" {
+                if !delay_session_armed {
+                    delayed_run_at = Some(Instant::now() + face_recog_delay);
+                    delay_session_armed = true;
+                    log_service(
+                        &exe_dir,
+                        "INFO",
+                        &format!(
+                            "delayed face recognition scheduled after {:.1}s",
+                            face_recog_delay.as_secs_f64()
+                        ),
+                    );
+                }
+            } else {
+                delayed_run_at = None;
+                delay_session_armed = false;
+            }
+        }
+
+        if let Some(deadline) = delayed_run_at {
+            if Instant::now() >= deadline && !state.recognition_active.load(Ordering::SeqCst) {
+                delayed_run_at = None;
+                state.release_requested.store(false, Ordering::SeqCst);
+                state.run_requested.store(true, Ordering::SeqCst);
+                log_service(&exe_dir, "INFO", "run requested by delayed recognition mode");
+            }
         }
 
         if !state.run_requested.swap(false, Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(30));
             continue;
+        }
+
+        if let Some(failed_at) = last_failed_at {
+            let elapsed = failed_at.elapsed();
+            if elapsed < retry_delay {
+                let remaining_ms = retry_delay.saturating_sub(elapsed).as_millis();
+                log_service(
+                    &exe_dir,
+                    "INFO",
+                    &format!("run ignored by retry delay, remaining {}ms", remaining_ms),
+                );
+                thread::sleep(Duration::from_millis(30));
+                continue;
+            }
         }
         state.recognition_active.store(true, Ordering::SeqCst);
 
@@ -775,6 +884,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             camera_index = configured_camera_index(&db_path);
             camera_rotation = load_camera_rotation(&db_path);
             unlock_brightness = load_unlock_brightness(&db_path);
+            retry_delay = load_retry_delay(&db_path);
+            not_face_delay = load_not_face_delay(&db_path);
             reload_models_if_inference_changed(
                 &resources,
                 &db_path,
@@ -822,13 +933,20 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             None
         };
 
-        // 识别循环（最多 60 帧 ≈ 5~10 秒）
+        // 识别循环：无脸时按 UI 配置超时；有人脸但不匹配时保留硬上限，避免持续占用摄像头。
         let mut matched = false;
-        for _ in 0..60 {
+        let hard_deadline = Instant::now() + Duration::from_secs(10);
+        let mut no_face_since: Option<Instant> = None;
+        while Instant::now() < hard_deadline {
             if state.should_exit.load(Ordering::SeqCst)
                 || state.release_requested.load(Ordering::SeqCst) { break; }
             let mut frame = Mat::default();
             if cap.read(&mut frame).is_err() || frame.empty() {
+                let since = no_face_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= not_face_delay {
+                    log_service(&exe_dir, "INFO", "no usable camera frame timeout reached");
+                    break;
+                }
                 thread::sleep(Duration::from_millis(30));
                 continue;
             }
@@ -836,8 +954,17 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
             let cam_feat = match detect_and_extract(&mut models, &frame) {
                 Some(f) => f,
-                None => { thread::sleep(Duration::from_millis(30)); continue; }
+                None => {
+                    let since = no_face_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= not_face_delay {
+                        log_service(&exe_dir, "INFO", "no face detected timeout reached");
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(30));
+                    continue;
+                }
             };
+            no_face_since = None;
             let cam_bytes = feature_to_bytes(&cam_feat);
 
             for rec in &records {
@@ -863,8 +990,10 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         }
 
         if matched {
+            last_failed_at = None;
             state.run_requested.store(false, Ordering::SeqCst);
         } else if !state.release_requested.load(Ordering::SeqCst) {
+            last_failed_at = Some(Instant::now());
             log_service(&exe_dir, "WARN", "face recognition finished without a match");
         }
         state.run_requested.store(false, Ordering::SeqCst);

@@ -9,6 +9,7 @@
 	import { useFile } from '../hook/useFile'
 	import { useUnlockLog } from '../hook/useUnlockLog';
 	import { ElMessage, ElMessageBox } from 'element-plus';
+	import { formatObjectString } from '../utils/function';
 
 	const logsType = ref('unlock');
 	const searchQuery = ref('');
@@ -239,7 +240,7 @@
 		try {
 			await reomve("block\\"+img_path);
 		} catch (err) {
-			error = error;
+			error = formatObjectString(err);
 		}
 
 		if(error != "" && !error.includes("系统找不到指定的文件")){

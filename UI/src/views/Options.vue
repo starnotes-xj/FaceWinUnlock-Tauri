@@ -6,7 +6,8 @@
 		Operation,
 		VideoCamera,
 		InfoFilled,
-		Refresh
+		Refresh,
+		Tools
 	} from '@element-plus/icons-vue'
 	import { useOptionsStore } from '../stores/options'
 	import { invoke } from '@tauri-apps/api/core'
@@ -211,7 +212,7 @@
 			if(errorArray.length > 0){
 				ElMessage.warning({
                     dangerouslyUseHTMLString: true,
-                    message: `${result.length} 个配置保存失败: <br />${result.join("<br />")}`
+                    message: `${errorArray.length} 个配置保存失败: <br />${errorArray.join("<br />")}`
                 })
 			}else{
 				ElMessage.success("保存成功");
@@ -362,7 +363,7 @@
 		if(config.livenessEnabled){
 			ElMessageBox.confirm(
 				'活体检测准确率低，<font color="red">误判极高，不建议开启</font><br />' +
-				'想用活体检测，推荐使用2.2版本<br />' +
+				'当前只影响录入页面的一致性验证，不参与锁屏解锁<br />' +
 				'是否继续开启活体检测？', 
 				'警告', 
 				{
@@ -524,7 +525,7 @@
 										<el-option value="intel_npu" label="Intel NPU（需要安装 OpenVINO 运行时）"/>
 									</el-select>
 									<p style="font-size: 12px; color: #909399; margin: 6px 0 0 0;">
-										更改后需重新录入人脸或重启识别服务生效。OpenCL/NPU 若加载失败会在录入时报错，请切回 CPU。
+										保存后录入和锁屏解锁都会使用该后端；服务会在下次识别前重载模型，OpenCL/NPU 加载失败时自动回退 CPU 并写入服务日志。
 									</p>
 								</el-form-item>
 							</el-form>
@@ -606,12 +607,12 @@
 							</div>
 						</el-collapse-item>
 					
-						<el-collapse-item title="活体检测" name="3">
+						<el-collapse-item title="录入一致性验证" name="3">
 							<!-- 活体检测开关 -->
 							<div class="option-row">
 								<div class="row-text">
-									<p class="label">启用活体检测</p>
-									<p class="sub">不推荐开启，准确率不高，想用活体检测，推荐使用2.2版本</p>
+									<p class="label">一致性验证启用活体检测</p>
+									<p class="sub">仅用于录入页面的人脸一致性验证，不参与锁屏解锁；准确率不高，不推荐开启</p>
 								</div>
 								<el-switch v-model="config.livenessEnabled" @change="livenessEnabledChange"/>
 							</div>
@@ -636,7 +637,7 @@
 							<div class="option-row">
 								<div class="row-text">
 									<p class="label">面容对齐方式</p>
-									<p class="sub">识别到面容后以何种方式对齐人脸</p>
+									<p class="sub">录入一致性验证时识别到面容后以何种方式对齐人脸</p>
 								</div>
 								<el-select v-model="config.faceAlignedType" style="width: 170px">
 									<el-option :value="'default'" :label="'默认对齐'"/>

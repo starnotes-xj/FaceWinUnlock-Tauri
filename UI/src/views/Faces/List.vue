@@ -40,6 +40,18 @@
         });
     };
 
+    const accountTypeLabel = (type) => {
+        if (type === 'online') return '联机';
+        if (type === 'domain') return '域账户';
+        return '本地';
+    };
+
+    const accountTypeTag = (type) => {
+        if (type === 'online') return 'primary';
+        if (type === 'domain') return 'success';
+        return 'info';
+    };
+
     // 编辑
     const handleEdit = (face) => {
         router.push({
@@ -109,8 +121,8 @@
 						<div class="face-info">
 							<div class="info-row main">
 								<span class="alias">{{ face.json_data.alias ? face.json_data.alias : '无别名' }}</span>
-								<el-tag size="small" :type="face.account_type === 'online' ? 'primary' : 'info'">
-									{{ face.account_type === 'online' ? '联机' : '本地' }}
+								<el-tag size="small" :type="accountTypeTag(face.account_type)">
+									{{ accountTypeLabel(face.account_type) }}
 								</el-tag>
 							</div>
 							<div class="info-row sub">
