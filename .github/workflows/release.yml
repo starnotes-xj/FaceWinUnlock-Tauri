@@ -74,37 +74,34 @@ jobs:
           "D:\OpenCV\build\x64\vc16\bin" >> $env:GITHUB_PATH
 
       # ---- LLVM (required by clang-sys / opencv crate build) ----
-      # windows-latest comes with VS 2022 (which includes Clang tools)
-      # and chocolatey LLVM — use whichever provides libclang.dll first
-      - name: Setup LLVM
+      # Same as local dev: install LLVM so libclang.dll is findable
+      - name: Install LLVM
         shell: pwsh
         run: |
-          $candidates = @(
-            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin",
-            "C:\Program Files\LLVM\bin"
-          )
-          $dll = $null
-          foreach ($dir in $candidates) {
-            $test = Join-Path $dir "libclang.dll"
-            if (Test-Path $test) {
-              Write-Host "Found: $test"
-              $dll = $test
-              break
+          # Fast path: clang already on PATH with libclang next to it
+          $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
+          if ($clang) {
+            $dir = Split-Path $clang.Source -Parent
+            if (Test-Path (Join-Path $dir "libclang.dll")) {
+              Write-Host "libclang.dll found next to clang.exe: $dir"
+              "LIBCLANG_PATH=$dir" >> $env:GITHUB_ENV
+              echo "$dir" >> $env:GITHUB_PATH
+              return
             }
-            Write-Host "Not in: $dir"
           }
-          if ($dll) {
-            $llvmBin = Split-Path $dll -Parent
+          # Install LLVM (matching local dev setup)
+          Write-Host "Installing LLVM..."
+          choco install llvm -y --no-progress --limit-output
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (Test-Path (Join-Path $llvmBin "libclang.dll")) {
+            Write-Host "LLVM installed: $llvmBin"
           } else {
-            Write-Host "libclang.dll not found on system, quick install via chocolatey..."
-            # Force reinstall to fix potentially broken package
-            choco install llvm --no-progress -y --force --allow-downgrade
-            $llvmBin = "C:\Program Files\LLVM\bin"
+            Write-Host "Forcing reinstall (package may be registered but files missing)..."
+            choco install llvm -y --no-progress --limit-output --force
             if (-not (Test-Path (Join-Path $llvmBin "libclang.dll"))) {
-              throw "libclang.dll still not found after install at $llvmBin"
+              throw "libclang.dll not found at $llvmBin after install + force"
             }
           }
-          Write-Host "LIBCLANG_PATH=$llvmBin"
           "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
           echo "$llvmBin" >> $env:GITHUB_PATH
 
