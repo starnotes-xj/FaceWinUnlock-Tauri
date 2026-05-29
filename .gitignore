@@ -36,9 +36,8 @@ UI/src-tauri/nsis/installer.nsi
 
 # 大文件资源（不入仓库，由脚本生成/下载）
 # - ONNX 模型：由 UI/resources/download_models.ps1 下载
-# - animation_frames.bin：由 UI/resources/capture_frames.js 生成
+# - animation_frames.bin：已提交仓库，由 UI/resources/capture_frames.js 重新生成
 UI/resources/*.onnx
-UI/resources/animation_frames.bin
 
 # 帧捕获调试产物
 UI/resources/debug_*.js
