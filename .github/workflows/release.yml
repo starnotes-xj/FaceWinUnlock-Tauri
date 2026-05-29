@@ -254,11 +254,6 @@ jobs:
         working-directory: UI
         run: npm ci
 
-      - name: Download ONNX models
-        shell: pwsh
-        working-directory: UI
-        run: ./resources/download_models.ps1
-
       - name: Build Tauri installer
         working-directory: UI
         run: npm run tauri build
