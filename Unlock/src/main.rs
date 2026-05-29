@@ -111,6 +111,21 @@ struct JsonData {
     domain: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InferenceBackend {
+    key: &'static str,
+    label: &'static str,
+    backend_id: i32,
+    target_id: i32,
+}
+
+const CPU_INFERENCE: InferenceBackend = InferenceBackend {
+    key: "cpu",
+    label: "CPU",
+    backend_id: 0,
+    target_id: 0,
+};
+
 // HANDLE wraps *mut c_void which is not Send; safe because it's just a numeric handle
 struct SendHandle(HANDLE);
 unsafe impl Send for SendHandle {}
@@ -390,16 +405,108 @@ struct Models {
     recognizer: Ptr<FaceRecognizerSF>,
 }
 
-fn load_models(resources: &Path) -> opencv::Result<Models> {
+fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<Models> {
     let detector = FaceDetectorYN::create(
         resources.join("face_detection_yunet_2023mar.onnx").to_str().unwrap_or(""),
-        "", Size::new(320, 320), 0.9, 0.3, 5000, 0, 0,
+        "",
+        Size::new(320, 320),
+        0.9,
+        0.3,
+        5000,
+        inference.backend_id,
+        inference.target_id,
     )?;
     let recognizer = FaceRecognizerSF::create(
         resources.join("face_recognition_sface_2021dec.onnx").to_str().unwrap_or(""),
-        "", 0, 0,
+        "",
+        inference.backend_id,
+        inference.target_id,
     )?;
     Ok(Models { detector, recognizer })
+}
+
+fn load_models_with_fallback(
+    resources: &Path,
+    inference: InferenceBackend,
+    exe_dir: &Path,
+) -> Option<(Models, InferenceBackend)> {
+    match load_models(resources, inference) {
+        Ok(models) => {
+            log_service(
+                exe_dir,
+                "INFO",
+                &format!(
+                    "opencv models loaded with {} backend ({},{})",
+                    inference.label, inference.backend_id, inference.target_id
+                ),
+            );
+            Some((models, inference))
+        }
+        Err(e) if inference != CPU_INFERENCE => {
+            log_service(
+                exe_dir,
+                "WARN",
+                &format!(
+                    "failed to load opencv models with {} backend: {:?}; falling back to CPU",
+                    inference.label, e
+                ),
+            );
+            match load_models(resources, CPU_INFERENCE) {
+                Ok(models) => Some((models, CPU_INFERENCE)),
+                Err(cpu_err) => {
+                    log_service(
+                        exe_dir,
+                        "ERROR",
+                        &format!("failed to load opencv models with CPU backend: {:?}", cpu_err),
+                    );
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            log_service(
+                exe_dir,
+                "ERROR",
+                &format!("failed to load opencv models with CPU backend: {:?}", e),
+            );
+            None
+        }
+    }
+}
+
+fn reload_models_if_inference_changed(
+    resources: &Path,
+    db_path: &Path,
+    exe_dir: &Path,
+    current: &mut InferenceBackend,
+    models: &mut Models,
+) {
+    let next = load_inference_backend(db_path);
+    if next == *current {
+        return;
+    }
+
+    match load_models_with_fallback(resources, next, exe_dir) {
+        Some((new_models, active)) => {
+            *models = new_models;
+            *current = next;
+            log_service(
+                exe_dir,
+                "INFO",
+                &format!(
+                    "inference backend changed to {} (active: {})",
+                    next.label, active.label
+                ),
+            );
+        }
+        None => {
+            log_service(
+                exe_dir,
+                "WARN",
+                "inference backend change ignored because model reload failed",
+            );
+        }
+    }
 }
 
 /// 检测+提取特征，返回 None 表示无人脸或失败
@@ -467,6 +574,40 @@ fn load_camera_rotation(db_path: &Path) -> i32 {
         }
     }
     0
+}
+
+fn inference_backend_from_key(key: &str) -> InferenceBackend {
+    match key {
+        "opencl" => InferenceBackend {
+            key: "opencl",
+            label: "OpenCL",
+            backend_id: 3,
+            target_id: 1,
+        },
+        "opencl_fp16" => InferenceBackend {
+            key: "opencl_fp16",
+            label: "OpenCL FP16",
+            backend_id: 3,
+            target_id: 2,
+        },
+        "intel_npu" => InferenceBackend {
+            key: "intel_npu",
+            label: "Intel NPU",
+            backend_id: 2,
+            target_id: 9,
+        },
+        _ => CPU_INFERENCE,
+    }
+}
+
+fn load_inference_backend(db_path: &Path) -> InferenceBackend {
+    let conn = match Connection::open(db_path) { Ok(c) => c, Err(_) => return CPU_INFERENCE };
+    if let Ok(mut stmt) = conn.prepare("SELECT val FROM options WHERE key = 'inferenceBackend'") {
+        if let Ok(val) = stmt.query_row([], |row| row.get::<_, String>(0)) {
+            return inference_backend_from_key(val.trim());
+        }
+    }
+    CPU_INFERENCE
 }
 
 fn load_camera_index(db_path: &Path) -> Option<i32> {
@@ -567,7 +708,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let resources = exe_dir.join("resources");
     let db_path   = exe_dir.join("database.db");
 
-    let mut models = match load_models(&resources) { Ok(m) => m, Err(_) => return };
+    let mut requested_inference = load_inference_backend(&db_path);
+    let (mut models, _) = match load_models_with_fallback(&resources, requested_inference, &exe_dir) {
+        Some(loaded) => loaded,
+        None => return,
+    };
     let mut cam: Option<VideoCapture> = None;
     let mut records: Vec<FaceRecord> = vec![];
     let mut last_reload = Instant::now() - Duration::from_secs(60);
@@ -606,6 +751,13 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 camera_index = configured_camera_index(&db_path);
                 camera_rotation = load_camera_rotation(&db_path);
                 unlock_brightness = load_unlock_brightness(&db_path);
+                reload_models_if_inference_changed(
+                    &resources,
+                    &db_path,
+                    &exe_dir,
+                    &mut requested_inference,
+                    &mut models,
+                );
                 last_reload = Instant::now();
                 log_service(&exe_dir, "INFO", &format!("prepared unlock config for camera {}", camera_index));
             }
@@ -623,6 +775,13 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             camera_index = configured_camera_index(&db_path);
             camera_rotation = load_camera_rotation(&db_path);
             unlock_brightness = load_unlock_brightness(&db_path);
+            reload_models_if_inference_changed(
+                &resources,
+                &db_path,
+                &exe_dir,
+                &mut requested_inference,
+                &mut models,
+            );
             last_reload = Instant::now();
         }
         if records.is_empty() {
@@ -763,6 +922,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
     let mut records: Vec<FaceRecord> = vec![];
     let mut last_record_reload = Instant::now() - Duration::from_secs(60);
     let mut camera_rotation = load_camera_rotation(&db_path);
+    let mut requested_inference = load_inference_backend(&db_path);
 
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -774,6 +934,17 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             auto_lock_enabled = enabled;
             auto_lock_timeout = timeout;
             camera_rotation = load_camera_rotation(&db_path);
+            if let Some(model_set) = models.as_mut() {
+                reload_models_if_inference_changed(
+                    &resources,
+                    &db_path,
+                    &exe_dir,
+                    &mut requested_inference,
+                    model_set,
+                );
+            } else {
+                requested_inference = load_inference_backend(&db_path);
+            }
             last_config_check = Instant::now();
         }
 
@@ -792,7 +963,8 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
 
         // 加载模型（仅首次）
         if models.is_none() {
-            models = load_models(&resources).ok();
+            models = load_models_with_fallback(&resources, requested_inference, &exe_dir)
+                .map(|(loaded, _)| loaded);
         }
         let models = match models.as_mut() { Some(m) => m, None => continue };
 
