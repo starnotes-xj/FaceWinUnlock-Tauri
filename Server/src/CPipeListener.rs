@@ -151,12 +151,14 @@ pub struct CPipeListener {
     creds_pipe_raw: Arc<AtomicIsize>,
     /// 登录/解锁场景（非 CREDUI），用于 stop_and_join 中决定是否通知 Unlock EXE 释放资源 (#117)
     is_primary_scenario: bool,
+    /// 是否安装了鼠标/键盘 Hook。所有已启用场景都可用 Hook 触发 run，CREDUI 额外保留自动 run 兜底。
+    use_input_hooks: bool,
 }
 
 impl CPipeListener {
     /// 启动管道监听：
     ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，先发送 "prepare"；
-    ///     主登录/解锁场景中由 DLL 低级输入 Hook 捕获鼠标/键盘事件后发送 "run"
+    ///     所有已启用场景都可由 DLL 低级输入 Hook 捕获鼠标/键盘事件后发送 "run"
     ///   - Creds 线程：阻塞等待凭据推送，收到后设置动画为 Success
     pub fn start(
         events: ICredentialProviderEvents,
@@ -169,7 +171,8 @@ impl CPipeListener {
         let stop_flag      = Arc::new(AtomicBool::new(false));
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
-        let use_input_hooks = is_primary_scenario;
+        let use_input_hooks = true;
+        let auto_run_on_connect = !is_primary_scenario;
         if use_input_hooks {
             install_input_hooks();
         }
@@ -223,7 +226,7 @@ impl CPipeListener {
                     let arm_after = Instant::now() + Duration::from_millis(250);
                     let mut last_run_at = Instant::now() - Duration::from_secs(5);
                     let mut last_prepare_at = Instant::now();
-                    let mut non_hook_run_sent = false;
+                    let mut auto_run_sent = false;
                     if use_input_hooks {
                         INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
                         INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
@@ -239,16 +242,19 @@ impl CPipeListener {
                             INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
                             INPUT_HOOKS_ARMED.store(true, Ordering::SeqCst);
                             hooks_armed = true;
-                            info!("锁屏输入 Hook 已就绪，等待鼠标/键盘触发识别");
+                            if auto_run_on_connect {
+                                info!("CREDUI/UAC 输入 Hook 已就绪，等待鼠标/键盘触发识别");
+                            } else {
+                                info!("锁屏输入 Hook 已就绪，等待鼠标/键盘触发识别");
+                            }
                         }
 
+                        let input_requested = use_input_hooks
+                            && INPUT_RUN_REQUESTED.swap(false, Ordering::SeqCst);
+                        let auto_requested = auto_run_on_connect && !auto_run_sent;
                         let should_send_run = hooks_armed
                             && last_run_at.elapsed() >= Duration::from_millis(500)
-                            && if use_input_hooks {
-                                INPUT_RUN_REQUESTED.swap(false, Ordering::SeqCst)
-                            } else {
-                                !non_hook_run_sent
-                            };
+                            && (input_requested || auto_requested);
 
                         if should_send_run {
                             if let Err(e) = pipe_write_raw(pipe, b"run") {
@@ -258,10 +264,16 @@ impl CPipeListener {
                             }
                             last_run_at = Instant::now();
                             set_anim_state(&anim_slot, AnimState::Scanning);
-                            if use_input_hooks {
-                                info!("检测到锁屏鼠标/键盘输入，已发送 run");
+                            if auto_run_on_connect {
+                                auto_run_sent = true;
+                            }
+                            if input_requested {
+                                if auto_run_on_connect {
+                                    info!("检测到 CREDUI/UAC 鼠标/键盘输入，已发送 run");
+                                } else {
+                                    info!("检测到锁屏鼠标/键盘输入，已发送 run");
+                                }
                             } else {
-                                non_hook_run_sent = true;
                                 info!("CREDUI/UAC 场景已自动发送 run");
                             }
                         }
@@ -382,13 +394,14 @@ impl CPipeListener {
             creds_thread:  Some(creds_thread),
             creds_pipe_raw,
             is_primary_scenario,
+            use_input_hooks,
         }))
     }
 
     /// 停止两个后台线程并等待其退出
     pub fn stop_and_join(&mut self) {
         self.stop_flag.store(true, Ordering::SeqCst);
-        if self.is_primary_scenario {
+        if self.use_input_hooks {
             uninstall_input_hooks();
         }
 
@@ -416,7 +429,7 @@ impl CPipeListener {
 
 impl Drop for CPipeListener {
     fn drop(&mut self) {
-        if self.is_primary_scenario {
+        if self.use_input_hooks {
             uninstall_input_hooks();
         }
     }
