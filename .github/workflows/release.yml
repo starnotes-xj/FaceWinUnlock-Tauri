@@ -290,5 +290,5 @@ jobs:
           files: |
             target/release/FaceWinUnlock_Tauri.dll
             target/release/FaceWinUnlock-Server.exe
-            UI/src-tauri/target/release/bundle/nsis/*.exe
-            UI/src-tauri/target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
