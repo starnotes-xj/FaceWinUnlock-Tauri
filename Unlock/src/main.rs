@@ -847,8 +847,9 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let mut delayed_run_at: Option<Instant> = None;
     let mut delay_session_armed = false;
     let mut last_failed_at: Option<Instant> = None;
+    let mut last_model_attempt = Instant::now() - Duration::from_secs(5); // 首次立即尝试
 
-    loop {
+    'main: loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
 
         if state.release_requested.swap(false, Ordering::SeqCst) {
@@ -931,6 +932,19 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             }
         }
 
+        // 后台尝试加载模型（每 1 秒一次），不阻塞管道响应。
+        // 启动时 GPU 可能未就绪，周期性重试直到成功。
+        // 加载成功后 `models.is_some()` 跳过此块，零开销。
+        if models.is_none() && last_model_attempt.elapsed() >= Duration::from_secs(1) {
+            last_model_attempt = Instant::now();
+            if let Some(loaded) =
+                load_models_with_fallback(&resources, requested_inference, &exe_dir)
+            {
+                models = Some(loaded);
+                log_service(&exe_dir, "INFO", "models loaded in background");
+            }
+        }
+
         if !state.run_requested.swap(false, Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(30));
             continue;
@@ -974,21 +988,32 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             continue;
         }
 
-        // 延迟按需加载模型：首次收到 "run" 时系统已完全就绪（用户已到锁屏界面），
-        // GPU 驱动/DirectML 等依赖早已初始化完毕，一次加载即成功。
-        // 放在 records 检查之后，因为无人脸记录时不需要加载模型。
+        // 收到 "run" 但模型尚未加载（后台加载可能还未成功）。
+        // 不放弃本次 run —— 内联重试 500ms × 20 次（10 秒），覆盖 GPU 初始化延迟。
+        // 与后台加载协同：后台加载成功后此处直接跳过；若后台尚未成功则在此快速重试。
         if models.is_none() {
-            match load_models_with_fallback(&resources, requested_inference, &exe_dir) {
-                Some(loaded) => {
-                    models = Some(loaded);
-                    log_service(&exe_dir, "INFO", "models loaded on first run (deferred)");
+            'load_models: {
+                for i in 0..20 {
+                    match load_models_with_fallback(&resources, requested_inference, &exe_dir) {
+                        Some(loaded) => {
+                            models = Some(loaded);
+                            log_service(&exe_dir, "INFO", &format!("models loaded on run (attempt {})", i + 1));
+                            break 'load_models;
+                        }
+                        None => {
+                            log_service(
+                                &exe_dir, "WARN",
+                                &format!("model loading, retry {}/20", i + 1),
+                            );
+                            thread::sleep(Duration::from_millis(500));
+                        }
+                    }
                 }
-                None => {
-                    log_service(&exe_dir, "WARN", "model not ready, retrying on next run");
-                    state.run_requested.store(false, Ordering::SeqCst);
-                    state.recognition_active.store(false, Ordering::SeqCst);
-                    continue;
-                }
+                // 10 秒内仍未就绪——放弃本次 run，下次 run 会再试
+                log_service(&exe_dir, "WARN", "model not ready after 20 retries, deferring run");
+                state.run_requested.store(false, Ordering::SeqCst);
+                state.recognition_active.store(false, Ordering::SeqCst);
+                continue 'main;
             }
         }
 
