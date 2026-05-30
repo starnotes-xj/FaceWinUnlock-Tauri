@@ -832,9 +832,42 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let db_path   = exe_dir.join("database.db");
 
     let mut requested_inference = load_inference_backend(&db_path);
-    let (mut models, _) = match load_models_with_fallback(&resources, requested_inference, &exe_dir) {
-        Some(loaded) => loaded,
-        None => return,
+    // 重试模型加载最多 10 次，指数退避（1s→512s 上限）。
+    // 冷启动时 OpenCV 依赖可能尚未就绪（GPU 驱动加载、磁盘 I/O 繁忙等），
+    // 直接退出会导致 Unlock.exe 静默崩溃，计划任务亦不知情。
+    // 配合计划任务 TimeTrigger 周期性检查，重试期间即使全部失败也会在下一个 5 分钟周期重启。
+    let (mut models, _) = {
+        let mut retries = 0u32;
+        let mut loaded = None;
+        while retries < 10 {
+            match load_models_with_fallback(&resources, requested_inference, &exe_dir) {
+                Some(m) => {
+                    loaded = Some(m);
+                    break;
+                }
+                None => {
+                    retries += 1;
+                    if retries >= 10 {
+                        log_service(&exe_dir, "ERROR", "failed to load opencv models after 10 retries, exiting");
+                        break;
+                    }
+                    let delay_secs = (1u64 << retries.min(9)).min(512);
+                    log_service(
+                        &exe_dir,
+                        "WARN",
+                        &format!(
+                            "model loading failed, retry {}/10 in {}s",
+                            retries, delay_secs
+                        ),
+                    );
+                    std::thread::sleep(Duration::from_secs(delay_secs));
+                }
+            }
+        }
+        match loaded {
+            Some(m) => m,
+            None => return,
+        }
     };
     let mut cam: Option<VideoCapture> = None;
     let mut records: Vec<FaceRecord> = vec![];

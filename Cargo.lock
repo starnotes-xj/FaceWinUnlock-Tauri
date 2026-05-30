@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "facewinunlock-tauri"
-version = "0.3.5"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "encoding_rs",
@@ -5237,7 +5237,7 @@ checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
 
 [[package]]
 name = "unlock"
-version = "0.3.5"
+version = "0.4.1"
 dependencies = [
  "opencv",
  "rusqlite",
@@ -6210,7 +6210,7 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winlogon"
-version = "0.3.5"
+version = "0.4.1"
 dependencies = [
  "log",
  "simplelog",

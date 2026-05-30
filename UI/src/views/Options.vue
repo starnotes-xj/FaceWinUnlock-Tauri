@@ -340,7 +340,7 @@
 		invoke("disable_scheduled_task", {taskName: 'FaceWinUnlockServer'}).catch(()=>null).then(()=>{
 			if(expectedAutoFaceRecogOnStart){
 				return invoke("add_scheduled_task", {
-					path: 'FaceWinUnlock-Server.exe', taskName: 'FaceWinUnlockServer', isServer: true, silent: false, runOnSystemStart: true, runImmediately: false
+					path: 'FaceWinUnlock-Server.exe', taskName: 'FaceWinUnlockServer', isServer: true, silent: false, runOnSystemStart: true, runImmediately: true
 				})
 			}else{
 				return invoke("add_scheduled_task", {
