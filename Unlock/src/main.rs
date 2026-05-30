@@ -832,15 +832,20 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let db_path   = exe_dir.join("database.db");
 
     let mut requested_inference = load_inference_backend(&db_path);
-    // 快速重试模型加载（3次，间隔 3s→5s→10s，总计 18s）。
-    // 冷启动时 OpenCV 依赖短暂不可用属正常现象，但若 3 次均失败则表明持久性故障，
-    // 继续等待无意义——直接退出，由计划任务 TimeTrigger（每 1 分钟）重新拉起进程。
+    // 持续重试模型加载（每3秒一次，最多5分钟=100次）。
+    // 安装后模型文件始终存在，冷启动时加载失败必然是 GPU 驱动/DirectML 等系统组件
+    // 尚未初始化完毕的短暂问题。不应轻易放弃进程——持续重试直到依赖就绪。
+    // 5分钟超时仅作为极端兜底（如文件被手动损坏），正常情况下首次或前几次即可成功。
     let (mut models, _) = {
-        const RETRY_DELAYS: &[u64] = &[3, 5, 10];
+        const RETRY_INTERVAL_SECS: u64 = 3;
+        const MAX_RETRIES: u32 = 100; // 5 分钟
         let mut loaded = None;
-        for (i, &delay) in RETRY_DELAYS.iter().enumerate() {
+        for attempt in 0..MAX_RETRIES {
             match load_models_with_fallback(&resources, requested_inference, &exe_dir) {
                 Some(m) => {
+                    if attempt > 0 {
+                        log_service(&exe_dir, "INFO", &format!("models loaded successfully after {} retries", attempt));
+                    }
                     loaded = Some(m);
                     break;
                 }
@@ -849,20 +854,18 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                         &exe_dir,
                         "WARN",
                         &format!(
-                            "model loading failed, retry {}/{} in {}s",
-                            i + 1,
-                            RETRY_DELAYS.len(),
-                            delay
+                            "model loading failed (attempt {}/{}), retrying in {}s",
+                            attempt + 1, MAX_RETRIES, RETRY_INTERVAL_SECS
                         ),
                     );
-                    std::thread::sleep(Duration::from_secs(delay));
+                    std::thread::sleep(Duration::from_secs(RETRY_INTERVAL_SECS));
                 }
             }
         }
         match loaded {
             Some(m) => m,
             None => {
-                log_service(&exe_dir, "ERROR", "failed to load opencv models after 3 retries, exiting (will be restarted by scheduled task)");
+                log_service(&exe_dir, "ERROR", "failed to load models after 5 minutes, exiting");
                 return;
             }
         }
