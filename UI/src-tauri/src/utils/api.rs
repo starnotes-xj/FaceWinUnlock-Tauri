@@ -286,12 +286,12 @@ pub fn add_scheduled_task(
     // 导致 Unlock EXE 启动失败（OpenCV 模型加载、摄像头驱动等依赖未就绪）。
     // LogonTrigger 作为兜底：如果 BootTrigger 因故未触发，用户登录后仍可启动后台服务，
     // 配合 SessionUnlock 触发器保证后续锁屏解锁可用。
-    // TimeTrigger 每5分钟周期性检查，在 Unlock.exe 静默崩溃后自动重启。
+    // TimeTrigger 每1分钟周期性检查，在 Unlock.exe 静默崩溃后快速自动重启。
     // 配合 MultipleInstancesPolicy:IgnoreNew，已有实例运行时不会重复创建。
     let trigger_xml = if run_on_system_start {
-        "<BootTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></BootTrigger>\n    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT5M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
+        "<BootTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></BootTrigger>\n    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT1M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
     } else {
-        "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT5M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
+        "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT1M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
     };
 
     let principal_xml = if use_system {

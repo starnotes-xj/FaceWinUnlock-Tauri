@@ -832,41 +832,39 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let db_path   = exe_dir.join("database.db");
 
     let mut requested_inference = load_inference_backend(&db_path);
-    // 重试模型加载最多 10 次，指数退避（1s→512s 上限）。
-    // 冷启动时 OpenCV 依赖可能尚未就绪（GPU 驱动加载、磁盘 I/O 繁忙等），
-    // 直接退出会导致 Unlock.exe 静默崩溃，计划任务亦不知情。
-    // 配合计划任务 TimeTrigger 周期性检查，重试期间即使全部失败也会在下一个 5 分钟周期重启。
+    // 快速重试模型加载（3次，间隔 3s→5s→10s，总计 18s）。
+    // 冷启动时 OpenCV 依赖短暂不可用属正常现象，但若 3 次均失败则表明持久性故障，
+    // 继续等待无意义——直接退出，由计划任务 TimeTrigger（每 1 分钟）重新拉起进程。
     let (mut models, _) = {
-        let mut retries = 0u32;
+        const RETRY_DELAYS: &[u64] = &[3, 5, 10];
         let mut loaded = None;
-        while retries < 10 {
+        for (i, &delay) in RETRY_DELAYS.iter().enumerate() {
             match load_models_with_fallback(&resources, requested_inference, &exe_dir) {
                 Some(m) => {
                     loaded = Some(m);
                     break;
                 }
                 None => {
-                    retries += 1;
-                    if retries >= 10 {
-                        log_service(&exe_dir, "ERROR", "failed to load opencv models after 10 retries, exiting");
-                        break;
-                    }
-                    let delay_secs = (1u64 << retries.min(9)).min(512);
                     log_service(
                         &exe_dir,
                         "WARN",
                         &format!(
-                            "model loading failed, retry {}/10 in {}s",
-                            retries, delay_secs
+                            "model loading failed, retry {}/{} in {}s",
+                            i + 1,
+                            RETRY_DELAYS.len(),
+                            delay
                         ),
                     );
-                    std::thread::sleep(Duration::from_secs(delay_secs));
+                    std::thread::sleep(Duration::from_secs(delay));
                 }
             }
         }
         match loaded {
             Some(m) => m,
-            None => return,
+            None => {
+                log_service(&exe_dir, "ERROR", "failed to load opencv models after 3 retries, exiting (will be restarted by scheduled task)");
+                return;
+            }
         }
     };
     let mut cam: Option<VideoCapture> = None;
