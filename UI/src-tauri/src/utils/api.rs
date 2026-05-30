@@ -289,7 +289,7 @@ pub fn add_scheduled_task(
     // TimeTrigger 每1分钟周期性检查，在 Unlock.exe 静默崩溃后快速自动重启。
     // 配合 MultipleInstancesPolicy:IgnoreNew，已有实例运行时不会重复创建。
     let trigger_xml = if run_on_system_start {
-        "<BootTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></BootTrigger>\n    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT1M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
+        "<BootTrigger><Enabled>true</Enabled></BootTrigger>\n    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT1M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
     } else {
         "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT1M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
     };
