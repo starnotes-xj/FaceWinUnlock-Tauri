@@ -832,44 +832,10 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let db_path   = exe_dir.join("database.db");
 
     let mut requested_inference = load_inference_backend(&db_path);
-    // 持续重试模型加载（每3秒一次，最多5分钟=100次）。
-    // 安装后模型文件始终存在，冷启动时加载失败必然是 GPU 驱动/DirectML 等系统组件
-    // 尚未初始化完毕的短暂问题。不应轻易放弃进程——持续重试直到依赖就绪。
-    // 5分钟超时仅作为极端兜底（如文件被手动损坏），正常情况下首次或前几次即可成功。
-    let (mut models, _) = {
-        const RETRY_INTERVAL_SECS: u64 = 3;
-        const MAX_RETRIES: u32 = 100; // 5 分钟
-        let mut loaded = None;
-        for attempt in 0..MAX_RETRIES {
-            match load_models_with_fallback(&resources, requested_inference, &exe_dir) {
-                Some(m) => {
-                    if attempt > 0 {
-                        log_service(&exe_dir, "INFO", &format!("models loaded successfully after {} retries", attempt));
-                    }
-                    loaded = Some(m);
-                    break;
-                }
-                None => {
-                    log_service(
-                        &exe_dir,
-                        "WARN",
-                        &format!(
-                            "model loading failed (attempt {}/{}), retrying in {}s",
-                            attempt + 1, MAX_RETRIES, RETRY_INTERVAL_SECS
-                        ),
-                    );
-                    std::thread::sleep(Duration::from_secs(RETRY_INTERVAL_SECS));
-                }
-            }
-        }
-        match loaded {
-            Some(m) => m,
-            None => {
-                log_service(&exe_dir, "ERROR", "failed to load models after 5 minutes, exiting");
-                return;
-            }
-        }
-    };
+    // 延迟按需加载模型，启动时仅创建管道服务器。
+    // DLL 可立即连接并发送 prepare/心跳，模型在首次 "run" 时加载——
+    // 此时用户已在锁屏界面，GPU/DirectML 等系统组件早已完全初始化，一次加载即成功。
+    let mut models: Option<(Models, InferenceBackend)> = None;
     let mut cam: Option<VideoCapture> = None;
     let mut records: Vec<FaceRecord> = vec![];
     let mut last_reload = Instant::now() - Duration::from_secs(60);
@@ -927,13 +893,13 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 camera_index = configured_camera_index(&db_path);
                 camera_rotation = load_camera_rotation(&db_path);
                 unlock_brightness = load_unlock_brightness(&db_path);
-                reload_models_if_inference_changed(
-                    &resources,
-                    &db_path,
-                    &exe_dir,
-                    &mut requested_inference,
-                    &mut models,
-                );
+                if let Some((ref mut m, ref mut inf)) = models.as_mut() {
+                    reload_models_if_inference_changed(
+                        &resources, &db_path, &exe_dir, inf, m,
+                    );
+                } else {
+                    requested_inference = load_inference_backend(&db_path);
+                }
                 last_reload = Instant::now();
                 log_service(&exe_dir, "INFO", &format!("prepared unlock config for camera {}", camera_index));
             }
@@ -993,13 +959,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             unlock_brightness = load_unlock_brightness(&db_path);
             retry_delay = load_retry_delay(&db_path);
             not_face_delay = load_not_face_delay(&db_path);
-            reload_models_if_inference_changed(
-                &resources,
-                &db_path,
-                &exe_dir,
-                &mut requested_inference,
-                &mut models,
-            );
+            if let Some((ref mut m, ref mut inf)) = models.as_mut() {
+                reload_models_if_inference_changed(
+                    &resources, &db_path, &exe_dir, inf, m,
+                );
+            }
             last_reload = Instant::now();
         }
         if records.is_empty() {
@@ -1008,6 +972,24 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             state.recognition_active.store(false, Ordering::SeqCst);
             cam = None;
             continue;
+        }
+
+        // 延迟按需加载模型：首次收到 "run" 时系统已完全就绪（用户已到锁屏界面），
+        // GPU 驱动/DirectML 等依赖早已初始化完毕，一次加载即成功。
+        // 放在 records 检查之后，因为无人脸记录时不需要加载模型。
+        if models.is_none() {
+            match load_models_with_fallback(&resources, requested_inference, &exe_dir) {
+                Some(loaded) => {
+                    models = Some(loaded);
+                    log_service(&exe_dir, "INFO", "models loaded on first run (deferred)");
+                }
+                None => {
+                    log_service(&exe_dir, "WARN", "model not ready, retrying on next run");
+                    state.run_requested.store(false, Ordering::SeqCst);
+                    state.recognition_active.store(false, Ordering::SeqCst);
+                    continue;
+                }
+            }
         }
 
         // 打开首选项中保存的摄像头索引，避免每次解锁都扫描 0-3 号设备。
@@ -1072,7 +1054,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                     }
                     let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
 
-                    let cam_feat = match detect_and_extract(&mut models, &frame) {
+                    let (ref mut m, _) = models.as_mut().expect("models loaded before run");
+                    let cam_feat = match detect_and_extract(m, &frame) {
                         Some(f) => f,
                         None => {
                             let since = no_face_since.get_or_insert_with(Instant::now);
