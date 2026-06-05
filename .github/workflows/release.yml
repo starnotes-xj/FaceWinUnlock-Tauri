@@ -69,9 +69,11 @@ jobs:
           # 目录页是 JS 动态渲染的空壳（HTML 里没有文件名），真实文件清单在 filetree.json。
           $tree = (Invoke-WebRequest -Uri "https://storage.openvinotoolkit.org/filetree.json" -UseBasicParsing).Content
           $pattern = "w_openvino_toolkit_windows_" + [regex]::Escape($env:OPENVINO_VERSION) + "[^`"]*_x86_64\.zip"
-          $m = [regex]::Match($tree, $pattern)
-          if (-not $m.Success) { throw "Could not find OpenVINO zip for $env:OPENVINO_VERSION in filetree.json" }
-          $zipName = $m.Value
+          # 同一版本在 filetree.json 里还含 dev/nightly 预览包（它们位于不同路径，/<ver>/windows/ 下
+          # 并不存在），必须排除、只取正式发布包，确保与 $base 路径一致、URL 可下载。
+          $zipName = [regex]::Matches($tree, $pattern) | ForEach-Object { $_.Value } |
+            Where-Object { $_ -notmatch 'dev|nightly|rc|pre|beta' } | Sort-Object -Unique | Select-Object -First 1
+          if (-not $zipName) { throw "Could not find OpenVINO release zip for $env:OPENVINO_VERSION in filetree.json" }
           $url = $base + $zipName
           $zip = "$env:RUNNER_TEMP\openvino.zip"
           Write-Host "Downloading $url ..."
