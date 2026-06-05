@@ -89,7 +89,7 @@ struct State {
 
 impl State {
     fn new(exe_dir: PathBuf) -> Arc<Self> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
         Arc::new(Self {
             exe_dir,
             should_exit:     AtomicBool::new(false),
@@ -443,11 +443,12 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
             }
         }
     } else {
-        // DLL 客户端：替换旧句柄，等待写入凭据
-        let old = state.dll_creds_pipe.swap(pipe.0 as isize, Ordering::SeqCst);
-        if old != INVALID_HANDLE_VALUE.0 as isize {
-            close_handle(HANDLE(old as *mut _));
-        }
+        // DLL 客户端：登记为当前凭据连接，等待写入凭据。
+        // 注意：不在此关闭被替换的旧句柄——每个连接由各自的处理线程在退出时关闭
+        // 自己的 pipe（被替换者经下方 `dll_creds_pipe != pipe` 检测到后 break，并在
+        // 函数末尾 close）。否则并发多客户端时同一句柄会被重复关闭，甚至在句柄值被
+        // OS 重用后误关无关对象。
+        state.dll_creds_pipe.store(pipe.0 as isize, Ordering::SeqCst);
         log_service(&state.exe_dir, "INFO", "credential client connected");
 
         loop {
@@ -1223,7 +1224,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                             log_service(&exe_dir, "INFO", &format!("face matched for {}", rec.user_name));
                             matched_face_id = Some(rec.id);
                             // 更新活跃时间：人脸识别成功说明用户在
-                            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+                            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
                             state.last_user_active.store(now, Ordering::SeqCst);
                             matched = true;
                             break;
@@ -1239,8 +1240,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             no_face_retries += 1;
             if no_face_retries < MAX_NO_FACE_RETRIES {
                 log_service(&exe_dir, "INFO", &format!("no face in round {}, retrying ({}/{})", no_face_retries, no_face_retries + 1, MAX_NO_FACE_RETRIES));
-                // 释放当前摄像头，重新打开获取新数据流
-                cam = None;
+                // 释放当前摄像头后重开，获取新数据流（take() 取出旧值并 drop，显式释放）
+                drop(cam.take());
                 if let Some((c, backend_name)) = open_configured_camera(camera_index) {
                     cam = Some(c);
                     log_service(&exe_dir, "INFO", &format!("camera reopened for retry via {}", backend_name));
@@ -1353,7 +1354,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         let idle_ms = get_idle_millis();
         if idle_ms < (auto_lock_timeout * 1000) as u32 {
             // 用户有活动，更新最后活跃时间
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
             state.last_user_active.store(now, Ordering::SeqCst);
             continue;
         }
@@ -1414,7 +1415,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
 
         if authorized {
             // 授权用户在场，更新活跃时间，继续监控
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
             state.last_user_active.store(now, Ordering::SeqCst);
         } else {
             // 无人或非授权人员 → 锁屏
@@ -1497,7 +1498,16 @@ fn run_service_supervisor(exe_dir: PathBuf) {
         }
     };
 
+    // 重启退避：worker 若存活 >= STABLE_RUN 视为已稳定，崩溃后用最小间隔快速拉起；
+    // 若开机早期/配置错误导致"启动即崩"，则指数退避至上限，避免疯狂重启刷爆日志、
+    // 空耗 CPU、磨损磁盘（本次 Instant 下溢曾在 30s 内崩溃约 120 次、日志暴涨 4 倍）。
+    const MIN_BACKOFF: Duration = Duration::from_millis(250);
+    const MAX_BACKOFF: Duration = Duration::from_secs(10);
+    const STABLE_RUN: Duration = Duration::from_secs(30);
+    let mut backoff = MIN_BACKOFF;
+
     loop {
+        let started = Instant::now();
         match ProcessCommand::new(&exe).arg(WORKER_ARG).spawn() {
             Ok(mut child) => match child.wait() {
                 Ok(status) if status.success() => {
@@ -1505,29 +1515,27 @@ fn run_service_supervisor(exe_dir: PathBuf) {
                     break;
                 }
                 Ok(status) => {
-                    log_service(
-                        &exe_dir,
-                        "WARN",
-                        &format!("service worker exited with {status}; restarting immediately"),
-                    );
+                    log_service(&exe_dir, "WARN", &format!("service worker exited with {status}"));
                 }
                 Err(e) => {
-                    log_service(
-                        &exe_dir,
-                        "WARN",
-                        &format!("failed waiting for service worker: {e}; restarting immediately"),
-                    );
+                    log_service(&exe_dir, "WARN", &format!("failed waiting for service worker: {e}"));
                 }
             },
             Err(e) => {
-                log_service(
-                    &exe_dir,
-                    "ERROR",
-                    &format!("failed to spawn service worker: {e}; retrying"),
-                );
+                log_service(&exe_dir, "ERROR", &format!("failed to spawn service worker: {e}"));
             }
         }
-        thread::sleep(Duration::from_millis(250));
+        // 存活够久 => 偶发崩溃，重置退避；否则（启动即崩）指数增长，封顶 MAX_BACKOFF。
+        if started.elapsed() >= STABLE_RUN {
+            backoff = MIN_BACKOFF;
+        }
+        log_service(
+            &exe_dir,
+            "WARN",
+            &format!("restarting service worker in {:.1}s", backoff.as_secs_f64()),
+        );
+        thread::sleep(backoff);
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
