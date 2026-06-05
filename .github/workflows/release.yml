@@ -20,8 +20,9 @@ env:
   # OpenVINO 运行时版本：为 Intel NPU 推理后端（backend=2 INFERENCE_ENGINE / target=9 NPU）提供支持。
   # 官方预编译 OpenCV 未启用 WITH_OPENVINO，故必须从源码编译 OpenCV 并链接此运行时。
   OPENVINO_VERSION: '2024.6'
-  # 用于失效缓存的构建修订号：当 OpenCV 编译参数变化时手动 +1 以强制重建缓存。
-  OPENCV_BUILD_REV: 'v3-openvino-highgui'
+  # 预构建 OpenCV 的 GitHub Release tag —— 运行 scripts/build_opencv_prebuilt.ps1 生成 zip
+  # 并手动发布为 Release 后，在此更新 tag。留空则跳过下载（回退到旧版 builder 镜像）。
+  OPENCV_PREBUILT_TAG: 'opencv-prebuilt-v1'
   CARGO_TERM_COLOR: always
   LLVM_ROOT: 'D:\LLVM'
 
@@ -50,8 +51,8 @@ jobs:
 
       # ---- OpenVINO runtime (Intel NPU 推理后端) ----
       # 官方预编译 OpenCV 未启用 OpenVINO，选 NPU 会报 StsNotImplemented -213
-      # "Backend(plugin) is not available"。这里安装 OpenVINO 运行时，供下方从源码编译
-      # 的 OpenCV 链接，并在最终安装包中随附运行时 DLL。
+      # "Backend(plugin) is not available"。这里安装 OpenVINO 运行时供预构建的
+      # OpenCV 链接，并在最终安装包中随附运行时 DLL（NPU 用户需要）。
       - name: Cache OpenVINO
         id: openvino-cache
         uses: actions/cache@v4
@@ -99,78 +100,42 @@ jobs:
           if (Test-Path $tbbBin) { $tbbBin >> $env:GITHUB_PATH }
           Write-Host "OpenVINO_DIR=$ovCmake"
 
-      # ---- OpenCV (built from source WITH_OPENVINO=ON, cached) ----
-      - name: Cache OpenCV
-        id: opencv-cache
-        uses: actions/cache@v4
-        with:
-          path: D:\OpenCV
-          key: opencv-${{ env.OPENCV_VERSION }}-${{ env.OPENCV_BUILD_REV }}-ov${{ env.OPENVINO_VERSION }}
-
-      - name: Build OpenCV from source (WITH_OPENVINO)
-        if: steps.opencv-cache.outputs.cache-hit != 'true'
+      # ---- OpenCV pre-built (下载预构建包，避免每次 CI 从源码编译 ~17 分钟) ----
+      # 用 scripts/build_opencv_prebuilt.ps1 本地构建后，发布为 GitHub Release，
+      # 在此更新 OPENCV_PREBUILT_TAG。预构建包内的 install/ 目录被解压到 D:\OpenCV\install。
+      - name: Download pre-built OpenCV
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $src = "$env:RUNNER_TEMP\opencv-src"
-          $build = "$env:RUNNER_TEMP\opencv-build"
-          $srcZip = "$env:RUNNER_TEMP\opencv-src.zip"
-          $url = "https://github.com/opencv/opencv/archive/refs/tags/$env:OPENCV_VERSION.zip"
-          Write-Host "Downloading OpenCV source $env:OPENCV_VERSION ..."
-          Invoke-WebRequest -Uri $url -OutFile $srcZip -RetryIntervalSec 10 -MaximumRetryCount 3
-          Expand-Archive -Path $srcZip -DestinationPath "$env:RUNNER_TEMP\opencv_src_tmp" -Force
-          $extracted = Get-ChildItem "$env:RUNNER_TEMP\opencv_src_tmp" -Directory | Select-Object -First 1
-          Move-Item $extracted.FullName $src
-
-          Write-Host "Configuring OpenCV (WITH_OPENVINO=ON, world build)..."
-          # 仅编译本项目实际使用的模块以缩短构建时间。
-          # OpenCV 4.12 的 world CMake 脚本会调用 highgui 提供的配置宏；
-          # world + BUILD_LIST 必须保留 highgui，否则配置阶段会报
-          # Unknown CMake command "ocv_highgui_configure_target"。
-          # FaceDetectorYN / FaceRecognizerSF 位于 objdetect 主模块（无需 contrib）。
-          cmake -S $src -B $build -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_INSTALL_PREFIX=D:\OpenCV\install `
-            -DBUILD_opencv_world=ON `
-            -DBUILD_LIST="core,imgproc,imgcodecs,dnn,objdetect,videoio,calib3d,features2d,flann,photo,highgui" `
-            -DWITH_OPENVINO=ON `
-            -DOpenVINO_DIR="$env:OpenVINO_DIR" `
-            -DBUILD_TESTS=OFF `
-            -DBUILD_PERF_TESTS=OFF `
-            -DBUILD_EXAMPLES=OFF `
-            -DBUILD_DOCS=OFF `
-            -DBUILD_opencv_apps=OFF `
-            -DBUILD_opencv_python3=OFF `
-            -DBUILD_JAVA=OFF `
-            -DWITH_FFMPEG=OFF
-          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
-
-          Write-Host "Building OpenCV (this takes a while)..."
-          cmake --build $build --config Release --target install --parallel
-          if ($LASTEXITCODE -ne 0) { throw "OpenCV build failed" }
-
-          # 校验 world 库与 OpenVINO 集成产物
-          $worldLib = Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.lib" | Select-Object -First 1
-          if (-not $worldLib) { throw "opencv_world*.lib not produced" }
-          Write-Host "Built: $($worldLib.FullName)"
-          Get-ChildItem "D:\OpenCV\install" | Select-Object Name
-
-      - name: Set OpenCV environment
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $libDir = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.lib" | Select-Object -First 1).Directory.FullName
-          $binDir = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.dll" | Select-Object -First 1).Directory.FullName
-          $incDir = "D:\OpenCV\install\include"
-          $worldName = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.lib" | Select-Object -First 1).BaseName
-          if (-not $libDir -or -not $binDir) { throw "OpenCV install layout not found under D:\OpenCV\install" }
-          "OPENCV_LINK_PATHS=$libDir" >> $env:GITHUB_ENV
-          "OPENCV_INCLUDE_PATHS=$incDir" >> $env:GITHUB_ENV
-          "OPENCV_LINK_LIBS=$worldName" >> $env:GITHUB_ENV
-          $binDir >> $env:GITHUB_PATH
-          Write-Host "OPENCV_LINK_PATHS=$libDir"
-          Write-Host "OPENCV_LINK_LIBS=$worldName"
-          Write-Host "OpenCV bin: $binDir"
+          $tag = "${{ env.OPENCV_PREBUILT_TAG }}"
+          if (-not $tag) {
+            throw "OPENCV_PREBUILT_TAG is empty — run scripts/build_opencv_prebuilt.ps1 locally first and set the tag"
+          }
+          # 获取 release 信息（不依赖 gh CLI，直接用 GitHub API）
+          $repo = "${{ github.repository }}"
+          $url = "https://api.github.com/repos/$repo/releases/tags/$tag"
+          Write-Host "Fetching release info from: $url"
+          $release = Invoke-RestMethod -Uri $url -Headers @{
+            "Accept" = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "Authorization" = "Bearer ${{ github.token }}"
+          }
+          $asset = $release.assets | Where-Object { $_.name -like "opencv-*-prebuilt.zip" } | Select-Object -First 1
+          if (-not $asset) {
+            throw "No opencv-*-prebuilt.zip asset found in release $tag — did you upload it?"
+          }
+          Write-Host "Downloading: $($asset.name) ($([math]::Round($asset.size / 1MB, 1)) MB)"
+          $zip = "$env:RUNNER_TEMP\opencv-prebuilt.zip"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -Headers @{
+            "Accept" = "application/octet-stream"
+            "Authorization" = "Bearer ${{ github.token }}"
+          }
+          Write-Host "Extracting to D:\OpenCV\install ..."
+          New-Item -ItemType Directory -Path "D:\OpenCV\install" -Force | Out-Null
+          Expand-Archive -Path $zip -DestinationPath "D:\OpenCV\install" -Force
+          Write-Host "Pre-built OpenCV extracted successfully"
+          Get-ChildItem "D:\OpenCV\install" -Directory | Select-Object Name
+          Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.lib" | Select-Object FullName
 
       # ---- LLVM (required by clang-sys / opencv crate build) ----
       # clang-sys / opencv-binding-generator need a discoverable libclang.
@@ -328,6 +293,23 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          # 在同一 step 内设置 env vars，确保覆盖 runner 预装的 OpenCV 系统变量。
+          # 若通过 GITHUB_ENV 传递，可能被系统级 OPENCV_* 变量覆盖而导致 crate 找到错误路径。
+          $libDir = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.lib" | Select-Object -First 1).Directory.FullName
+          $binDir = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.dll" | Select-Object -First 1).Directory.FullName
+          $incDir = "D:\OpenCV\install\include"
+          $worldName = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.lib" | Select-Object -First 1).BaseName
+          if (-not $libDir -or -not $binDir -or -not (Test-Path $incDir)) {
+            throw "OpenCV install layout not found under D:\OpenCV\install"
+          }
+          $env:OPENCV_LINK_PATHS = $libDir
+          $env:OPENCV_INCLUDE_PATHS = $incDir
+          $env:OPENCV_LINK_LIBS = $worldName
+          $env:PATH = "$binDir;$env:PATH"
+          Write-Host "OPENCV_LINK_PATHS=$env:OPENCV_LINK_PATHS"
+          Write-Host "OPENCV_INCLUDE_PATHS=$env:OPENCV_INCLUDE_PATHS"
+          Write-Host "OPENCV_LINK_LIBS=$env:OPENCV_LINK_LIBS"
+          Write-Host "OpenCV bin: $binDir"
           cargo clean -p clang-sys
           cargo build --release -p winlogon -p unlock
 
@@ -360,7 +342,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       # ---- Package OpenVINO / OpenCV runtime (for Intel NPU support) ----
-      # NPU 推理需要随附 OpenVINO 运行时 DLL + 从源码编译的 opencv_world DLL。
+      # NPU 推理需要随附 OpenVINO 运行时 DLL + 预构建的 opencv_world DLL（含 OpenVINO 后端）。
       # 这些文件不在 Tauri 默认安装包内，单独打包成 zip 作为发布资产，
       # 用户解压后放入安装目录 resources\ 即可启用 NPU（仍需安装 Intel NPU 驱动）。
       - name: Package NPU runtime
