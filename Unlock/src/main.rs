@@ -1056,7 +1056,6 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         // 加载成功后 `models.is_some()` 跳过此块，零开销。
         if models.is_none() && last_model_attempt.elapsed() >= Duration::from_secs(1) {
             last_model_attempt = Instant::now();
-            log_service(&exe_dir, "INFO", "breadcrumb: loading opencv models (background)");
             if let Some(loaded) =
                 load_models_with_fallback(&resources, requested_inference, &exe_dir)
             {
@@ -1474,7 +1473,6 @@ fn run_service_worker(exe_dir: PathBuf) -> i32 {
     let dir2 = exe_dir.clone();
     thread::spawn(move || auto_lock_monitor(s3, dir2));
 
-    log_service(&exe_dir, "INFO", "breadcrumb: servers spawned, entering recognition loop");
     face_recognition_loop(state, exe_dir);
     0
 }
