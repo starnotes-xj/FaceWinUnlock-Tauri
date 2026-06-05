@@ -18,8 +18,9 @@ use std::{
     io::Write,
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicIsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -35,7 +36,10 @@ use opencv::{
 use rusqlite::{params, types::ValueRef, Connection};
 use serde::Deserialize;
 use windows::Win32::{
-    Foundation::{CloseHandle, BOOL, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree},
+    Foundation::{
+        CloseHandle, GetLastError, BOOL, ERROR_ALREADY_EXISTS, HANDLE, HLOCAL,
+        INVALID_HANDLE_VALUE, LocalFree,
+    },
     Security::{
         Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
         PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
@@ -50,6 +54,7 @@ use windows::Win32::{
             PIPE_UNLIMITED_INSTANCES,
         },
         Shutdown::LockWorkStation,
+        Threading::CreateMutexW,
     },
     UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
 };
@@ -62,6 +67,7 @@ const PIPE_UNLOCK_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustUnlock";
 const BUF_SIZE: u32 = 4096;
 const CAMERA_WARMUP_MAX_FRAMES: usize = 4;
 const CAMERA_WARMUP_READY_FRAMES: usize = 1;
+const WORKER_ARG: &str = "--facewinunlock-worker";
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
 
@@ -78,6 +84,7 @@ struct State {
     matched_creds:    Mutex<Option<(String, String, String)>>,
     /// 上一次用户活跃的时间戳（Unix 秒），用于自动锁屏
     last_user_active: AtomicI64,
+    active_pipe_handlers: AtomicUsize,
 }
 
 impl State {
@@ -93,6 +100,7 @@ impl State {
             dll_creds_pipe:  AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize),
             matched_creds:   Mutex::new(None),
             last_user_active: AtomicI64::new(now),
+            active_pipe_handlers: AtomicUsize::new(0),
         })
     }
 }
@@ -215,6 +223,55 @@ fn close_handle(h: HANDLE) {
     if !h.is_invalid() { unsafe { let _ = CloseHandle(h); } }
 }
 
+struct SendPipe(HANDLE);
+unsafe impl Send for SendPipe {}
+
+impl SendPipe {
+    fn into_handle(self) -> HANDLE {
+        self.0
+    }
+}
+
+fn acquire_named_mutex(exe_dir: &Path, name: &str, duplicate_message: &str) -> Option<HANDLE> {
+    let name_wide = to_wide(name);
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    let sa = pipe_security_attributes(&mut sd);
+    let result = unsafe {
+        CreateMutexW(
+            sa.as_ref().map(|attrs| attrs as *const _),
+            true,
+            PCWSTR(name_wide.as_ptr()),
+        )
+    };
+    if !sd.0.is_null() {
+        unsafe { let _ = LocalFree(Some(HLOCAL(sd.0))); }
+    }
+
+    match result {
+        Ok(handle) => {
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                log_service(exe_dir, "INFO", duplicate_message);
+                close_handle(handle);
+                None
+            } else {
+                Some(handle)
+            }
+        }
+        Err(e) => {
+            log_service(exe_dir, "WARN", &format!("single-instance mutex unavailable: {e:?}; exiting to avoid duplicate services"));
+            None
+        }
+    }
+}
+
+fn acquire_single_instance_mutex(exe_dir: &Path) -> Option<HANDLE> {
+    acquire_named_mutex(
+        exe_dir,
+        "Global\\FaceWinUnlockTauriUnlockService",
+        "another FaceWinUnlock service instance is already running; exiting",
+    )
+}
+
 fn log_service(exe_dir: &Path, level: &str, message: &str) {
     let logs_dir = exe_dir.join("logs");
     let _ = create_dir_all(&logs_dir);
@@ -271,16 +328,49 @@ fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
     close_handle(pipe);
 }
 
-// 并发监听实例数量。旧实现为「单实例 accept 循环」：每次只有一个监听实例，
-// 在「客户端连上 → 循环回去创建下一个实例」之间存在零监听窗口；当凭据提供程序
-// 被反复创建（锁屏界面每次刷新都会重建）大量并发连接时，连接会持续落在该窗口里
-// 报 ERROR_PIPE_BUSY(0x800700E7「所有的管道范例都在使用中」)，导致 DLL 始终连不上、
-// 无法发送 "run"，摄像头永远不被调用（无法人脸识别）。
-// 改为预创建多个并发监听实例，任意时刻都有空闲实例可被连接，彻底消除该窗口。
-const PIPE_LISTENER_POOL: usize = 4;
+// 并发监听实例数量。登录界面会在短时间内创建多批 Credential Provider 实例，
+// 4 个监听槽仍然会被启动风暴打满；提高到 32 保持足够空闲实例，避免 ERROR_PIPE_BUSY。
+const PIPE_LISTENER_POOL: usize = 32;
+const MAX_PIPE_HANDLER_THREADS: usize = 128;
 
-// 单个监听线程：创建实例 → 阻塞等待客户端 → 处理 → 处理完回到循环用新实例继续监听。
-// 池中其余线程在本线程处理客户端期间仍保持监听，保证始终有空闲实例。
+struct PipeHandlerGuard(Arc<State>);
+
+impl Drop for PipeHandlerGuard {
+    fn drop(&mut self) {
+        self.0.active_pipe_handlers.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn spawn_pipe_handler(
+    state: Arc<State>,
+    pipe: HANDLE,
+    name: &'static str,
+    handler: fn(HANDLE, Arc<State>),
+) {
+    if state
+        .active_pipe_handlers
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            (count < MAX_PIPE_HANDLER_THREADS).then_some(count + 1)
+        })
+        .is_err()
+    {
+        log_service(
+            &state.exe_dir,
+            "WARN",
+            &format!("{name} pipe handler limit reached; closing new client"),
+        );
+        unsafe { let _ = DisconnectNamedPipe(pipe); }
+        close_handle(pipe);
+        return;
+    }
+
+    let send_pipe = SendPipe(pipe);
+    thread::spawn(move || {
+        let _guard = PipeHandlerGuard(state.clone());
+        handler(send_pipe.into_handle(), state);
+    });
+}
+
 fn control_accept_loop(state: Arc<State>) {
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -292,8 +382,7 @@ fn control_accept_loop(state: Arc<State>) {
 
         if wait_for_client(pipe).is_err() { close_handle(pipe); continue; }
 
-        // 在本监听线程内同步处理该客户端，处理结束后回到循环创建新的监听实例。
-        handle_control_client(pipe, state.clone());
+        spawn_pipe_handler(state.clone(), pipe, "control", handle_control_client);
     }
 }
 
@@ -319,7 +408,7 @@ fn unlock_accept_loop(state: Arc<State>) {
 
         if wait_for_client(pipe).is_err() { close_handle(pipe); continue; }
 
-        handle_unlock_client(pipe, state.clone());
+        spawn_pipe_handler(state.clone(), pipe, "unlock", handle_unlock_client);
     }
 }
 
@@ -844,6 +933,18 @@ fn check_test_creds(exe_dir: &Path) -> Option<(String, String)> {
 
 // ─── Face recognition loop ────────────────────────────────────────────────────
 
+/// 返回 `secs` 秒之前的时刻；若自系统启动不足 `secs` 秒（开机早期），
+/// `checked_sub` 会下溢，此时回退为当前时刻。
+/// 修复：Windows 的 `Instant` 自系统启动计时，开机头一分钟内
+/// `Instant::now() - Duration::from_secs(60)` 会触发
+/// "overflow when subtracting duration from instant" panic，
+/// 导致 worker 在开机早期反复崩溃重启（exit 101），烧掉数十秒。
+fn instant_secs_ago(secs: u64) -> Instant {
+    Instant::now()
+        .checked_sub(Duration::from_secs(secs))
+        .unwrap_or_else(Instant::now)
+}
+
 fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let resources = exe_dir.join("resources");
     let db_path   = exe_dir.join("database.db");
@@ -855,7 +956,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let mut models: Option<(Models, InferenceBackend)> = None;
     let mut cam: Option<VideoCapture> = None;
     let mut records: Vec<FaceRecord> = vec![];
-    let mut last_reload = Instant::now() - Duration::from_secs(60);
+    let mut last_reload = instant_secs_ago(60);
     let mut camera_index = configured_camera_index(&db_path);
     let mut camera_rotation = load_camera_rotation(&db_path);
     let mut unlock_brightness = load_unlock_brightness(&db_path);
@@ -864,7 +965,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let mut delayed_run_at: Option<Instant> = None;
     let mut delay_session_armed = false;
     let mut last_failed_at: Option<Instant> = None;
-    let mut last_model_attempt = Instant::now() - Duration::from_secs(5); // 首次立即尝试
+    let mut last_model_attempt = instant_secs_ago(5); // 首次尽快尝试（开机早期回退为 now）
 
     'main: loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -954,6 +1055,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         // 加载成功后 `models.is_some()` 跳过此块，零开销。
         if models.is_none() && last_model_attempt.elapsed() >= Duration::from_secs(1) {
             last_model_attempt = Instant::now();
+            log_service(&exe_dir, "INFO", "breadcrumb: loading opencv models (background)");
             if let Some(loaded) =
                 load_models_with_fallback(&resources, requested_inference, &exe_dir)
             {
@@ -1218,7 +1320,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
     // 延迟加载模型（按需，避免内存浪费）
     let mut models: Option<Models> = None;
     let mut records: Vec<FaceRecord> = vec![];
-    let mut last_record_reload = Instant::now() - Duration::from_secs(60);
+    let mut last_record_reload = instant_secs_ago(60);
     let mut camera_rotation = load_camera_rotation(&db_path);
     let mut requested_inference = load_inference_backend(&db_path);
 
@@ -1325,14 +1427,41 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
-fn main() {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."));
+/// 诊断：捕获本进程任意线程的 panic，把确切位置与原因写入 unlock.log。
+/// 用于定位 worker 在开机早期反复崩溃（exit 101）的根因。
+fn install_panic_logger(exe_dir: PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic>".to_string());
+        let thread = std::thread::current().name().unwrap_or("<unnamed>").to_string();
+        log_service(
+            &exe_dir,
+            "ERROR",
+            &format!("WORKER PANIC @ {location} [thread {thread}]: {payload}"),
+        );
+        previous(info);
+    }));
+}
+
+fn run_service_worker(exe_dir: PathBuf) -> i32 {
+    install_panic_logger(exe_dir.clone());
+
+    let _single_instance = match acquire_single_instance_mutex(&exe_dir) {
+        Some(handle) => handle,
+        None => return 0,
+    };
 
     let state = State::new(exe_dir.clone());
-    log_service(&exe_dir, "INFO", "FaceWinUnlock service started");
+    log_service(&exe_dir, "INFO", "FaceWinUnlock service worker started");
 
     let s1 = state.clone();
     thread::spawn(move || run_control_server(s1));
@@ -1344,5 +1473,73 @@ fn main() {
     let dir2 = exe_dir.clone();
     thread::spawn(move || auto_lock_monitor(s3, dir2));
 
+    log_service(&exe_dir, "INFO", "breadcrumb: servers spawned, entering recognition loop");
     face_recognition_loop(state, exe_dir);
+    0
+}
+
+fn run_service_supervisor(exe_dir: PathBuf) {
+    let _single_instance = match acquire_named_mutex(
+        &exe_dir,
+        "Global\\FaceWinUnlockTauriSupervisor",
+        "another FaceWinUnlock supervisor instance is already running; exiting",
+    ) {
+        Some(handle) => handle,
+        None => return,
+    };
+
+    log_service(&exe_dir, "INFO", "FaceWinUnlock supervisor started");
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(e) => {
+            log_service(&exe_dir, "ERROR", &format!("unable to resolve current exe for supervisor: {e}"));
+            return;
+        }
+    };
+
+    loop {
+        match ProcessCommand::new(&exe).arg(WORKER_ARG).spawn() {
+            Ok(mut child) => match child.wait() {
+                Ok(status) if status.success() => {
+                    log_service(&exe_dir, "INFO", "service worker exited normally; supervisor stopping");
+                    break;
+                }
+                Ok(status) => {
+                    log_service(
+                        &exe_dir,
+                        "WARN",
+                        &format!("service worker exited with {status}; restarting immediately"),
+                    );
+                }
+                Err(e) => {
+                    log_service(
+                        &exe_dir,
+                        "WARN",
+                        &format!("failed waiting for service worker: {e}; restarting immediately"),
+                    );
+                }
+            },
+            Err(e) => {
+                log_service(
+                    &exe_dir,
+                    "ERROR",
+                    &format!("failed to spawn service worker: {e}; retrying"),
+                );
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn main() {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    if std::env::args().any(|arg| arg == WORKER_ARG) {
+        std::process::exit(run_service_worker(exe_dir));
+    }
+
+    run_service_supervisor(exe_dir);
 }
