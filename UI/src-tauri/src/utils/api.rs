@@ -281,13 +281,13 @@ pub fn add_scheduled_task(
 ) -> Result<CustomResult, CustomResult> {
     let use_system = is_server || run_on_system_start;
 
-    // 开机面容识别：同时使用 BootTrigger（延迟 15 秒）+ LogonTrigger（兜底）
-    // BootTrigger 有延迟是因为系统启动时任务计划程序可能在驱动/服务就绪前就触发任务，
-    // 导致 Unlock EXE 启动失败（OpenCV 模型加载、摄像头驱动等依赖未就绪）。
+    // 开机面容识别：同时使用 BootTrigger + LogonTrigger（兜底）。
+    // Unlock EXE 启动时只创建管道，模型/摄像头在锁屏收到 run 后才按需加载，
+    // 因此 BootTrigger 不再延迟，配合高优先级让核心服务尽早进入可连接状态。
     // LogonTrigger 作为兜底：如果 BootTrigger 因故未触发，用户登录后仍可启动后台服务，
     // 配合 SessionUnlock 触发器保证后续锁屏解锁可用。
-    // TimeTrigger 每1分钟周期性检查，在 Unlock.exe 静默崩溃后快速自动重启。
-    // 配合 MultipleInstancesPolicy:IgnoreNew，已有实例运行时不会重复创建。
+    // TimeTrigger 每1分钟周期性检查，作为 supervisor 进程异常退出后的兜底。
+    // Unlock worker 崩溃由 supervisor 立即重启；任务计划器只负责拉起/兜底。
     let trigger_xml = if run_on_system_start {
         "<BootTrigger><Enabled>true</Enabled></BootTrigger>\n    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT1M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
     } else {
@@ -326,7 +326,8 @@ pub fn add_scheduled_task(
         .to_str()
         .unwrap_or(r"C:\Program Files\facewinunlock-tauri");
 
-    let exe_path = quote_exe_path_with_args(&abs_path_str, None);
+    let exe_path = xml_escape(&abs_path_str);
+    let working_dir = xml_escape(working_dir);
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -340,10 +341,19 @@ pub fn add_scheduled_task(
     {principal}
   </Principals>
   <Settings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>10</Count>
+    </RestartOnFailure>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <Priority>0</Priority>
   </Settings>
   <Actions>
     <Exec>
@@ -396,10 +406,19 @@ pub fn add_scheduled_task(
     }
 
     if run_immediately {
-        let _ = Command::new("schtasks")
+        let run_output = Command::new("schtasks")
             .args(&["/Run", "/TN", &task_name])
             .creation_flags(CREATE_NO_WINDOW)
-            .output();
+            .output()
+            .map_err(|e| CustomResult::error(Some(format!("启动计划任务失败: {}", e)), None))?;
+
+        if !run_output.status.success() {
+            let err = fix_gbk_encoding(&run_output.stderr);
+            return Err(CustomResult::error(
+                Some(format!("计划任务已创建，但立即启动失败: {}", err)),
+                None,
+            ));
+        }
     }
 
     Ok(CustomResult::success(None, None))
@@ -512,6 +531,60 @@ pub fn check_trigger_via_xml(task_name: &str) -> Result<String, String> {
     } else {
         Ok("Unknown".to_string())
     }
+}
+
+#[tauri::command]
+pub fn repair_unlock_scheduled_task() -> Result<CustomResult, CustomResult> {
+    const TASK_NAME: &str = "FaceWinUnlockServer";
+
+    let exe_path = ROOT_DIR.join("FaceWinUnlock-Server.exe");
+    if !exe_path.exists() {
+        return Err(CustomResult::error(
+            Some(format!("核心服务不存在，无法修复计划任务: {}", exe_path.display())),
+            None,
+        ));
+    }
+
+    let query_output = Command::new("schtasks")
+        .args(&["/Query", "/TN", TASK_NAME, "/XML"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    let run_on_system_start = match query_output {
+        Ok(output) if output.status.success() => {
+            let xml = decode_schtasks_xml(&output.stdout);
+            xml.contains("BootTrigger") || !xml.contains("LogonTrigger")
+        }
+        Ok(output) => {
+            let err = fix_gbk_encoding(&output.stderr);
+            warn!("查询核心服务计划任务失败，将按开机启动重建: {}", err);
+            true
+        }
+        Err(e) => {
+            warn!("执行 schtasks 查询核心服务计划任务失败，将按开机启动重建: {}", e);
+            true
+        }
+    };
+
+    let should_start_now = check_process_running().is_err();
+    // add_scheduled_task 内部使用 schtasks /Create /F 覆盖旧任务。
+    // 不先删除旧任务，避免创建失败时把原本可用的自启动任务移除。
+    add_scheduled_task(
+        "FaceWinUnlock-Server.exe".to_string(),
+        TASK_NAME.to_string(),
+        true,
+        false,
+        run_on_system_start,
+        should_start_now,
+    )?;
+
+    Ok(CustomResult::success(
+        Some("核心服务计划任务已修复".to_string()),
+        Some(json!({
+            "runOnSystemStart": run_on_system_start,
+            "started": should_start_now
+        })),
+    ))
 }
 
 // 关闭软件
@@ -727,20 +800,13 @@ pub fn run_scheduled_task(task_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 处理带参数的路径，确保引号只包裹可执行文件路径，参数在外部
-fn quote_exe_path_with_args(exe_path: &str, args: Option<&str>) -> String {
-    // 只给可执行文件路径加引号（如果有空格），参数保持在引号外
-    let quoted_exe = if exe_path.contains(' ') && !exe_path.starts_with('"') {
-        format!("\"{}\"", exe_path)
-    } else {
-        exe_path.to_string()
-    };
-
-    // 拼接参数（如果有）
-    match args {
-        Some(arg) => format!("{} {}", quoted_exe, arg),
-        None => quoted_exe,
-    }
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn fix_gbk_encoding(bytes: &[u8]) -> String {
@@ -882,11 +948,11 @@ pub fn restart_unlock_service(task_name: String) -> Result<CustomResult, CustomR
         ));
     }
 
-    // 等待 Unlock EXE 启动（最多 8 秒）
-    for i in 1..=8 {
-        thread::sleep(Duration::from_secs(1));
+    // 等待 Unlock EXE 启动（最多 5 秒，250ms 粒度）
+    for i in 1..=20 {
+        thread::sleep(Duration::from_millis(250));
         if check_process_running().is_ok() {
-            info!("Unlock 核心服务已成功重启（耗时{}秒）", i);
+            info!("Unlock 核心服务已成功重启（耗时{}ms）", i * 250);
             return Ok(CustomResult::success(Some("restarted".to_string()), None));
         }
     }

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -61,9 +61,14 @@ static IS_MOUSE_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 static IS_KEYBOARD_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 static INPUT_HOOKS_ARMED: AtomicBool = AtomicBool::new(false);
 static INPUT_RUN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static INPUT_RUN_SOURCE: AtomicU8 = AtomicU8::new(0);
+static INPUT_HOOK_REF_COUNT: AtomicUsize = AtomicUsize::new(0);
+const INPUT_SOURCE_MOUSE: u8 = 1;
+const INPUT_SOURCE_KEYBOARD: u8 = 2;
 
 unsafe extern "system" fn mouse_hook_fn(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && INPUT_HOOKS_ARMED.load(Ordering::SeqCst) {
+        INPUT_RUN_SOURCE.store(INPUT_SOURCE_MOUSE, Ordering::SeqCst);
         INPUT_RUN_REQUESTED.store(true, Ordering::SeqCst);
     }
     let raw = MOUSE_HOOK_RAW.load(Ordering::SeqCst);
@@ -73,6 +78,7 @@ unsafe extern "system" fn mouse_hook_fn(code: i32, wparam: WPARAM, lparam: LPARA
 
 unsafe extern "system" fn keyboard_hook_fn(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && INPUT_HOOKS_ARMED.load(Ordering::SeqCst) {
+        INPUT_RUN_SOURCE.store(INPUT_SOURCE_KEYBOARD, Ordering::SeqCst);
         INPUT_RUN_REQUESTED.store(true, Ordering::SeqCst);
     }
     let raw = KEYBOARD_HOOK_RAW.load(Ordering::SeqCst);
@@ -81,8 +87,12 @@ unsafe extern "system" fn keyboard_hook_fn(code: i32, wparam: WPARAM, lparam: LP
 }
 
 fn install_input_hooks() {
-    INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
-    INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+    let previous_refs = INPUT_HOOK_REF_COUNT.fetch_add(1, Ordering::SeqCst);
+    if previous_refs == 0 {
+        INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
+        INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+        INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
+    }
 
     if IS_MOUSE_HOOK_INSTALLED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -118,8 +128,21 @@ fn install_input_hooks() {
 }
 
 fn uninstall_input_hooks() {
+    let Ok(previous_refs) = INPUT_HOOK_REF_COUNT.fetch_update(
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+        |count| (count > 0).then_some(count - 1),
+    ) else {
+        return;
+    };
+
+    if previous_refs > 1 {
+        return;
+    }
+
     INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
     INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+    INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
 
     if IS_MOUSE_HOOK_INSTALLED
         .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
@@ -170,10 +193,9 @@ impl CPipeListener {
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
         let use_input_hooks = true;
-        // auto_run_on_connect 设为 false，所有场景（登录/解锁/CREDUI）统一由输入 Hook 触发 "run"。
-        // 之前的 CREDUI auto_run 会在连接后立即发送 "run"，但摄像头尚未预热（首帧偏暗/无人脸），
-        // 导致第一次识别必然失败，需要等第二次输入触发的 "run" 才能通过（Chrome 密码查看器等场景）。
-        let auto_run_on_connect = false;
+        // 登录/解锁主场景连接成功后自动触发一次，避免重启后必须反复按键才开摄像头。
+        // CREDUI（Chrome/Edge 查看密码等）仍保留鼠标/键盘触发，避免弹窗一出现就抢摄像头。
+        let auto_run_on_connect = is_primary_scenario;
         if use_input_hooks {
             install_input_hooks();
         }
@@ -182,6 +204,7 @@ impl CPipeListener {
         let client_thread = {
             let stop_flag = stop_flag.clone();
             let anim_slot = animation_slot.clone();
+            let is_unlocked_for_client = is_unlocked.clone();
             thread::spawn(move || {
                 let connect_enabled = read_facewinunlock_registry("CONNECT_TO_PIPE")
                     .unwrap_or_else(|_| "1".to_string());
@@ -230,12 +253,18 @@ impl CPipeListener {
 
                     let mut hooks_armed = !use_input_hooks;
                     let arm_after = Instant::now() + Duration::from_millis(250);
-                    let mut last_run_at = Instant::now() - Duration::from_secs(5);
+                    let min_run_interval = if auto_run_on_connect {
+                        Duration::from_millis(2500)
+                    } else {
+                        Duration::from_millis(1500)
+                    };
+                    let mut last_run_at = Instant::now() - min_run_interval;
                     let mut last_prepare_at = Instant::now();
                     let mut auto_run_sent = false;
                     if use_input_hooks {
                         INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
                         INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+                        INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
                     }
 
                     loop {
@@ -243,9 +272,20 @@ impl CPipeListener {
                             unsafe { let _ = CloseHandle(pipe); }
                             return;
                         }
+                        if is_unlocked_for_client.load(Ordering::SeqCst) {
+                            if use_input_hooks {
+                                INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
+                                INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+                                INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
+                            }
+                            unsafe { let _ = CloseHandle(pipe); }
+                            info!("面容识别已成功，停止发送 run");
+                            return;
+                        }
 
                         if use_input_hooks && !hooks_armed && Instant::now() >= arm_after {
                             INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+                            INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
                             INPUT_HOOKS_ARMED.store(true, Ordering::SeqCst);
                             hooks_armed = true;
                             if auto_run_on_connect {
@@ -257,9 +297,14 @@ impl CPipeListener {
 
                         let input_requested = use_input_hooks
                             && INPUT_RUN_REQUESTED.swap(false, Ordering::SeqCst);
+                        let input_source = if input_requested {
+                            INPUT_RUN_SOURCE.swap(0, Ordering::SeqCst)
+                        } else {
+                            0
+                        };
                         let auto_requested = auto_run_on_connect && !auto_run_sent;
                         let should_send_run = hooks_armed
-                            && last_run_at.elapsed() >= Duration::from_millis(500)
+                            && last_run_at.elapsed() >= min_run_interval
                             && (input_requested || auto_requested);
 
                         if should_send_run {
@@ -274,13 +319,18 @@ impl CPipeListener {
                                 auto_run_sent = true;
                             }
                             if input_requested {
+                                let source_name = match input_source {
+                                    INPUT_SOURCE_MOUSE => "鼠标",
+                                    INPUT_SOURCE_KEYBOARD => "键盘",
+                                    _ => "鼠标/键盘",
+                                };
                                 if auto_run_on_connect {
-                                    info!("检测到 CREDUI/UAC 鼠标/键盘输入，已发送 run");
+                                    info!("检测到锁屏{}输入，已发送 run", source_name);
                                 } else {
-                                    info!("检测到锁屏鼠标/键盘输入，已发送 run");
+                                    info!("检测到 CREDUI/UAC {}输入，已发送 run", source_name);
                                 }
                             } else {
-                                info!("CREDUI/UAC 场景已自动发送 run");
+                                info!("登录/解锁主场景已自动发送 run");
                             }
                         }
 
@@ -408,6 +458,7 @@ impl CPipeListener {
         self.stop_flag.store(true, Ordering::SeqCst);
         if self.use_input_hooks {
             uninstall_input_hooks();
+            self.use_input_hooks = false;
         }
 
         // 关闭凭据管道句柄，打断凭据线程中正在阻塞的 ReadFile

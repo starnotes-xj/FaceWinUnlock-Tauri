@@ -32,8 +32,8 @@ use utils::api::{
     add_scheduled_task, check_process_running, check_scheduled_task, close_app,
     delete_process_running, disable_scheduled_task, get_camera, get_install_dir,
     get_now_username, init_model, load_opencv_model, open_camera, open_directory,
-    restart_unlock_service, stop_camera, test_win_logon, unload_model, get_uuid_v4,
-    get_cache_dir, run_scheduled_task, check_trigger_via_xml
+    restart_unlock_service, repair_unlock_scheduled_task, stop_camera, test_win_logon,
+    unload_model, get_uuid_v4, get_cache_dir, run_scheduled_task, check_trigger_via_xml
 };
 mod tray;
 use tray::create_system_tray;
@@ -202,6 +202,7 @@ pub fn run() {
                 get_cache_dir,
                 run_scheduled_task,
                 check_trigger_via_xml,
+                repair_unlock_scheduled_task,
                 restart_unlock_service
             ]);
     }

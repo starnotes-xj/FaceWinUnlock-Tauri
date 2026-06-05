@@ -21,7 +21,7 @@ env:
   # 官方预编译 OpenCV 未启用 WITH_OPENVINO，故必须从源码编译 OpenCV 并链接此运行时。
   OPENVINO_VERSION: '2024.6'
   # 用于失效缓存的构建修订号：当 OpenCV 编译参数变化时手动 +1 以强制重建缓存。
-  OPENCV_BUILD_REV: 'v2-openvino'
+  OPENCV_BUILD_REV: 'v3-openvino-highgui'
   CARGO_TERM_COLOR: always
   LLVM_ROOT: 'D:\LLVM'
 
@@ -124,12 +124,15 @@ jobs:
 
           Write-Host "Configuring OpenCV (WITH_OPENVINO=ON, world build)..."
           # 仅编译本项目实际使用的模块以缩短构建时间。
+          # OpenCV 4.12 的 world CMake 脚本会调用 highgui 提供的配置宏；
+          # world + BUILD_LIST 必须保留 highgui，否则配置阶段会报
+          # Unknown CMake command "ocv_highgui_configure_target"。
           # FaceDetectorYN / FaceRecognizerSF 位于 objdetect 主模块（无需 contrib）。
           cmake -S $src -B $build -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_INSTALL_PREFIX=D:\OpenCV\install `
             -DBUILD_opencv_world=ON `
-            -DBUILD_LIST="core,imgproc,imgcodecs,dnn,objdetect,videoio,calib3d,features2d,flann,photo" `
+            -DBUILD_LIST="core,imgproc,imgcodecs,dnn,objdetect,videoio,calib3d,features2d,flann,photo,highgui" `
             -DWITH_OPENVINO=ON `
             -DOpenVINO_DIR="$env:OpenVINO_DIR" `
             -DBUILD_TESTS=OFF `

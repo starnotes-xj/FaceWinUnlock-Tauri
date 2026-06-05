@@ -73,6 +73,11 @@
 			}
 		}
 		info("程序初始化完成");
+		invoke("repair_unlock_scheduled_task").then((result)=>{
+			info(`核心服务计划任务自动修复完成: ${JSON.stringify(result?.data ?? {})}`);
+		}).catch((error)=>{
+			warn(formatObjectString("核心服务计划任务自动修复失败：", error));
+		});
 		if(optionsStore.getOptionValueByKey('silentRun') != "true"){
 			currentWindow.isVisible().then((visible) => {
 				if(!visible){
