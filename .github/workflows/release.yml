@@ -66,11 +66,13 @@ jobs:
           $ErrorActionPreference = "Stop"
           $base = "https://storage.openvinotoolkit.org/repositories/openvino/packages/$env:OPENVINO_VERSION/windows/"
           Write-Host "Resolving OpenVINO archive from $base ..."
-          $content = (Invoke-WebRequest -Uri $base -UseBasicParsing).Content
-          $m = [regex]::Match($content, '(?i)(?:w_)?openvino_toolkit_windows_[^"''<>\s]*_x86_64\.zip')
-          if (-not $m.Success) { throw "Could not find OpenVINO zip in listing for $env:OPENVINO_VERSION" }
+          # 目录页是 JS 动态渲染的空壳（HTML 里没有文件名），真实文件清单在 filetree.json。
+          $tree = (Invoke-WebRequest -Uri "https://storage.openvinotoolkit.org/filetree.json" -UseBasicParsing).Content
+          $pattern = "w_openvino_toolkit_windows_" + [regex]::Escape($env:OPENVINO_VERSION) + "[^`"]*_x86_64\.zip"
+          $m = [regex]::Match($tree, $pattern)
+          if (-not $m.Success) { throw "Could not find OpenVINO zip for $env:OPENVINO_VERSION in filetree.json" }
           $zipName = $m.Value
-          $url = ([uri]::new([uri]$base, $zipName)).ToString()
+          $url = $base + $zipName
           $zip = "$env:RUNNER_TEMP\openvino.zip"
           Write-Host "Downloading $url ..."
           Invoke-WebRequest -Uri $url -OutFile $zip -RetryIntervalSec 10 -MaximumRetryCount 3
