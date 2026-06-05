@@ -67,10 +67,10 @@ jobs:
           $base = "https://storage.openvinotoolkit.org/repositories/openvino/packages/$env:OPENVINO_VERSION/windows/"
           Write-Host "Resolving OpenVINO archive from $base ..."
           $content = (Invoke-WebRequest -Uri $base -UseBasicParsing).Content
-          $m = [regex]::Match($content, 'w_openvino_toolkit_windows_[0-9][0-9\.]*_x86_64\.zip')
+          $m = [regex]::Match($content, '(?i)(?:w_)?openvino_toolkit_windows_[^"''<>\s]*_x86_64\.zip')
           if (-not $m.Success) { throw "Could not find OpenVINO zip in listing for $env:OPENVINO_VERSION" }
           $zipName = $m.Value
-          $url = $base + $zipName
+          $url = ([uri]::new([uri]$base, $zipName)).ToString()
           $zip = "$env:RUNNER_TEMP\openvino.zip"
           Write-Host "Downloading $url ..."
           Invoke-WebRequest -Uri $url -OutFile $zip -RetryIntervalSec 10 -MaximumRetryCount 3
