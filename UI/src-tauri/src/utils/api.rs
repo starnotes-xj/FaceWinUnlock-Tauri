@@ -9,9 +9,9 @@ use crate::{
     utils::custom_result::CustomResult,
     OpenCVResource, APP_STATE, GLOBAL_TRAY, ROOT_DIR,
 };
-use tauri_plugin_log::log::info;
+use tauri_plugin_log::log::{info, warn};
 use opencv::{
-    core::{Mat, MatTraitConst, Size},
+    core::{Mat, MatTraitConst, Ptr, Size},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     prelude::NetTrait,
     videoio::{self, VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst},
@@ -538,69 +538,139 @@ pub fn close_app(app_handle: AppHandle) -> Result<CustomResult, CustomResult> {
 
     Ok(CustomResult::success(None, None))
 }
+// 用指定 backend/target 构建全部三个 OpenCV 模型；任一失败即返回错误。
+// 不写入全局状态，便于在失败时安全回退到其它后端后再统一赋值。
+fn build_opencv_models(
+    backend_id: i32,
+    target_id: i32,
+) -> Result<
+    (
+        Ptr<FaceDetectorYN>,
+        Ptr<FaceRecognizerSF>,
+        opencv::dnn::Net,
+    ),
+    String,
+> {
+    let detector_path = ROOT_DIR
+        .join("resources")
+        .join("face_detection_yunet_2023mar.onnx");
+    let detector = FaceDetectorYN::create(
+        detector_path.to_str().unwrap_or(""),
+        "",
+        Size::new(320, 320),
+        0.9,
+        0.3,
+        5000,
+        backend_id,
+        target_id,
+    )
+    .map_err(|e| format!("初始化检测器模型失败: {:?}", e))?;
+
+    let recognizer_path = ROOT_DIR
+        .join("resources")
+        .join("face_recognition_sface_2021dec.onnx");
+    let recognizer = FaceRecognizerSF::create(
+        recognizer_path.to_str().unwrap_or(""),
+        "",
+        backend_id,
+        target_id,
+    )
+    .map_err(|e| format!("初始化识别器模型失败: {:?}", e))?;
+
+    let liveness_path = ROOT_DIR.join("resources").join("face_liveness.onnx");
+    let mut liveness = opencv::dnn::read_net_from_onnx(liveness_path.to_str().unwrap_or(""))
+        .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?;
+    liveness
+        .set_preferable_backend(backend_id)
+        .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
+    liveness
+        .set_preferable_target(target_id)
+        .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
+
+    Ok((detector, recognizer, liveness))
+}
+
+// load_opencv_model 的返回值：告知前端实际生效的推理后端，
+// 以及是否发生了从非 CPU 后端到 CPU 的自动回退（issue #125）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelLoadResult {
+    // 用户请求的后端/目标
+    pub requested_backend: i32,
+    pub requested_target: i32,
+    // 实际生效的后端/目标
+    pub active_backend: i32,
+    pub active_target: i32,
+    // 是否因请求的后端不可用而回退到 CPU
+    pub fell_back: bool,
+    // 回退原因（fell_back 为 true 时给出原始错误，供前端提示/日志）
+    pub fallback_reason: Option<String>,
+}
+
 #[tauri::command]
 // 加载opencv模型，backend/target 对应 OpenCV DNN 后端 ID:
 //   (0,0)=CPU  (3,1)=OpenCL  (3,2)=OpenCL_FP16  (2,9)=Intel NPU(OpenVINO)
-pub fn load_opencv_model(backend: Option<i32>, target: Option<i32>) -> Result<(), String> {
+//
+// 当所选非 CPU 后端（典型为 Intel NPU / OpenVINO）因运行时插件缺失而初始化失败时
+// （报错 StsNotImplemented -213 "Backend(plugin) is not available"），自动回退到
+// CPU，使人脸录入流程仍可正常进行——与 Unlock 服务的 load_models_with_fallback
+// 行为保持一致 (issue #125)。返回值告知前端实际生效的后端及是否发生回退。
+pub fn load_opencv_model(
+    backend: Option<i32>,
+    target: Option<i32>,
+) -> Result<ModelLoadResult, String> {
     let backend_id = backend.unwrap_or(0);
-    let target_id  = target.unwrap_or(0);
+    let target_id = target.unwrap_or(0);
 
     let mut app_state = APP_STATE
         .lock()
         .map_err(|e| format!("获取app状态失败 {}", e))?;
 
-    if app_state.detector.is_none() {
-        let resource_path = ROOT_DIR
-            .join("resources")
-            .join("face_detection_yunet_2023mar.onnx");
-
-        let detector = FaceDetectorYN::create(
-            resource_path.to_str().unwrap_or(""),
-            "",
-            Size::new(320, 320),
-            0.9,
-            0.3,
-            5000,
-            backend_id,
-            target_id,
-        )
-        .map_err(|e| format!("初始化检测器模型失败: {:?}", e))?;
-
-        app_state.detector = Some(OpenCVResource { inner: detector });
+    // 三个模型已全部加载则直接返回（保持幂等）。无法得知此前是否回退，
+    // 按未回退处理，回退提示已在首次加载时给出。
+    if app_state.detector.is_some()
+        && app_state.recognizer.is_some()
+        && app_state.liveness.is_some()
+    {
+        return Ok(ModelLoadResult {
+            requested_backend: backend_id,
+            requested_target: target_id,
+            active_backend: backend_id,
+            active_target: target_id,
+            fell_back: false,
+            fallback_reason: None,
+        });
     }
 
-    if app_state.recognizer.is_none() {
-        let resource_path = ROOT_DIR
-            .join("resources")
-            .join("face_recognition_sface_2021dec.onnx");
-        let recognizer = FaceRecognizerSF::create(
-            resource_path.to_str().unwrap_or(""),
-            "",
-            backend_id,
-            target_id,
-        )
-        .map_err(|e| format!("初始化识别器模型失败: {:?}", e))?;
+    // 先尝试用户选择的后端；失败且并非 CPU 时回退到 CPU(0,0)。
+    let (detector, recognizer, liveness, active_backend, active_target, fell_back, fallback_reason) =
+        match build_opencv_models(backend_id, target_id) {
+            Ok((d, r, l)) => (d, r, l, backend_id, target_id, false, None),
+            Err(e) if backend_id != 0 || target_id != 0 => {
+                warn!(
+                    "使用推理后端 ({},{}) 加载 OpenCV 模型失败: {}；自动回退到 CPU。\
+                     如需使用 Intel NPU，请确认已安装 OpenVINO 运行时及对应的 OpenCV DNN 插件。",
+                    backend_id, target_id, e
+                );
+                let (d, r, l) = build_opencv_models(0, 0).map_err(|cpu_err| {
+                    format!("加载 OpenCV 模型失败（已尝试回退 CPU）：{}", cpu_err)
+                })?;
+                (d, r, l, 0, 0, true, Some(e))
+            }
+            Err(e) => return Err(e),
+        };
 
-        app_state.recognizer = Some(OpenCVResource { inner: recognizer });
-    }
+    app_state.detector = Some(OpenCVResource { inner: detector });
+    app_state.recognizer = Some(OpenCVResource { inner: recognizer });
+    app_state.liveness = Some(OpenCVResource { inner: liveness });
 
-    if app_state.liveness.is_none() {
-        let resource_path = ROOT_DIR
-            .join("resources")
-            .join("face_liveness.onnx");
-        let mut liveness = opencv::dnn::read_net_from_onnx(resource_path.to_str().unwrap_or(""))
-            .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?;
-        liveness
-            .set_preferable_backend(backend_id)
-            .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
-        liveness
-            .set_preferable_target(target_id)
-            .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
-
-        app_state.liveness = Some(OpenCVResource { inner: liveness });
-    }
-
-    Ok(())
+    Ok(ModelLoadResult {
+        requested_backend: backend_id,
+        requested_target: target_id,
+        active_backend,
+        active_target,
+        fell_back,
+        fallback_reason,
+    })
 }
 
 #[tauri::command]

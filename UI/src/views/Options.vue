@@ -131,6 +131,46 @@
 		}
 	}
 
+	// 推理后端名称到 OpenCV DNN backend/target ID 的映射
+	const INFERENCE_BACKEND_MAP: Record<string, { backend: number; target: number }> = {
+		'cpu':         { backend: 0, target: 0 },
+		'opencl':      { backend: 3, target: 1 },
+		'opencl_fp16': { backend: 3, target: 2 },
+		'intel_npu':   { backend: 2, target: 9 },
+	};
+
+	// 用户在下拉框中切换推理后端时，对非 CPU 后端做一次可用性探测：
+	// 尝试用该后端加载模型，若服务自动回退到 CPU，则立即提示用户
+	// （直接回答 issue #125 用户"是我缺少什么文件么"的疑问）。
+	const onInferenceBackendChange = async (value: string) => {
+		if (value === 'cpu') return;
+		const { backend, target } = INFERENCE_BACKEND_MAP[value] ?? { backend: 0, target: 0 };
+		const loadingInstance = ElLoading.service({ fullscreen: true, text: '正在检测所选推理后端是否可用…' });
+		try {
+			// 先卸载，确保此次探测真正用所选后端重新加载
+			await invoke('unload_model').catch(() => {});
+			const result: any = await invoke('load_opencv_model', { backend, target });
+			if (result && result.fell_back) {
+				warn(`推理后端 ${value} 不可用，已回退 CPU：${result.fallback_reason || ''}`);
+				ElMessage.warning({
+					dangerouslyUseHTMLString: true,
+					message: `所选推理后端 <b>${value}</b> 不可用，识别时会自动回退到 CPU。<br />` +
+						(value === 'intel_npu'
+							? 'Intel NPU 需额外安装 <b>OpenVINO 运行时</b> 及对应的 OpenCV DNN 插件 DLL。'
+							: '请确认显卡及驱动支持 OpenCL。')
+				});
+			} else {
+				ElMessage.success(`推理后端 ${value} 可用`);
+			}
+		} catch (error) {
+			ElMessage.error(formatObjectString('检测推理后端失败：', error));
+		} finally {
+			// 探测完毕卸载模型，避免长期占用
+			await invoke('unload_model').catch(() => {});
+			loadingInstance.close();
+		}
+	};
+
 	const saveAppConfig = async () => {
 		// 登录安全，如果启用了登录，那么密码不能为空
 		if(config.loginEnabled && !config.loginPassword.trim()){
@@ -518,7 +558,7 @@
 									</p>
 								</el-form-item>
 								<el-form-item label="推理后端">
-									<el-select v-model="config.inferenceBackend" style="width: 100%">
+									<el-select v-model="config.inferenceBackend" style="width: 100%" @change="onInferenceBackendChange">
 										<el-option value="cpu" label="CPU（默认，兼容所有设备）"/>
 										<el-option value="opencl" label="GPU - OpenCL（需要支持 OpenCL 的显卡）"/>
 										<el-option value="opencl_fp16" label="GPU - OpenCL FP16（更快，支持 FP16 的显卡）"/>

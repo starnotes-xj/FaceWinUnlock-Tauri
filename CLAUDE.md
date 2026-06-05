@@ -146,6 +146,7 @@ Files in `Server/src/`:
 | [#94](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/94) | NVIDIA Broadcast 虚拟摄像头无法工作 | `try_open_camera_with_backend` 和 Unlock EXE 摄像头打开处设置默认 640×480 帧尺寸 + 10 帧预热，解决虚拟摄像头输出异常分辨率/格式导致的花屏或黑帧问题 |
 | [#103](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/103) | 面容被禁用后进行"虚空"登录 | Unlock EXE `load_face_records` 过滤 `view=false`（禁用）和 `lock=true`（锁定）的面容；DLL Creds 线程拒绝空用户名凭据 |
 | [#104](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/104) | 支持域账户登录 | `AccountAuthForm` 新增"域账户"类型 + 域名输入框；Unlock EXE `JsonData`/`FaceRecord` 新增 `domain` 字段，管道凭据组装用实际域名替代硬编码 `"."` |
+| [#125](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/125) | 选 Intel NPU 后录入报错 `StsNotImplemented -213 "Backend(plugin) is not available"`（缺 OpenVINO 运行时插件） | UI `load_opencv_model` 提取 `build_opencv_models` 助手并加入 CPU 自动回退：非 CPU 后端（如 NPU/OpenVINO）初始化失败时记录 `warn!` 并回退到 `(0,0)`，使人脸录入仍可进行——与 Unlock EXE `load_models_with_fallback` 行为一致；模型已全部加载时短路返回保持幂等。命令返回 `ModelLoadResult { requested/active backend+target, fell_back, fallback_reason }`，`Add.vue` 录入时若 `fell_back` 弹 `ElMessage.warning` 提示已回退 CPU；`Options.vue` 推理后端下拉框 `@change` 对非 CPU 后端即时探测（load→检测 `fell_back`→unload），明确告知用户 NPU 需 OpenVINO 运行时。**根因 + 下版彻底修复**：官方预编译 OpenCV 未启用 `WITH_OPENVINO`，无法加载 OpenVINO 后端插件，故 NPU 永远不可用——这不是缺单个文件，而是 OpenCV 本身没编译进 OpenVINO 支持。`release.yml` 已改为从源码编译 OpenCV（`WITH_OPENVINO=ON` + `BUILD_opencv_world=ON`）并随附 OpenVINO 运行时：新增 `Cache/Download OpenVINO`（按 `OPENVINO_VERSION` 下载官方归档）、`Build OpenCV from source`（CMake VS2022，仅编译所需模块）、`Package NPU runtime`（打包 `opencv_world*.dll` + OpenVINO 运行时 DLL + TBB 为 `FaceWinUnlock-NPU-Runtime.zip` 发布资产）。用户解压到安装目录 `resources\` 并安装 Intel NPU 驱动后即可启用 NPU |
 
 ### Registry Keys
 
@@ -171,8 +172,8 @@ DLL-level settings are mirrored to both SQLite and the registry when the user cl
 
 `Unlock/src/main.rs` (607 lines) — Complete background service:
 
-- **`run_control_server`** — Creates `MansonWindowsUnlockRustServer` pipe, reads "run" commands from DLL, sets `run_requested` flag
-- **`run_unlock_server`** — Creates `MansonWindowsUnlockRustUnlock` pipe, spawns per-client handler threads:
+- **`run_control_server`** — Spawns `PIPE_LISTENER_POOL`(=4) concurrent `control_accept_loop` threads on `MansonWindowsUnlockRustServer`, reads "run"/"prepare" commands from DLL, sets `run_requested` flag. **并发监听池修复**：旧实现为单实例 accept 循环，在「客户端连上 → 回到循环创建下一个实例」之间存在零监听窗口；锁屏界面反复重建凭据提供程序时大量并发连接落入该窗口报 `ERROR_PIPE_BUSY`(0x800700E7)，导致 DLL 始终连不上、发不出 "run"、摄像头永不被调用（人脸识别完全失效）。改为预创建 4 个并发监听实例，任意时刻都有空闲实例，彻底消除该窗口。
+- **`run_unlock_server`** — 同样改为 4 线程并发监听池（`unlock_accept_loop`）on `MansonWindowsUnlockRustUnlock`，每个连接同步处理：
   - UI clients: read commands ("hello server" health check, "exit" shutdown)
   - DLL clients: wait for matched credentials and push them via pipe
 - **`face_recognition_loop`** — Main recognition loop:
@@ -291,7 +292,7 @@ Models are loaded into `APP_STATE` by `load_opencv_model(backend, target)`. All 
 | `get_now_username` | ✅ Open — `GetUserNameW` |
 | `stop_camera` | ✅ Open — sets `APP_STATE.camera = None` |
 | `close_app` | ✅ Open — WTS unregister, hide tray, `app_handle.exit(0)` |
-| `load_opencv_model` | ✅ Open — loads all 3 models with backend/target params |
+| `load_opencv_model` | ✅ Open — loads all 3 models with backend/target params; non-CPU 后端失败时自动回退 CPU (#125) |
 | `unload_model` | ✅ Open — sets all 3 model fields to `None` |
 | `get_uuid_v4` | ✅ Open — `uuid::Uuid::new_v4()` |
 | `get_cache_dir` | ✅ Open — returns `%ProgramData%\facewinunlock-tauri\EBWebView` |

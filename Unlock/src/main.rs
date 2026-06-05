@@ -131,14 +131,6 @@ const CPU_INFERENCE: InferenceBackend = InferenceBackend {
     target_id: 0,
 };
 
-// HANDLE wraps *mut c_void which is not Send; safe because it's just a numeric handle
-struct SendHandle(HANDLE);
-unsafe impl Send for SendHandle {}
-impl SendHandle {
-    // 使用方法避免 Rust 2021 partial capture 直接捕获 .0 字段
-    fn take(self) -> HANDLE { self.0 }
-}
-
 // ─── Named pipe helpers ───────────────────────────────────────────────────────
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -279,40 +271,65 @@ fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
     close_handle(pipe);
 }
 
-fn run_control_server(state: Arc<State>) {
+// 并发监听实例数量。旧实现为「单实例 accept 循环」：每次只有一个监听实例，
+// 在「客户端连上 → 循环回去创建下一个实例」之间存在零监听窗口；当凭据提供程序
+// 被反复创建（锁屏界面每次刷新都会重建）大量并发连接时，连接会持续落在该窗口里
+// 报 ERROR_PIPE_BUSY(0x800700E7「所有的管道范例都在使用中」)，导致 DLL 始终连不上、
+// 无法发送 "run"，摄像头永远不被调用（无法人脸识别）。
+// 改为预创建多个并发监听实例，任意时刻都有空闲实例可被连接，彻底消除该窗口。
+const PIPE_LISTENER_POOL: usize = 4;
+
+// 单个监听线程：创建实例 → 阻塞等待客户端 → 处理 → 处理完回到循环用新实例继续监听。
+// 池中其余线程在本线程处理客户端期间仍保持监听，保证始终有空闲实例。
+fn control_accept_loop(state: Arc<State>) {
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
 
         let pipe = match create_named_pipe(PIPE_SERVER_NAME) {
             Ok(p) => p,
-            Err(_) => { thread::sleep(Duration::from_secs(1)); continue; }
+            Err(_) => { thread::sleep(Duration::from_millis(500)); continue; }
         };
 
         if wait_for_client(pipe).is_err() { close_handle(pipe); continue; }
 
-        let state2 = state.clone();
-        let sendable = SendHandle(pipe);
-        thread::spawn(move || handle_control_client(sendable.take(), state2));
+        // 在本监听线程内同步处理该客户端，处理结束后回到循环创建新的监听实例。
+        handle_control_client(pipe, state.clone());
     }
+}
+
+fn run_control_server(state: Arc<State>) {
+    let mut handles = Vec::with_capacity(PIPE_LISTENER_POOL);
+    for _ in 0..PIPE_LISTENER_POOL {
+        let st = state.clone();
+        handles.push(thread::spawn(move || control_accept_loop(st)));
+    }
+    for h in handles { let _ = h.join(); }
 }
 
 // ─── Unlock pipe server（MansonWindowsUnlockRustUnlock）──────────────────────
 
-fn run_unlock_server(state: Arc<State>) {
+fn unlock_accept_loop(state: Arc<State>) {
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
 
         let pipe = match create_named_pipe(PIPE_UNLOCK_NAME) {
             Ok(p) => p,
-            Err(_) => { thread::sleep(Duration::from_secs(1)); continue; }
+            Err(_) => { thread::sleep(Duration::from_millis(500)); continue; }
         };
 
         if wait_for_client(pipe).is_err() { close_handle(pipe); continue; }
 
-        let state2 = state.clone();
-        let sendable = SendHandle(pipe);
-        thread::spawn(move || handle_unlock_client(sendable.take(), state2));
+        handle_unlock_client(pipe, state.clone());
     }
+}
+
+fn run_unlock_server(state: Arc<State>) {
+    let mut handles = Vec::with_capacity(PIPE_LISTENER_POOL);
+    for _ in 0..PIPE_LISTENER_POOL {
+        let st = state.clone();
+        handles.push(thread::spawn(move || unlock_accept_loop(st)));
+    }
+    for h in handles { let _ = h.join(); }
 }
 
 fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {

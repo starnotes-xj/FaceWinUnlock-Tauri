@@ -62,7 +62,13 @@
         try {
             const backendKey = optionsStore.getOptionValueByKey('inferenceBackend') || 'cpu';
             const { backend, target } = INFERENCE_BACKEND_MAP[backendKey] ?? { backend: 0, target: 0 };
-            await invoke('load_opencv_model', { backend, target });
+            const loadResult: any = await invoke('load_opencv_model', { backend, target });
+            // 所选推理后端不可用（如 Intel NPU 缺少 OpenVINO 运行时）时已自动回退到 CPU，
+            // 在此明确告知用户，避免误以为仍在使用所选后端 (issue #125)。
+            if (loadResult && loadResult.fell_back) {
+                warn(`推理后端不可用，已自动回退到 CPU：${loadResult.fallback_reason || ''}`);
+                ElMessage.warning('所选推理后端不可用（Intel NPU 需安装 OpenVINO 运行时），已自动回退到 CPU。');
+            }
         } catch (error) {
             loadingInstance.close();
             ElMessage.error(formatObjectString("加载OpenCV模型失败：", error));

@@ -17,6 +17,11 @@ on:
 
 env:
   OPENCV_VERSION: '4.12.0'
+  # OpenVINO 运行时版本：为 Intel NPU 推理后端（backend=2 INFERENCE_ENGINE / target=9 NPU）提供支持。
+  # 官方预编译 OpenCV 未启用 WITH_OPENVINO，故必须从源码编译 OpenCV 并链接此运行时。
+  OPENVINO_VERSION: '2024.6'
+  # 用于失效缓存的构建修订号：当 OpenCV 编译参数变化时手动 +1 以强制重建缓存。
+  OPENCV_BUILD_REV: 'v2-openvino'
   CARGO_TERM_COLOR: always
   LLVM_ROOT: 'D:\LLVM'
 
@@ -43,36 +48,122 @@ jobs:
         with:
           target: x86_64-pc-windows-msvc
 
-      # ---- OpenCV (cached to avoid re-downloading 300MB+) ----
+      # ---- OpenVINO runtime (Intel NPU 推理后端) ----
+      # 官方预编译 OpenCV 未启用 OpenVINO，选 NPU 会报 StsNotImplemented -213
+      # "Backend(plugin) is not available"。这里安装 OpenVINO 运行时，供下方从源码编译
+      # 的 OpenCV 链接，并在最终安装包中随附运行时 DLL。
+      - name: Cache OpenVINO
+        id: openvino-cache
+        uses: actions/cache@v4
+        with:
+          path: D:\OpenVINO
+          key: openvino-${{ env.OPENVINO_VERSION }}-v1
+
+      - name: Download & Extract OpenVINO
+        if: steps.openvino-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $base = "https://storage.openvinotoolkit.org/repositories/openvino/packages/$env:OPENVINO_VERSION/windows/"
+          Write-Host "Resolving OpenVINO archive from $base ..."
+          $content = (Invoke-WebRequest -Uri $base -UseBasicParsing).Content
+          $m = [regex]::Match($content, 'w_openvino_toolkit_windows_[0-9][0-9\.]*_x86_64\.zip')
+          if (-not $m.Success) { throw "Could not find OpenVINO zip in listing for $env:OPENVINO_VERSION" }
+          $zipName = $m.Value
+          $url = $base + $zipName
+          $zip = "$env:RUNNER_TEMP\openvino.zip"
+          Write-Host "Downloading $url ..."
+          Invoke-WebRequest -Uri $url -OutFile $zip -RetryIntervalSec 10 -MaximumRetryCount 3
+          Write-Host "Extracting OpenVINO..."
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\openvino_tmp" -Force
+          $extracted = Get-ChildItem "$env:RUNNER_TEMP\openvino_tmp" -Directory | Select-Object -First 1
+          Move-Item $extracted.FullName D:\OpenVINO
+          Remove-Item "$env:RUNNER_TEMP\openvino_tmp" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "OpenVINO installed at D:\OpenVINO"
+          Get-ChildItem D:\OpenVINO | Select-Object Name
+
+      - name: Set OpenVINO environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ovCmake = "D:\OpenVINO\runtime\cmake"
+          if (-not (Test-Path $ovCmake)) { throw "OpenVINO cmake config not found: $ovCmake" }
+          $ovBin = "D:\OpenVINO\runtime\bin\intel64\Release"
+          $tbbBin = "D:\OpenVINO\runtime\3rdparty\tbb\bin"
+          "OpenVINO_DIR=$ovCmake" >> $env:GITHUB_ENV
+          $ovBin >> $env:GITHUB_PATH
+          if (Test-Path $tbbBin) { $tbbBin >> $env:GITHUB_PATH }
+          Write-Host "OpenVINO_DIR=$ovCmake"
+
+      # ---- OpenCV (built from source WITH_OPENVINO=ON, cached) ----
       - name: Cache OpenCV
         id: opencv-cache
         uses: actions/cache@v4
         with:
           path: D:\OpenCV
-          key: opencv-${{ env.OPENCV_VERSION }}-v1
+          key: opencv-${{ env.OPENCV_VERSION }}-${{ env.OPENCV_BUILD_REV }}-ov${{ env.OPENVINO_VERSION }}
 
-      - name: Download & Extract OpenCV
+      - name: Build OpenCV from source (WITH_OPENVINO)
         if: steps.opencv-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          Write-Host "Downloading OpenCV $env:OPENCV_VERSION..."
-          $url = "https://github.com/opencv/opencv/releases/download/$env:OPENCV_VERSION/opencv-$env:OPENCV_VERSION-windows.exe"
-          $installer = "$env:RUNNER_TEMP\opencv-installer.exe"
-          Invoke-WebRequest -Uri $url -OutFile $installer -RetryIntervalSec 10 -MaximumRetryCount 3
-          Write-Host "Extracting OpenCV (this may take a minute)..."
-          & 7z x $installer "-o$env:RUNNER_TEMP\opencv_tmp" -y | Out-Null
-          $extracted = Get-ChildItem "$env:RUNNER_TEMP\opencv_tmp" -Directory | Select-Object -First 1
-          Move-Item $extracted.FullName D:\OpenCV
-          Remove-Item "$env:RUNNER_TEMP\opencv_tmp" -Recurse -Force -ErrorAction SilentlyContinue
-          Write-Host "OpenCV installed:"
-          Get-ChildItem D:\OpenCV | Select-Object Name
+          $ErrorActionPreference = "Stop"
+          $src = "$env:RUNNER_TEMP\opencv-src"
+          $build = "$env:RUNNER_TEMP\opencv-build"
+          $srcZip = "$env:RUNNER_TEMP\opencv-src.zip"
+          $url = "https://github.com/opencv/opencv/archive/refs/tags/$env:OPENCV_VERSION.zip"
+          Write-Host "Downloading OpenCV source $env:OPENCV_VERSION ..."
+          Invoke-WebRequest -Uri $url -OutFile $srcZip -RetryIntervalSec 10 -MaximumRetryCount 3
+          Expand-Archive -Path $srcZip -DestinationPath "$env:RUNNER_TEMP\opencv_src_tmp" -Force
+          $extracted = Get-ChildItem "$env:RUNNER_TEMP\opencv_src_tmp" -Directory | Select-Object -First 1
+          Move-Item $extracted.FullName $src
+
+          Write-Host "Configuring OpenCV (WITH_OPENVINO=ON, world build)..."
+          # 仅编译本项目实际使用的模块以缩短构建时间。
+          # FaceDetectorYN / FaceRecognizerSF 位于 objdetect 主模块（无需 contrib）。
+          cmake -S $src -B $build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_INSTALL_PREFIX=D:\OpenCV\install `
+            -DBUILD_opencv_world=ON `
+            -DBUILD_LIST="core,imgproc,imgcodecs,dnn,objdetect,videoio,calib3d,features2d,flann,photo" `
+            -DWITH_OPENVINO=ON `
+            -DOpenVINO_DIR="$env:OpenVINO_DIR" `
+            -DBUILD_TESTS=OFF `
+            -DBUILD_PERF_TESTS=OFF `
+            -DBUILD_EXAMPLES=OFF `
+            -DBUILD_DOCS=OFF `
+            -DBUILD_opencv_apps=OFF `
+            -DBUILD_opencv_python3=OFF `
+            -DBUILD_JAVA=OFF `
+            -DWITH_FFMPEG=OFF
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
+
+          Write-Host "Building OpenCV (this takes a while)..."
+          cmake --build $build --config Release --target install --parallel
+          if ($LASTEXITCODE -ne 0) { throw "OpenCV build failed" }
+
+          # 校验 world 库与 OpenVINO 集成产物
+          $worldLib = Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.lib" | Select-Object -First 1
+          if (-not $worldLib) { throw "opencv_world*.lib not produced" }
+          Write-Host "Built: $($worldLib.FullName)"
+          Get-ChildItem "D:\OpenCV\install" | Select-Object Name
 
       - name: Set OpenCV environment
         shell: pwsh
         run: |
-          "OPENCV_LINK_PATHS=D:\OpenCV\build\x64\vc16\lib" >> $env:GITHUB_ENV
-          "OPENCV_INCLUDE_PATHS=D:\OpenCV\build\include" >> $env:GITHUB_ENV
-          "D:\OpenCV\build\x64\vc16\bin" >> $env:GITHUB_PATH
+          $ErrorActionPreference = "Stop"
+          $libDir = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.lib" | Select-Object -First 1).Directory.FullName
+          $binDir = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.dll" | Select-Object -First 1).Directory.FullName
+          $incDir = "D:\OpenCV\install\include"
+          $worldName = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.lib" | Select-Object -First 1).BaseName
+          if (-not $libDir -or -not $binDir) { throw "OpenCV install layout not found under D:\OpenCV\install" }
+          "OPENCV_LINK_PATHS=$libDir" >> $env:GITHUB_ENV
+          "OPENCV_INCLUDE_PATHS=$incDir" >> $env:GITHUB_ENV
+          "OPENCV_LINK_LIBS=$worldName" >> $env:GITHUB_ENV
+          $binDir >> $env:GITHUB_PATH
+          Write-Host "OPENCV_LINK_PATHS=$libDir"
+          Write-Host "OPENCV_LINK_LIBS=$worldName"
+          Write-Host "OpenCV bin: $binDir"
 
       # ---- LLVM (required by clang-sys / opencv crate build) ----
       # clang-sys / opencv-binding-generator need a discoverable libclang.
@@ -261,6 +352,43 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # ---- Package OpenVINO / OpenCV runtime (for Intel NPU support) ----
+      # NPU 推理需要随附 OpenVINO 运行时 DLL + 从源码编译的 opencv_world DLL。
+      # 这些文件不在 Tauri 默认安装包内，单独打包成 zip 作为发布资产，
+      # 用户解压后放入安装目录 resources\ 即可启用 NPU（仍需安装 Intel NPU 驱动）。
+      - name: Package NPU runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = "$env:RUNNER_TEMP\npu-runtime"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+          # OpenCV world DLL（含 OpenVINO 后端）
+          $worldDll = Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.dll" | Select-Object -First 1
+          if ($worldDll) { Copy-Item $worldDll.FullName $stage }
+
+          # OpenVINO 运行时 DLL + 插件清单
+          $ovBin = "D:\OpenVINO\runtime\bin\intel64\Release"
+          if (Test-Path $ovBin) {
+            Get-ChildItem $ovBin -Filter "*.dll" | ForEach-Object { Copy-Item $_.FullName $stage }
+            Get-ChildItem $ovBin -Filter "*.xml" | ForEach-Object { Copy-Item $_.FullName $stage }
+          }
+          # TBB（OpenVINO 依赖）
+          $tbbBin = "D:\OpenVINO\runtime\3rdparty\tbb\bin"
+          if (Test-Path $tbbBin) {
+            Get-ChildItem $tbbBin -Filter "*.dll" | ForEach-Object { Copy-Item $_.FullName $stage }
+          }
+
+          $files = Get-ChildItem $stage
+          Write-Host "Staged $($files.Count) runtime files:"
+          $files | Select-Object Name
+          if ($files.Count -eq 0) { throw "No runtime DLLs were staged" }
+
+          $zip = "target\release\FaceWinUnlock-NPU-Runtime.zip"
+          New-Item -ItemType Directory -Path "target\release" -Force | Out-Null
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
+          Write-Host "Created $zip"
+
       # ---- Release ----
       - name: Determine release metadata
         id: release_meta
@@ -290,5 +418,6 @@ jobs:
           files: |
             target/release/FaceWinUnlock_Tauri.dll
             target/release/FaceWinUnlock-Server.exe
+            target/release/FaceWinUnlock-NPU-Runtime.zip
             target/release/bundle/nsis/*.exe
             target/release/bundle/msi/*.msi
