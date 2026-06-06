@@ -7,6 +7,7 @@ use windows::Win32::{
     System::Com::{CoTaskMemAlloc, CoTaskMemFree},
     UI::Shell::{
         ICredentialProviderCredential, ICredentialProviderCredentialEvents,
+        ICredentialProviderEvents,
         ICredentialProviderCredential_Impl, CPFIS_NONE, CPFS_DISPLAY_IN_BOTH,
         CPGSR_NO_CREDENTIAL_NOT_FINISHED, CPGSR_NO_CREDENTIAL_FINISHED,
         CPGSR_RETURN_CREDENTIAL_FINISHED, CPSI_ERROR,
@@ -28,6 +29,9 @@ pub struct SampleCredential {
     events: Mutex<Option<ICredentialProviderCredentialEvents>>,
     shared_creds: Arc<Mutex<SharedCredentials>>,
     auth_package_id: u32,
+    provider_events: Mutex<Option<ICredentialProviderEvents>>,
+    provider_advise_context: usize,
+    broker_fallback_enabled: bool,
     /// 动画 UI 上下文（阶段 A）。Advise 时在 LogonUI 进程内创建子窗口+DComp 管线，
     /// UnAdvise 时释放。失败不影响登录功能。
     animation: AnimationSlot,
@@ -35,12 +39,22 @@ pub struct SampleCredential {
 
 impl SampleCredential {
     /// 创建新的凭据实例
-    pub fn new(shared_creds: Arc<Mutex<SharedCredentials>>, auth_package_id: u32, animation: AnimationSlot) -> Self {
+    pub fn new(
+        shared_creds: Arc<Mutex<SharedCredentials>>,
+        auth_package_id: u32,
+        animation: AnimationSlot,
+        provider_events: Option<ICredentialProviderEvents>,
+        provider_advise_context: usize,
+        broker_fallback_enabled: bool,
+    ) -> Self {
         info!("SampleCredential::new - 创建凭据实例");
         Self {
             events: Mutex::new(None),
             shared_creds,
             auth_package_id,
+            provider_events: Mutex::new(provider_events),
+            provider_advise_context,
+            broker_fallback_enabled,
             animation,
         }
     }
@@ -64,7 +78,13 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         // 绑定 DComp 到 LogonUI 父窗口（topmost=true），通过
         // EnumChildWindows 定位凭据磁贴，在头像区叠加 60 FPS GPU 动画。
         if let Some(ev) = events.as_ref() {
-            if is_animation_enabled() {
+            // autologon 阶段：人脸匹配成功后 is_ready=true，LogonUI 会复用同一凭据实例
+            // 再次 Advise（紧接着 GetSerialization 提交凭据并登录）。若在这第二次 Advise
+            // 重新创建 topmost DComp 叠加层，它会盖在「登录→桌面」过渡之上、且 240fps 渲染
+            // 线程未及时清理，导致一直转圈进不了桌面（需重启）。因此凭据已就绪时跳过动画
+            // 创建——只在首次「扫描」阶段播放动画。
+            let creds_ready = self.shared_creds.lock().unwrap().is_ready;
+            if is_animation_enabled() && !creds_ready {
                 match unsafe { ev.OnCreatingWindow() } {
                     Ok(parent_hwnd) => {
                         info!("SampleCredential::Advise - LogonUI 父 HWND: {:?}", parent_hwnd);
@@ -83,6 +103,8 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
                         warn!("SampleCredential::Advise - OnCreatingWindow 失败: {:?}", e);
                     }
                 }
+            } else if creds_ready {
+                info!("SampleCredential::Advise - 凭据已就绪（autologon 阶段），跳过动画创建以避免阻塞桌面过渡");
             } else {
                 info!("SampleCredential::Advise - ANIMATION_UI_ENABLED=0，跳过");
             }
@@ -110,10 +132,19 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         Ok(())
     }
 
-    /// 当凭据磁贴被选中时调用
+    /// 当凭据磁贴被选中时调用。
+    /// 返回值即为 `*pbAutoLogon`——仅当凭据已就绪（面容识别完成）时返回 TRUE，
+    /// 否则返回 FALSE 防止 LogonUI 进入「SetSelected(true)→GetSerialization(未就绪)」
+    /// 的无限重试循环，导致桌面加载卡死（白色圆点转圈→强制关机）。
+    /// 参考：Stack Overflow #66706711, #55512774; Microsoft CPUS_LOGON 文档。
     fn SetSelected(&self) -> windows_core::Result<BOOL> {
-        info!("SampleCredential::SetSelected - 磁贴被选中");
-        Ok(true.into()) // 返回true表示处理成功
+        let creds = self.shared_creds.lock().unwrap();
+        let ready = creds.is_ready && creds.is_unlocked;
+        info!(
+            "SampleCredential::SetSelected - 磁贴被选中, autoLogon={}",
+            ready
+        );
+        Ok(BOOL::from(ready))
     }
 
     /// 当凭据磁贴被取消选中时调用
@@ -325,6 +356,20 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
             s.is_unlocked = false;
         }
 
+        // 销毁动画 UI 资源：确保 DComp 叠加层在登录→桌面过渡之前完全释放。
+        // CPipeListener 凭据线程已启动 500ms 延迟销毁，但在 autologon 快速路径中
+        // GetSerialization 可能在 500ms 内被调用——此处作为最后防线，在凭据返回
+        // Windows 之前同步销毁 AnimationContext，阻止渲染线程在 LogonUI 销毁期间
+        // 继续提交 DComp Commit 导致 DWM 卡死（开机冷启动转圈）。
+        {
+            if let Ok(mut anim) = self.animation.lock() {
+                if anim.is_some() {
+                    info!("SampleCredential::GetSerialization - 凭据就绪，同步销毁动画 UI");
+                    *anim = None;
+                }
+            }
+        }
+
         unsafe {
             (*pcpcs).ulAuthenticationPackage = self.auth_package_id;
             (*pcpcs).cbSerialization         = cb_packed;
@@ -352,17 +397,26 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
 
         // 登录失败：清除凭据，防止 Windows 持续用错误凭据重试 (#102)
         error!("SampleCredential::ReportResult - 登录失败，NTSTATUS: {:#010X}", ntsstatus.0);
+        let fallback_to_pin = self.broker_fallback_enabled
+            && crate::current_process_exe_name() == "credentialuibroker.exe";
         {
             let mut creds = self.shared_creds.lock().unwrap();
             creds.username.clear();
             creds.password.clear();
             creds.is_ready = false;
             creds.is_unlocked = false;
+            if fallback_to_pin {
+                creds.broker_fallback_to_pin = true;
+            }
         }
 
         unsafe {
             if !ppszoptionalstatustext.is_null() {
-                let msg = "用户名或密码错误，请检查设置";
+                let msg = if fallback_to_pin {
+                    "人脸验证未通过，已切回 Windows PIN"
+                } else {
+                    "用户名或密码错误，请检查设置"
+                };
                 let wide: Vec<u16> = msg.encode_utf16().chain(Some(0)).collect();
                 let ptr = CoTaskMemAlloc(wide.len() * 2) as *mut u16;
                 if !ptr.is_null() {
@@ -372,6 +426,17 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
             }
             if !pcpsioptionalstatusicon.is_null() {
                 *pcpsioptionalstatusicon = CPSI_ERROR;
+            }
+        }
+
+        if fallback_to_pin {
+            warn!("SampleCredential::ReportResult - broker 凭据被拒绝，立即回退 Windows PIN");
+            crate::CPipeListener::mark_broker_pin_fallback();
+            crate::CPipeListener::request_unlock_release("broker ReportResult failure");
+            if let Some(events) = self.provider_events.lock().unwrap().as_ref() {
+                if let Err(e) = unsafe { events.CredentialsChanged(self.provider_advise_context) } {
+                    error!("SampleCredential::ReportResult - 触发 PIN 回退重枚举失败: {:?}", e);
+                }
             }
         }
         Ok(())
@@ -384,7 +449,7 @@ fn to_wide_vec(s: &str) -> Vec<u16> {
 }
 
 /// A9：动画 UI 灰度开关 — 注册表 ANIMATION_UI_ENABLED == "1" 才启用
-/// 默认 "0"（不启用），保护开发期 LogonUI 不被未稳定的动画管线影响。
+/// 初始化向导默认写入 "1"；缺少注册表值时保持关闭，保护未初始化环境。
 fn is_animation_enabled() -> bool {
     crate::read_facewinunlock_registry("ANIMATION_UI_ENABLED")
         .map(|v| v.trim() == "1")

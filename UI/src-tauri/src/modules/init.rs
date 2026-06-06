@@ -94,23 +94,26 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         ));
     }
 
-    // 1. 复制 DLL 到 System32
-    let src = ROOT_DIR.join("resources").join(DLL_NAME);
-    let dst = Path::new(SYSTEM32).join(DLL_NAME);
+    // 1. 复制核心文件到 System32
+    let copy_to_system32 = |name: &str| -> Result<(), CustomResult> {
+        let src = ROOT_DIR.join("resources").join(name);
+        let dst = Path::new(SYSTEM32).join(name);
+        if !src.exists() {
+            log::info!("deploy: {} 不存在，跳过", src.display());
+            return Ok(());
+        }
+        std::fs::copy(&src, &dst).map_err(|e| {
+            CustomResult::error(
+                Some(format!("复制 {} 失败: {} → {}: {}", name, src.display(), dst.display(), e)),
+                None,
+            )
+        })?;
+        log::info!("deploy: 已复制 {} → {}", name, dst.display());
+        Ok(())
+    };
 
-    if !src.exists() {
-        return Err(CustomResult::error(
-            Some(format!("找不到 DLL 源文件: {}", src.display())),
-            None,
-        ));
-    }
-
-    std::fs::copy(&src, &dst).map_err(|e| {
-        CustomResult::error(
-            Some(format!("复制 DLL 失败: {} → {}: {}", src.display(), dst.display(), e)),
-            None,
-        )
-    })?;
+    copy_to_system32(DLL_NAME)?;
+    copy_to_system32("FaceWinUnlock-UIA-Helper.exe")?;
 
     // 2. 注册 Credential Provider（HKLM）
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
@@ -166,6 +169,9 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         ("RETRY_DELAY", "1.0"),
         ("UNLOCK_GRACE_PERIOD", "0.0"),
         ("CREDUI_ALLOW_GENERIC", "0"),
+        ("CREDUI_ALLOW_BROKER", "1"),
+        ("CREDUI_BROKER_FALLBACK_TIMEOUT", "5.0"),
+        ("CREDUI_UIA_DETECT", "0"),
         ("DLL_LOG_PATH", log_dir_value),
         ("ANIMATION_FRAMES_PATH", animation_frames_value),
         // 动画 UI（阶段 B/C）— 默认启用以便 VM 测试
@@ -202,6 +208,14 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
             app_key
                 .set_value("RETRY_DELAY", &"1.0")
                 .map_err(|e| CustomResult::error(Some(format!("迁移 RETRY_DELAY 失败: {e}")), None))?;
+        }
+    }
+
+    if let Ok(current) = app_key.get_value::<String, _>("CREDUI_ALLOW_BROKER") {
+        if current.trim() == "0" {
+            app_key
+                .set_value("CREDUI_ALLOW_BROKER", &"1")
+                .map_err(|e| CustomResult::error(Some(format!("迁移 CREDUI_ALLOW_BROKER 失败: {e}")), None))?;
         }
     }
 

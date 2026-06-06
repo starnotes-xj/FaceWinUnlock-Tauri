@@ -53,6 +53,69 @@ fn interruptible_sleep(duration: Duration, stop_flag: &AtomicBool) -> bool {
     }
 }
 
+fn broker_fallback_timeout() -> Duration {
+    let seconds = read_facewinunlock_registry("CREDUI_BROKER_FALLBACK_TIMEOUT")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or(5.0)
+        .clamp(1.5, 30.0);
+    Duration::from_millis((seconds * 1000.0) as u64)
+}
+
+pub fn request_unlock_release(reason: &str) {
+    info!("CPipeListener - 请求 Unlock EXE 释放摄像头: {}", reason);
+    use crate::Pipe::{pipe_connect_to_server, pipe_write_raw, PIPE_UNLOCK_NAME};
+    if let Ok(pipe) = pipe_connect_to_server(PIPE_UNLOCK_NAME, 1_000) {
+        let _ = pipe_write_raw(pipe, b"release");
+        unsafe { let _ = CloseHandle(pipe); }
+    }
+}
+
+fn trigger_broker_pin_fallback(
+    shared_creds: &Arc<Mutex<SharedCredentials>>,
+    stop_flag: &AtomicBool,
+    creds_pipe_raw: &AtomicIsize,
+    send_events: &SendableEvents,
+    animation_slot: &AnimationSlot,
+    reason: &str,
+) {
+    let already_fallback = {
+        let mut creds = shared_creds.lock().unwrap();
+        if creds.broker_fallback_to_pin {
+            true
+        } else {
+            creds.username.clear();
+            creds.password.clear();
+            creds.is_ready = false;
+            creds.is_unlocked = false;
+            creds.broker_fallback_to_pin = true;
+            false
+        }
+    };
+
+    if already_fallback {
+        return;
+    }
+
+    warn!("CPipeListener - broker 人脸验证未完成，回退 Windows PIN: {}", reason);
+
+    // 全局标记 + disarm 钩子（路径 A：面容识别超时）
+    mark_broker_pin_fallback();
+
+    set_anim_state(animation_slot, AnimState::Failure);
+    request_unlock_release(reason);
+    stop_flag.store(true, Ordering::SeqCst);
+
+    let raw = creds_pipe_raw.swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
+    if raw != INVALID_HANDLE_VALUE.0 as isize {
+        unsafe { let _ = CloseHandle(HANDLE(raw as *mut _)); }
+    }
+
+    if let Err(e) = send_events.notify_changed() {
+        error!("CPipeListener - 触发 PIN 回退重枚举失败: {:?}", e);
+    }
+}
+
 // 0.3.3 的核心经验：锁屏桌面运行在 winlogon 中，Credential Provider DLL
 // 直接安装低级鼠标/键盘 hook 才能稳定拿到锁屏输入事件。
 static MOUSE_HOOK_RAW: AtomicIsize = AtomicIsize::new(0);
@@ -65,6 +128,25 @@ static INPUT_RUN_SOURCE: AtomicU8 = AtomicU8::new(0);
 static INPUT_HOOK_REF_COUNT: AtomicUsize = AtomicUsize::new(0);
 const INPUT_SOURCE_MOUSE: u8 = 1;
 const INPUT_SOURCE_KEYBOARD: u8 = 2;
+
+/// 全局标记：broker CredUI 场景（credentialuibroker.exe）已永久回退 PIN。
+///
+/// 一旦置为 true，当前进程中所有 CPipeListener 实例的面容识别将被彻底抑制：
+/// - 客户端线程停止发送 "run"，disarm 钩子后退出
+/// - 新实例的钩子不会被 arm
+///
+/// 两条触发路径：
+/// A) trigger_broker_pin_fallback — 面容识别超时
+/// B) ReportResult — 凭据被 Windows 拒绝（如 passkey 场景）
+static BROKER_PIN_FALLBACK_GLOBAL: AtomicBool = AtomicBool::new(false);
+
+/// 公开函数：标记 broker PIN 回退 + 立即 disarm 全局钩子。
+/// 由 CSampleCredential::ReportResult 调用（凭据被拒绝路径）。
+pub fn mark_broker_pin_fallback() {
+    BROKER_PIN_FALLBACK_GLOBAL.store(true, Ordering::SeqCst);
+    INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
+    INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+}
 
 unsafe extern "system" fn mouse_hook_fn(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && INPUT_HOOKS_ARMED.load(Ordering::SeqCst) {
@@ -186,6 +268,7 @@ impl CPipeListener {
         advise_context: usize,
         shared_creds: Arc<Mutex<SharedCredentials>>,
         is_primary_scenario: bool,
+        broker_fallback_to_pin: bool,
         animation_slot: AnimationSlot,
     ) -> Arc<Mutex<Self>> {
         let is_unlocked    = Arc::new(AtomicBool::new(false));
@@ -193,24 +276,41 @@ impl CPipeListener {
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
         let use_input_hooks = true;
-        // 登录/解锁主场景连接成功后自动触发一次，避免重启后必须反复按键才开摄像头。
-        // CREDUI（Chrome/Edge 查看密码等）仍保留鼠标/键盘触发，避免弹窗一出现就抢摄像头。
-        let auto_run_on_connect = is_primary_scenario;
+        // 所有场景（登录/解锁/CREDUI）统一由鼠标/键盘输入 Hook 触发 "run"，不自动开始识别。
+        // 不启用 auto_run 的原因：① 锁屏后人未走开即被自动解锁，削弱锁屏安全意义（且
+        //   UNLOCK_GRACE_PERIOD 常为 0，锁了立刻就识别）；② 开机时可能在 explorer/系统就绪
+        //   前就提交凭据登录，导致转圈卡死；③ 摄像头常开耗电。用户走到机前本就会动一下
+        //   鼠标/键盘，这一下正好表达解锁意图、再秒级识别——成本极低且更安全稳定。
+        let auto_run_on_connect = false;
         if use_input_hooks {
             install_input_hooks();
         }
+        let scenario_label = if is_primary_scenario { "登录/解锁" } else { "CREDUI/UAC" };
 
         // ── Client 线程（发送 prepare；输入 Hook 触发后发送 run）────────────────────
         let client_thread = {
             let stop_flag = stop_flag.clone();
             let anim_slot = animation_slot.clone();
             let is_unlocked_for_client = is_unlocked.clone();
+            let shared_creds_for_client = shared_creds.clone();
+            let creds_pipe_raw_for_client = creds_pipe_raw.clone();
+            let send_events_for_client = SendableEvents(events.clone(), advise_context);
+            let broker_timeout = broker_fallback_timeout();
             thread::spawn(move || {
                 let connect_enabled = read_facewinunlock_registry("CONNECT_TO_PIPE")
                     .unwrap_or_else(|_| "1".to_string());
                 if connect_enabled != "1" {
                     info!("CPipeListener - CONNECT_TO_PIPE 未启用，跳过管道连接");
                     return;
+                }
+
+                // Broker CredUI 场景（credentialuibroker.exe）：
+                // 先尝试面容识别，超时后回退 Windows PIN。
+                // 无法精准区分 passkey vs 密码（需 UIA COM 跨进程调用，在
+                // 凭据提供程序沙箱中极易死锁），统一走面容→超时→PIN 路径。
+                // Passkey 场景会因无人脸匹配超时自动回退 PIN。
+                if broker_fallback_to_pin {
+                    info!("CPipeListener - broker CredUI 场景：先面容，超时回退 PIN");
                 }
 
                 info!("CPipeListener::start - 进入管道Client线程");
@@ -261,6 +361,7 @@ impl CPipeListener {
                     let mut last_run_at = Instant::now() - min_run_interval;
                     let mut last_prepare_at = Instant::now();
                     let mut auto_run_sent = false;
+                    let mut broker_first_run_at: Option<Instant> = None;
                     if use_input_hooks {
                         INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
                         INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
@@ -268,8 +369,18 @@ impl CPipeListener {
                     }
 
                     loop {
-                        if stop_flag.load(Ordering::SeqCst) {
+                        if stop_flag.load(Ordering::SeqCst)
+                            || BROKER_PIN_FALLBACK_GLOBAL.load(Ordering::SeqCst)
+                        {
+                            if use_input_hooks {
+                                INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
+                                INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+                                INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
+                            }
                             unsafe { let _ = CloseHandle(pipe); }
+                            info!("面容识别已停止（stop={}, broker_fallback={}）",
+                                stop_flag.load(Ordering::SeqCst),
+                                BROKER_PIN_FALLBACK_GLOBAL.load(Ordering::SeqCst));
                             return;
                         }
                         if is_unlocked_for_client.load(Ordering::SeqCst) {
@@ -283,16 +394,14 @@ impl CPipeListener {
                             return;
                         }
 
-                        if use_input_hooks && !hooks_armed && Instant::now() >= arm_after {
+                        if use_input_hooks && !hooks_armed && Instant::now() >= arm_after
+                            && !BROKER_PIN_FALLBACK_GLOBAL.load(Ordering::SeqCst)
+                        {
                             INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
                             INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
                             INPUT_HOOKS_ARMED.store(true, Ordering::SeqCst);
                             hooks_armed = true;
-                            if auto_run_on_connect {
-                                info!("CREDUI/UAC 输入 Hook 已就绪，等待鼠标/键盘触发识别");
-                            } else {
-                                info!("锁屏输入 Hook 已就绪，等待鼠标/键盘触发识别");
-                            }
+                            info!("{} 输入 Hook 已就绪，等待鼠标/键盘触发识别", scenario_label);
                         }
 
                         let input_requested = use_input_hooks
@@ -314,6 +423,13 @@ impl CPipeListener {
                                 break;
                             }
                             last_run_at = Instant::now();
+                            if broker_fallback_to_pin && broker_first_run_at.is_none() {
+                                broker_first_run_at = Some(last_run_at);
+                                info!(
+                                    "broker 场景已开始人脸识别，{} ms 后未完成则回退 Windows PIN",
+                                    broker_timeout.as_millis()
+                                );
+                            }
                             set_anim_state(&anim_slot, AnimState::Scanning);
                             if auto_run_on_connect {
                                 auto_run_sent = true;
@@ -324,13 +440,28 @@ impl CPipeListener {
                                     INPUT_SOURCE_KEYBOARD => "键盘",
                                     _ => "鼠标/键盘",
                                 };
-                                if auto_run_on_connect {
-                                    info!("检测到锁屏{}输入，已发送 run", source_name);
-                                } else {
-                                    info!("检测到 CREDUI/UAC {}输入，已发送 run", source_name);
-                                }
+                                info!("检测到{}{}输入，已发送 run", scenario_label, source_name);
                             } else {
                                 info!("登录/解锁主场景已自动发送 run");
+                            }
+                        }
+
+                        if broker_fallback_to_pin {
+                            if let Some(first_run_at) = broker_first_run_at {
+                                if first_run_at.elapsed() >= broker_timeout
+                                    && !is_unlocked_for_client.load(Ordering::SeqCst)
+                                {
+                                    trigger_broker_pin_fallback(
+                                        &shared_creds_for_client,
+                                        &stop_flag,
+                                        &creds_pipe_raw_for_client,
+                                        &send_events_for_client,
+                                        &anim_slot,
+                                        "face timeout",
+                                    );
+                                    unsafe { let _ = CloseHandle(pipe); }
+                                    return;
+                                }
                             }
                         }
 
@@ -399,6 +530,10 @@ impl CPipeListener {
                                     } else {
                                         {
                                             let mut creds = shared_creds.lock().unwrap();
+                                            if creds.broker_fallback_to_pin {
+                                                warn!("凭据线程：broker 已回退 PIN，丢弃迟到的人脸凭据");
+                                                continue;
+                                            }
                                             info!("凭据线程：收到凭据，用户: {}", user);
                                             creds.username = user;
                                             creds.password = pwd;
@@ -415,6 +550,21 @@ impl CPipeListener {
                                             error!("CredentialsChanged 失败: {:?}", e);
                                         } else {
                                             info!("已通知 Windows 凭据已就绪");
+                                        }
+
+                                        // 启动独立线程：让 Success 动画短暂显示后再销毁
+                                        // 延迟 500ms 后通过 animation_slot 销毁 AnimationContext
+                                        {
+                                            let anim_slot = anim_slot.clone();
+                                            thread::spawn(move || {
+                                                thread::sleep(Duration::from_millis(500));
+                                                if let Ok(mut guard) = anim_slot.lock() {
+                                                    if guard.is_some() {
+                                                        info!("CPipeListener - 销毁动画（凭据已提交）");
+                                                        *guard = None;
+                                                    }
+                                                }
+                                            });
                                         }
                                     }
                                 }
@@ -473,12 +623,7 @@ impl CPipeListener {
 
         // 对话框关闭且不是面容识别成功时，通知 Unlock EXE 释放摄像头。
         if !self.is_unlocked.load(Ordering::SeqCst) {
-            info!("CPipeListener - 手动验证/取消检测到，通知 Unlock EXE 释放资源");
-            use crate::Pipe::{pipe_connect_to_server, pipe_write_raw, PIPE_UNLOCK_NAME};
-            if let Ok(pipe) = pipe_connect_to_server(PIPE_UNLOCK_NAME, 3_000) {
-                let _ = pipe_write_raw(pipe, b"release");
-                unsafe { let _ = CloseHandle(pipe); }
-            }
+            request_unlock_release("manual verification or dialog cancel");
         }
     }
 }

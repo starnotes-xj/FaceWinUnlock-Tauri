@@ -7,7 +7,7 @@
 * **Rust 原生实现**：利用 `windows-rs` 库直接调用 Win32 API，保证内存安全与高性能。
 * **命名管道监听**：后台线程监听自定义管道，支持非接触式凭据注入。
 * **自动登录触发**：接收到凭据后自动调用 `CredentialsChanged` 触发系统登录流程。
-* **场景过滤**：读取注册表 `UNLOCK_SCENE`（默认 `"1,2,4"`）决定在哪些场景下激活，对不在列表中的场景返回 `E_NOTIMPL`，避免浏览器通行密钥 PIN 弹窗卡顿。支持登录（1）、锁屏解锁（2）、UAC/应用层（4，含浏览器查看存储密码等），可在 UI 首选项→系统集成中通过复选框调整，无需手动改注册表。
+* **场景过滤**：读取注册表 `UNLOCK_SCENE`（默认 `"1,2,4"`）决定在哪些场景下激活，对不在列表中的场景返回 `E_NOTIMPL`。CredUI 场景中保留 `consent.exe` 的 UAC 人脸提权；`credentialuibroker.exe` 托管的浏览器/passkey 弹窗默认先尝试人脸，若超时或凭据被拒绝则隐藏本 Provider 并回退 Windows PIN。
 * **多进程日志**：日志文件以追加 + `FILE_SHARE_READ|WRITE` 模式打开，`winlogon.exe` 与 `credentialuibroker.exe` 可同时写入同一 `facewinunlock.log`；每次 DLL 初始化记录 PID，方便区分来源进程。
 
 ## 核心架构

@@ -67,6 +67,7 @@
 	const dllConfig = reactive({
 		showTile: optionsStore.getOptionValueByKey('showTile') ? (optionsStore.getOptionValueByKey('showTile') == 'false' ? false : true) : true,
 		unlockScene: (optionsStore.getOptionValueByKey('unlockScene') || '1,2,4').split(',').map((s: string) => s.trim()).filter(Boolean),
+		credUiAllowBroker: true,
 		animationFps: optionsStore.getOptionValueByKey('animationFps') || 'auto'
 	})
 
@@ -239,6 +240,14 @@
 				value: dllConfig.unlockScene.join(',')
 			},
 			{
+				key: "CREDUI_ALLOW_BROKER",
+				value: "1"
+			},
+			{
+				key: "CREDUI_BROKER_FALLBACK_TIMEOUT",
+				value: "5.0"
+			},
+			{
 				key: "ANIMATION_FPS",
 				value: dllConfig.animationFps // "auto" 或具体数值，DLL 解析失败时自动跟随显示器
 			}
@@ -246,6 +255,7 @@
 			return optionsStore.saveOptions({
 				showTile: dllConfig.showTile,
 				unlockScene: dllConfig.unlockScene.join(','),
+				credUiAllowBroker: "true",
 				animationFps: dllConfig.animationFps
 			})
 		}).then((errorArray)=>{
@@ -765,15 +775,21 @@
 								<p class="label">面容识别场景</p>
 								<p class="sub">
 									选择哪些场景下启用面容解锁。<br />
-									UAC / 应用层：支持浏览器查看存储密码、UAC 弹窗等场景，
-									<strong>不支持</strong>通行密钥创建时要求的 PIN（该场景为系统 TPM 验证，与密码登录无关）。
+									UAC / 应用层：保留 UAC 提权；浏览器 broker 弹窗先尝试人脸，失败后回退 Windows PIN。
 								</p>
 							</div>
 							<el-checkbox-group v-model="dllConfig.unlockScene" style="display: flex; flex-direction: column; gap: 8px;">
 								<el-checkbox label="1">登录（开机登录界面）</el-checkbox>
 								<el-checkbox label="2">解锁（锁屏解锁界面）</el-checkbox>
-								<el-checkbox label="4">UAC / 应用层（浏览器查看密码、UAC 验证等）</el-checkbox>
+								<el-checkbox label="4">UAC / 应用层（含 Chrome / Edge 查看密码）</el-checkbox>
 							</el-checkbox-group>
+						</div>
+						<div class="option-row">
+							<div class="row-text">
+								<p class="label">浏览器 broker 弹窗</p>
+								<p class="sub">Chrome / Edge 查看密码先使用人脸；passkey 无法通过时自动交还 Windows PIN。</p>
+							</div>
+							<el-tag type="success">人脸优先</el-tag>
 						</div>
 						<div class="option-row">
 							<div class="row-text">

@@ -26,6 +26,7 @@ pub mod CSampleCredential;
 pub mod CPipeListener;
 pub mod Pipe;
 pub mod animation;
+pub mod broker_detect;
 
 use CSampleProvider::SampleProvider;
 
@@ -121,6 +122,21 @@ pub fn read_facewinunlock_registry(key_name: &str) -> windows::core::Result<Stri
     Ok(value)
 }
 
+/// 返回当前宿主进程可执行文件名（小写，不含路径），失败时返回空串。
+///
+/// Credential Provider DLL 会被不同宿主加载；CREDUI 场景尤其需要区分：
+/// - consent.exe: UAC 系统提权，保留人脸解锁
+/// - credentialuibroker.exe: 应用层/浏览器 PIN/WebAuthn passkey，先人脸，失败后回退 PIN
+///
+/// `std::env::current_exe()` 在 Windows 上返回宿主进程主模块路径（不是本 DLL），
+/// 正好可作为 CREDUI 调用来源判据。
+pub fn current_process_exe_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()))
+        .unwrap_or_default()
+}
+
 // 定义凭据提供程序的GUID，用于系统识别
 // 8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c
 pub const CLSID_SampleProvider: GUID = GUID::from_u128(0x8a7b9c6d_4e5f_89a0_8b7c_6d5e4f3e2d1c);
@@ -132,6 +148,7 @@ pub struct SharedCredentials {
     pub domain: String,
     pub is_ready: bool,
     pub is_unlocked: bool, // 面容已识别，触发自动登录；由 GetSerialization 消费后重置
+    pub broker_fallback_to_pin: bool, // credentialuibroker 场景已放弃本 Provider，交还 Windows Hello PIN
 }
 
 /// 类工厂实现，用于创建凭据提供程序实例
@@ -304,8 +321,10 @@ pub unsafe extern "system" fn DllMain(
                 warn!("从注册表加载配置失败：{}", e);
             }
         }
-        // 可以添加其他事件的处理（如DLL_PROCESS_DETACH）
-        _ => info!("DllMain: 处理事件，原因代码: {}", dw_reason),
+        // DLL_THREAD_ATTACH/DETACH 等高频事件不做任何处理：DllMain 持有 loader lock，
+        // 在锁内写文件日志（尤其配合动画 UI 的 D3D/DComp 多线程频繁 attach/detach）有死锁
+        // 风险，还会把日志刷爆（曾达 3368/5304 行噪音）。这里保持空处理、立即返回。
+        _ => {}
     }
     BOOL::from(true)
 }

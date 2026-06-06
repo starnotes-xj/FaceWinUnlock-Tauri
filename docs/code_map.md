@@ -1,7 +1,7 @@
 # FaceWinUnlock-Tauri 代码地图
 
 > 精简版代码地图，覆盖三个可执行组件的架构、IPC 协议、动画管线与关键数据流。
-> 最后更新：2026-05-26
+> 最后更新：2026-06-06
 
 ---
 
@@ -40,7 +40,7 @@ Unlock/                      人脸识别后台服务（独立进程）
 DllGetClassObject
 └── SampleClassFactory (IClassFactory)
     └── CreateInstance → SampleProvider (ICredentialProvider)
-        ├── SetUsageScenario  ← 过滤场景（UNLOCK_SCENE 注册表）
+        ├── SetUsageScenario  ← 过滤场景（UNLOCK_SCENE / CREDUI_ALLOW_GENERIC 注册表；broker 失败回退 PIN）
         ├── Advise            ← 启动 CPipeListener
         ├── GetCredentialAt   → SampleCredential (ICredentialProviderCredential)
         │   ├── Advise        ← OnCreatingWindow → AnimationContext（阶段 A）
@@ -129,6 +129,8 @@ UI 使用管道做健康检查：
 | `SHOW_TILE` | `"1"` | 是否显示磁贴 |
 | `DLL_LOG_PATH` | `"C:"` | 日志目录 |
 | `CREDUI_ALLOW_GENERIC` | `"0"` | 是否允许 RDP 等 Generic CredUI（#114） |
+| `CREDUI_ALLOW_BROKER` | `"1"` | 兼容旧配置；当前默认允许 `credentialuibroker.exe` 托管的浏览器/passkey CredUI 先尝试人脸，失败后回退 PIN |
+| `CREDUI_BROKER_FALLBACK_TIMEOUT` | `"5.0"` | broker 场景发起人脸识别后等待凭据的秒数，超时隐藏本 Provider 并交还 Windows PIN |
 | `UNLOCK_GRACE_PERIOD` | `"5.0"` | 锁屏后宽限期秒数（#116） |
 | `ANIMATION_UI_ENABLED` | `"0"` | 动画 UI 开关（灰度，默认关） |
 

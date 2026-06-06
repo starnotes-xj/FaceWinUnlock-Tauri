@@ -39,6 +39,7 @@ impl SampleProvider {
             domain: String::from("."),
             is_ready: false,
             is_unlocked: false,
+            broker_fallback_to_pin: false,
         }));
 
         // 获取认证包ID
@@ -74,7 +75,11 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
     /// cpus: 使用场景（登录、解锁、切换用户等）
     /// dwflags: 附加标志（CREDUI 场景下包含调用方传入的 CREDUIWIN_* 标志）
     fn SetUsageScenario(&self, cpus: CREDENTIAL_PROVIDER_USAGE_SCENARIO, dwflags: u32) -> windows_core::Result<()> {
-        info!("SampleProvider::SetUsageScenario - 设置使用场景: {:?}, flags: {:#X}", cpus, dwflags);
+        let host = crate::current_process_exe_name();
+        info!(
+            "SampleProvider::SetUsageScenario - 设置使用场景: {:?}, flags: {:#X}, 宿主进程: {}",
+            cpus, dwflags, host
+        );
         let mut inner = self.inner.lock().unwrap();
         inner.usage_scenario = cpus;
 
@@ -108,6 +113,10 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             }
         }
 
+        if cpus.0 == 4 && host == "credentialuibroker.exe" {
+            info!("SampleProvider::SetUsageScenario - credentialuibroker.exe 启用先人脸、失败后回退 Windows PIN");
+        }
+
         Ok(())
     }
 
@@ -132,8 +141,17 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             if let Some(events) = &inner.events {
                 // 主场景（登录/解锁）：允许 stop_and_join 时通知 Unlock EXE 释放摄像头 (#117)
                 let is_primary = inner.usage_scenario.0 == 1 || inner.usage_scenario.0 == 2;
+                let is_broker = inner.usage_scenario.0 == 4
+                    && crate::current_process_exe_name() == "credentialuibroker.exe";
                 let slot = inner.animation_slot.clone();
-                inner.listener = Some(CPipeListener::start(events.clone(), upadvisecontext, inner.shared_creds.clone(), is_primary, slot));
+                inner.listener = Some(CPipeListener::start(
+                    events.clone(),
+                    upadvisecontext,
+                    inner.shared_creds.clone(),
+                    is_primary,
+                    is_broker,
+                    slot,
+                ));
             }
         }
 
@@ -233,8 +251,27 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
         info!( "是否显示图标: {}", show_tile);
 
         unsafe {
-            // 始终初始化输出指针，防止未定义行为
-            *pdwdefault = 0;
+            // 始终初始化输出指针，防止未定义行为。
+            // pdwdefault 默认设为 CREDENTIAL_PROVIDER_NO_DEFAULT (0xFFFFFFFF)，
+            // 仅当 autologon 确实就绪时才设为有效索引 0。
+            // 若始终设为 0，LogonUI 会默认选中我们的磁贴并调用 SetSelected，
+            // 结合 SetSelected(true) 即触发自动登录，在凭据未就绪时形成无限重试循环。
+            const CREDENTIAL_PROVIDER_NO_DEFAULT: u32 = u32::MAX;
+            *pdwdefault = CREDENTIAL_PROVIDER_NO_DEFAULT;
+
+            let broker_fallback_to_pin = inner.usage_scenario.0 == 4
+                && crate::current_process_exe_name() == "credentialuibroker.exe"
+                && {
+                    let creds = inner.shared_creds.lock().unwrap();
+                    creds.broker_fallback_to_pin
+                };
+
+            if broker_fallback_to_pin {
+                *pdwcount = 0;
+                *pbautologonwithdefault = BOOL::from(false);
+                info!("SampleProvider::GetCredentialCount - broker 场景已回退 PIN，隐藏 FaceWinUnlock 凭据");
+                return Ok(());
+            }
 
             // 检查是否有面容识别完成的凭据待自动登录
             // 使用 shared_creds.is_unlocked（脉冲信号），由 GetSerialization 成功后重置
@@ -245,6 +282,7 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             };
 
             if autologon {
+                *pdwdefault = 0; // 有效的默认凭据索引
                 *pdwcount = 1;
                 *pbautologonwithdefault = BOOL::from(true);
                 info!("SampleProvider::GetCredentialCount - 自动登录已触发");
@@ -272,7 +310,16 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
 
             // 创建凭据实例并转换为接口返回，并传递收到的用户名和密码
             info!("SampleProvider::GetCredentialAt - 首次创建凭据实例");
-            let cred = SampleCredential::new(inner.shared_creds.clone(), inner.auth_package_id, inner.animation_slot.clone());
+            let is_broker = inner.usage_scenario.0 == 4
+                && crate::current_process_exe_name() == "credentialuibroker.exe";
+            let cred = SampleCredential::new(
+                inner.shared_creds.clone(),
+                inner.auth_package_id,
+                inner.animation_slot.clone(),
+                inner.events.clone(),
+                inner.advise_context,
+                is_broker,
+            );
             let cred_interface: ICredentialProviderCredential = cred.into();
             inner.credential = Some(cred_interface.clone());
             Ok(cred_interface)

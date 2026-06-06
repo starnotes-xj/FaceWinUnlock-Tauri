@@ -859,17 +859,22 @@ fn run_render_loop(
         let target_fps = read_facewinunlock_registry("ANIMATION_FPS")
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(monitor_hz)
+            // 默认帧率上限 60：240fps 对凭据界面小动画属于过度，且会显著加重 LogonUI
+            // 合成负担（开机冷启动时尤其容易卡死）。用户可用注册表 ANIMATION_FPS 显式调高。
+            .unwrap_or(monitor_hz.min(60))
             .clamp(10, 240);
         // 一帧等几次 compositor 心跳：target_fps=monitor_hz 时为 1（每次心跳渲染），
         // 用户把 ANIMATION_FPS 设低于显示器刷新率时跳过 N-1 次心跳节流
         let ticks_per_frame = ((monitor_hz as f64 / target_fps as f64).round() as u32).max(1);
         log::info!("[anim] monitor={monitor_hz} Hz, target={target_fps} fps, vsync-lock {ticks_per_frame} tick(s)/frame");
         let app_start = Instant::now();
+        // 目标帧时长，用于循环尾部的挂钟兜底限速（防 compositor clock 失效时全速空转）
+        let frame_target = Duration::from_secs_f64(1.0 / target_fps.max(1) as f64);
 
         loop {
             if state.stop.load(Ordering::SeqCst) { break; }
 
+            let frame_start = Instant::now();
             let elapsed = app_start.elapsed().as_secs_f64();
 
             let (current_state, state_age) = {
@@ -923,6 +928,23 @@ fn run_render_loop(
             for _ in 0..ticks_per_frame {
                 if state.stop.load(Ordering::SeqCst) { return Ok(()); }
                 let _ = DCompositionWaitForCompositorClock(None, 200);
+            }
+
+            // 冷启动兜底限速：开机首次登录时 DWM 合成器时钟可能尚未稳定，
+            // DCompositionWaitForCompositorClock 会立即返回而非按帧节流，导致本循环全速
+            // 空转 + 每帧 Commit 疯狂提交到 LogonUI 合成器、淹没 DWM，使登录界面卡死
+            // （开机冷启动转圈、进不了桌面、需强关）。用挂钟补足到目标帧时长，确保无论
+            // compositor clock 是否正常，渲染频率都不超过 target_fps。
+            let frame_elapsed = frame_start.elapsed();
+            if frame_elapsed < frame_target {
+                let remain = frame_target - frame_elapsed;
+                let mut slept = Duration::ZERO;
+                while slept < remain {
+                    if state.stop.load(Ordering::SeqCst) { return Ok(()); }
+                    let step = (remain - slept).min(Duration::from_millis(20));
+                    std::thread::sleep(step);
+                    slept += step;
+                }
             }
         }
         Ok(())

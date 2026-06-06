@@ -85,6 +85,14 @@ struct State {
     /// 上一次用户活跃的时间戳（Unix 秒），用于自动锁屏
     last_user_active: AtomicI64,
     active_pipe_handlers: AtomicUsize,
+    /// DLL 是否已发送过至少一次 "run" 命令。delay 模式必须收到 DLL 的显式
+    /// run 后才允许自动重试——防止冷启动时 DLL 仅发 "prepare" 就触发识别，
+    /// 导致凭据在系统未就绪时提交、桌面加载卡死（白色圆点转圈→强制关机）。
+    dll_run_received: AtomicBool,
+    /// 上次面容识别成功的时间戳（Unix 秒）。0 表示尚未成功解锁过。
+    /// 重锁宽限期：成功解锁后重新锁屏时，delay 模式在 RE_LOCK_GRACE_SECS
+    /// 内不触发，防止用户刚锁屏离开就被立即识别解锁。
+    last_successful_unlock_at: AtomicI64,
 }
 
 impl State {
@@ -101,6 +109,8 @@ impl State {
             matched_creds:   Mutex::new(None),
             last_user_active: AtomicI64::new(now),
             active_pipe_handlers: AtomicUsize::new(0),
+            dll_run_received: AtomicBool::new(false),
+            last_successful_unlock_at: AtomicI64::new(0),
         })
     }
 }
@@ -309,6 +319,7 @@ fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
                     } else {
                         state.release_requested.store(false, Ordering::SeqCst);
                         state.run_requested.store(true, Ordering::SeqCst);
+                        state.dll_run_received.store(true, Ordering::SeqCst);
                         log_service(&state.exe_dir, "INFO", "run requested from credential provider");
                     }
                     control_buf.clear();
@@ -947,6 +958,11 @@ fn instant_secs_ago(secs: u64) -> Instant {
 }
 
 fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
+    const COLD_BOOT_GRACE_SECS: u64 = 60;
+    /// 重锁宽限期：成功面容解锁后若重新锁屏（Win+L 或自动锁屏），
+    /// delay 模式在此时间内不触发，防止刚锁屏离开就被立即识别解锁。
+    /// 宽限期过后自动启用——用户回来时无需触碰鼠标键盘即可被动解锁。
+    const RE_LOCK_GRACE_SECS: i64 = 45;
     let resources = exe_dir.join("resources");
     let db_path   = exe_dir.join("database.db");
 
@@ -976,6 +992,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             delayed_run_at = None;
             delay_session_armed = false;
             last_failed_at = None;
+            state.dll_run_received.store(false, Ordering::SeqCst);
             log_service(&exe_dir, "INFO", "camera released");
             state.prepare_requested.store(false, Ordering::SeqCst);
             state.run_requested.store(false, Ordering::SeqCst);
@@ -1024,15 +1041,85 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 log_service(&exe_dir, "INFO", &format!("prepared unlock config for camera {}", camera_index));
             }
             if face_recog_type == "delay" {
-                if !delay_session_armed {
-                    delayed_run_at = Some(Instant::now() + face_recog_delay);
+                // delay 模式必须收到 DLL 的显式 "run" 后才允许自动重试。
+                // 这确保首次面容识别始终由用户在锁屏界面的鼠标/键盘输入触发，
+                // 防止冷启动时 DLL 仅发 "prepare" 就自动开始识别并提交凭据，
+                // 导致系统未就绪时桌面加载卡死（白色圆点转圈→强制关机）。
+                // 一旦 DLL 发送过 "run"，后续的重试/重新识别由 delay 计时器调度。
+                if !delay_session_armed && state.dll_run_received.load(Ordering::SeqCst) {
+                    let mut delay_deadline = Instant::now() + face_recog_delay;
+
+                    // 重锁宽限期：成功解锁后若重新锁屏，在 RE_LOCK_GRACE_SECS
+                    // 内禁止 delay 自动触发，防止用户刚按 Win+L 离开就被立即识别解锁。
+                    // 宽限期过后自动启用——用户离开一段时间后回来即可被动解锁。
+                    let last_unlock = state.last_successful_unlock_at.load(Ordering::SeqCst);
+                    if last_unlock > 0 {
+                        let now_unix = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let elapsed = now_unix - last_unlock;
+                        if elapsed < RE_LOCK_GRACE_SECS {
+                            let remaining = (RE_LOCK_GRACE_SECS - elapsed) as u64;
+                            let re_lock_deadline = Instant::now() + Duration::from_secs(remaining);
+                            if re_lock_deadline > delay_deadline {
+                                delay_deadline = re_lock_deadline;
+                                log_service(
+                                    &exe_dir,
+                                    "INFO",
+                                    &format!(
+                                        "re-lock grace period: {}s since last unlock < {}s, \
+                                         deferring by {}s",
+                                        elapsed, RE_LOCK_GRACE_SECS, remaining,
+                                    ),
+                                );
+                            }
+                        }
+                    }
+
+                    // 冷启动保护：系统启动不足 COLD_BOOT_GRACE_SECS 秒时，
+                    // 推迟面容识别至保护期结束后，避免开机早期 GPU/系统组件未就绪
+                    // 导致模型加载失败或识别异常（exit 101 / 崩溃重启循环）。
+                    // Windows 上 Instant 从系统启动计时，
+                    // checked_sub(COLD_BOOT_GRACE_SECS) 失败即运行时间不足保护期。
+                    if Instant::now()
+                        .checked_sub(Duration::from_secs(COLD_BOOT_GRACE_SECS))
+                        .is_none()
+                    {
+                        // 估算实际运行秒数：反向探测 checked_sub 的最大成功点
+                        let now = Instant::now();
+                        let uptime_secs = (0..COLD_BOOT_GRACE_SECS)
+                            .rev()
+                            .find_map(|s| {
+                                now.checked_sub(Duration::from_secs(s))
+                                    .map(|_| s)
+                            })
+                            .unwrap_or(0);
+                        let remaining = COLD_BOOT_GRACE_SECS - uptime_secs;
+                        let grace_deadline = Instant::now() + Duration::from_secs(remaining);
+                        if grace_deadline > delay_deadline {
+                            delay_deadline = grace_deadline;
+                            log_service(
+                                &exe_dir,
+                                "INFO",
+                                &format!(
+                                    "cold boot protection: uptime ~{}s < grace {}s, deferring \
+                                     face recognition by {}s",
+                                    uptime_secs, COLD_BOOT_GRACE_SECS, remaining,
+                                ),
+                            );
+                        }
+                    }
+
+                    delayed_run_at = Some(delay_deadline);
                     delay_session_armed = true;
                     log_service(
                         &exe_dir,
                         "INFO",
                         &format!(
                             "delayed face recognition scheduled after {:.1}s",
-                            face_recog_delay.as_secs_f64()
+                            (delay_deadline.saturating_duration_since(Instant::now()))
+                                .as_secs_f64()
                         ),
                     );
                 }
@@ -1225,6 +1312,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                             // 更新活跃时间：人脸识别成功说明用户在
                             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
                             state.last_user_active.store(now, Ordering::SeqCst);
+                            state.last_successful_unlock_at.store(now, Ordering::SeqCst);
                             matched = true;
                             break;
                         }

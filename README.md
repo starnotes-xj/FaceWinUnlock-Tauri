@@ -14,6 +14,7 @@
 - ✅ 新增推理后端选择：CPU / OpenCL GPU / OpenCL FP16 / Intel NPU（#125），在「首选项 → 识别参数」中配置
 - ✅ 面容解锁场景可按场景独立配置（登录/解锁/UAC应用层），在「首选项 → 系统集成」中通过复选框调整
 - ✅ 修复多进程日志丢失：Chrome 的 CredUI 在独立进程 `credentialuibroker.exe` 中加载 DLL，现在日志以追加+共享写入模式打开
+- ✅ 调整 Google/passkey（WebAuthn）回退：`credentialuibroker.exe` 托管的 CredUI 默认先尝试人脸，若 passkey 无法接受该凭据或识别超时，则自动交还 Windows PIN；Chrome/Edge 查看密码继续保留人脸识别
 
 **源码说明（原版）：** 原作者因软件被盗卖，于 2026 年 3 月 1 日起将原项目闭源，核心 Rust 代码已删除，仅保留 v0.3.2 框架。本 Fork 为学习研究目的对缺失代码进行了重建。
 
@@ -51,6 +52,7 @@
 | v0.4.2 | 2026-05-30 | Bug修复 | 修复开机面容识别冷启动 / 静默崩溃后无法自愈的问题 |
 | v0.4.3 | 2026-05-30 | 性能优化、Bug修复 | 模型加载改为持续重试而非轻易放弃<br />大幅缩短开机面容恢复时间 |
 | v0.4.4 | 2026-06-05 | 重要Bug修复、稳定性加固 | **彻底修复开机/锁屏人脸识别需等约 30 秒才触发摄像头的问题**：根因为 Unlock 服务在开机头 60 秒内 `Instant::now() - Duration` 算术下溢 panic（exit 101）反复崩溃重启，改用 `checked_sub` 安全回退，worker 开机一次启动成功、识别仅需 1-2 秒<br />supervisor 重启改为指数退避，杜绝崩溃风暴刷爆日志 / 空耗 CPU<br />panic 安全加固：修复 SystemTime 时钟异常 unwrap、并发句柄 double-close<br />新增 worker panic 日志（位置+原因写入 unlock.log），崩溃定位更快<br />Intel NPU 推理后端在缺少 OpenVINO 运行时时自动回退 CPU，选择不再报错 |
+| v0.4.5 | 2026-06-06 | 重要Bug修复 | **保留浏览器查看密码人脸识别，并为 Google/passkey（WebAuthn）增加 PIN 回退**：实测浏览器查看密码与 passkey 验证在 Credential Provider 层的 `CPUS_CREDUI`、`dwflags`、auth package、CLSID、`rgbSerialization` 完全一致，无法精准区分；因此 `credentialuibroker.exe` 中的 CredUI 默认先尝试面容识别，若 5 秒内未拿到凭据或 `ReportResult` 表明凭据被拒绝，则隐藏本 Provider 并交还 Windows 原生 PIN。 |
 
 ---
 
