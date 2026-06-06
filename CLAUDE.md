@@ -348,6 +348,30 @@ Models are loaded into `APP_STATE` by `load_opencv_model(backend, target)`. All 
 
 每次开始新阶段前先用 Opus 设计方案，再切到 Sonnet 实施。详细切换规则见 [docs/animation-development.md](docs/animation-development.md) 第 5 节。
 
+### 已修复 Issue 回归禁令
+
+**绝对禁止**在任何代码变更（新功能、Bug 修复、重构）中重新引入下列已修复的 Issue。每次改动完成后必须对照此表逐项审查：
+
+| Issue | 描述 | 验证文件 | 关键检查点 |
+|-------|------|----------|-----------|
+| [#102](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/102) | 密码错误后仍然尝试登录 | `Server/src/CSampleCredential.rs` | `ReportResult` 失败时清除 `is_ready/is_unlocked` |
+| [#118](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/118) | 浏览器 PIN 弹窗卡顿 | `Server/src/CSampleProvider.rs` | `SetUsageScenario` 对 `UNLOCK_SCENE` 外场景返回 `E_NOTIMPL` |
+| [#126](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/126) | 微软应用程式密码不支持 | `Server/src/CSampleCredential.rs` | `CredPackAuthenticationBufferW` 使用 `CRED_PACK_PROTECTED_CREDENTIALS` |
+| [#113](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/113) | 解锁核心服务突然故障 | `Server/src/CPipeListener.rs` | DLL Client 线程外层重连循环存在 |
+| [#112](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/112) | UAC 面容解锁磁贴弹一下就消失 | `Server/src/CSampleProvider.rs` | `GetCredentialCount` 始终初始化所有输出指针；`is_unlocked` 脉冲信号由 `GetSerialization` 消费后重置 |
+| [#115](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/115) | 锁屏后风扇狂转 | `Server/src/CPipeListener.rs` + `Unlock/src/main.rs` | DLL 端 `auto_run_on_connect=false`（不自动重试 run）；Unlock delay 失败指数退避（最大 160s 冷却） |
+| [#114](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/114) | RDP 干扰 | `Server/src/CSampleProvider.rs` | `SetUsageScenario` 检测 `CREDUIWIN_GENERIC`(0x1) + `CREDUI_ALLOW_GENERIC` 注册表 |
+| [#108](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/108) | 休眠/重启后不自启 | `UI/` | 计划任务 XML 含 `SessionStateChangeTrigger(SessionUnlock)` |
+| [#116](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/116) | 动态锁失效 | `Server/src/CPipeListener.rs` | Client 线程首次连接后 `UNLOCK_GRACE_PERIOD` 宽限期 |
+| [#117](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/117) | 手动解锁后摄像头占用 | `Server/src/CPipeListener.rs` | `stop_and_join` 主场景面容未识别时发送 release |
+| [#121](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/121) | 一致性验证卡顿 | `UI/src-tauri/src/modules/faces.rs` | `VERIFY_CACHE`（LazyLock）缓存参考图特征 |
+| [#92](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/92) | 深色模式 | `UI/src/` | `useTheme` composable + element-plus dark css-vars |
+| [#91](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/91) | 解锁磁贴优化 | `Server/src/CSampleProvider.rs` | `CPFT_SMALL_TEXT` + 标签文字 |
+| [#94](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/94) | NVIDIA Broadcast 虚拟摄像头 | `Unlock/src/main.rs` | 摄像头打开设默认 640×480 + 10 帧预热 |
+| [#103](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/103) | 面容禁用后虚空登录 | `Unlock/src/main.rs` + `Server/src/CPipeListener.rs` | `load_face_records` 过滤 `lock=true`；凭证线程拒绝空用户名 |
+| [#104](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/104) | 域账户登录 | `Unlock/src/main.rs` + `UI/` | `FaceRecord.domain` + `JsonData.domain` |
+| [#125](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/125) | Intel NPU 录入报错 | `UI/src-tauri/src/modules/faces.rs` | 非 CPU 后端失败自动回退 CPU + `ModelLoadResult` 提示 |
+
 ### 关键改动文件
 
 | 文件 | 变更 |
