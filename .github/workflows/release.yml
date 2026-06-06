@@ -293,8 +293,6 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # 在同一 step 内设置 env vars，确保覆盖 runner 预装的 OpenCV 系统变量。
-          # 若通过 GITHUB_ENV 传递，可能被系统级 OPENCV_* 变量覆盖而导致 crate 找到错误路径。
           $libDir = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.lib" | Select-Object -First 1).Directory.FullName
           $binDir = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.dll" | Select-Object -First 1).Directory.FullName
           $incDir = "D:\OpenCV\install\include"
@@ -302,16 +300,30 @@ jobs:
           if (-not $libDir -or -not $binDir -or -not (Test-Path $incDir)) {
             throw "OpenCV install layout not found under D:\OpenCV\install"
           }
-          $env:OPENCV_LINK_PATHS = $libDir
-          $env:OPENCV_INCLUDE_PATHS = $incDir
-          $env:OPENCV_LINK_LIBS = $worldName
+          # 通过 .cargo/config.toml [env] 节强制设置环境变量，覆盖 runner 预装的 OpenCV 系统变量。
+          # PowerShell 的 $env:XX = "..." 对 Cargo build script 子进程不够可靠。
+          $cargoHome = "$env:USERPROFILE\.cargo"
+          New-Item -ItemType Directory -Path $cargoHome -Force | Out-Null
+          $configPath = "$cargoHome\config.toml"
+          @"
+          [env]
+          OPENCV_LINK_PATHS = "$libDir"
+          OPENCV_INCLUDE_PATHS = "$incDir"
+          OPENCV_LINK_LIBS = "$worldName"
+          "@ | Set-Content -Path $configPath -Encoding UTF8
+          Write-Host "=== .cargo/config.toml [env] ==="
+          Get-Content $configPath
+          Write-Host "=== Verify pre-built OpenCV ==="
+          Get-ChildItem "$libDir\opencv_world*.lib" | Select-Object FullName
+          Get-ChildItem "$binDir\opencv_world*.dll" | Select-Object FullName
+          # 确保 PATH 上有 DLL 目录，运行时需要
           $env:PATH = "$binDir;$env:PATH"
-          Write-Host "OPENCV_LINK_PATHS=$env:OPENCV_LINK_PATHS"
-          Write-Host "OPENCV_INCLUDE_PATHS=$env:OPENCV_INCLUDE_PATHS"
-          Write-Host "OPENCV_LINK_LIBS=$env:OPENCV_LINK_LIBS"
-          Write-Host "OpenCV bin: $binDir"
+          # 清除缓存的构建脚本输出，强制 opencv crate 重新探测
           cargo clean -p clang-sys
+          cargo clean -p opencv
           cargo build --release -p winlogon -p unlock
+          # 清理临时配置，防止污染后续步骤
+          Remove-Item $configPath -Force
 
       - name: Verify Server DLL & Unlock EXE
         shell: pwsh
