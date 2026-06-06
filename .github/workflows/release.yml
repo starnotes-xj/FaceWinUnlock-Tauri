@@ -300,17 +300,17 @@ jobs:
           if (-not $libDir -or -not $binDir -or -not (Test-Path $incDir)) {
             throw "OpenCV install layout not found under D:\OpenCV\install"
           }
-          # 通过 .cargo/config.toml [env] 节强制设置环境变量，覆盖 runner 预装的 OpenCV 系统变量。
-          # 使用 TOML 单引号字面量字符串避免反斜杠转义问题。
-          $cargoHome = "$env:USERPROFILE\.cargo"
-          New-Item -ItemType Directory -Path $cargoHome -Force | Out-Null
-          $configPath = "$cargoHome\config.toml"
-          @'
+          # 覆盖 repo 内 .cargo/config.toml（旧路径指向 runner 预装的 D:\OpenCV\build\，不兼容
+          # 我们下载到 D:\OpenCV\install 的预构建 OpenCV）。使用 Cargo [env] + force=true 语法，
+          # 彻底覆盖 runner 系统级 OPENCV_* 变量。TOML 单引号字面量避免反斜杠转义。
+          $configPath = ".cargo\config.toml"
+          if (Test-Path $configPath) { Rename-Item $configPath "$configPath.bak" }
+          @"
           [env]
-          OPENCV_LINK_PATHS = '{0}'
-          OPENCV_INCLUDE_PATHS = '{1}'
-          OPENCV_LINK_LIBS = '{2}'
-          '@ -f $libDir, $incDir, $worldName | Set-Content -Path $configPath -Encoding UTF8
+          OPENCV_INCLUDE_PATHS = { value = '${incDir}', force = true }
+          OPENCV_LINK_PATHS    = { value = '${libDir}', force = true }
+          OPENCV_LINK_LIBS     = { value = '${worldName}', force = true }
+          "@ | Set-Content -Path $configPath -Encoding UTF8
           Write-Host "=== .cargo/config.toml [env] ==="
           Get-Content $configPath
           Write-Host "=== Verify pre-built OpenCV ==="
