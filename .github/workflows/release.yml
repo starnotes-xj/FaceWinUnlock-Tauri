@@ -301,16 +301,16 @@ jobs:
             throw "OpenCV install layout not found under D:\OpenCV\install"
           }
           # 通过 .cargo/config.toml [env] 节强制设置环境变量，覆盖 runner 预装的 OpenCV 系统变量。
-          # PowerShell 的 $env:XX = "..." 对 Cargo build script 子进程不够可靠。
+          # 使用 TOML 单引号字面量字符串避免反斜杠转义问题。
           $cargoHome = "$env:USERPROFILE\.cargo"
           New-Item -ItemType Directory -Path $cargoHome -Force | Out-Null
           $configPath = "$cargoHome\config.toml"
-          @"
+          @'
           [env]
-          OPENCV_LINK_PATHS = "$libDir"
-          OPENCV_INCLUDE_PATHS = "$incDir"
-          OPENCV_LINK_LIBS = "$worldName"
-          "@ | Set-Content -Path $configPath -Encoding UTF8
+          OPENCV_LINK_PATHS = '{0}'
+          OPENCV_INCLUDE_PATHS = '{1}'
+          OPENCV_LINK_LIBS = '{2}'
+          '@ -f $libDir, $incDir, $worldName | Set-Content -Path $configPath -Encoding UTF8
           Write-Host "=== .cargo/config.toml [env] ==="
           Get-Content $configPath
           Write-Host "=== Verify pre-built OpenCV ==="
