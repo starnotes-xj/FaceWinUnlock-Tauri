@@ -136,7 +136,9 @@ if ($LASTEXITCODE -ne 0) { throw "CMake 配置失败" }
 Write-Host ""
 Write-Host "[4/5] 编译 OpenCV（可能需要 10-20 分钟）..." -ForegroundColor Green
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-cmake --build $buildDir --config Release --target install --parallel
+# --parallel 4 限制 MSBuild 项目级并行，/p:CL_MPCount=2 限制编译器进程数，
+# 防止内存不足导致 MSB4166 "子节点过早退出" 崩溃
+cmake --build $buildDir --config Release --target install --parallel 4 -- /p:CL_MPCount=2
 if ($LASTEXITCODE -ne 0) { throw "OpenCV 编译失败" }
 $sw.Stop()
 Write-Host "  编译完成，耗时: $([math]::Round($sw.Elapsed.TotalMinutes, 1)) 分钟" -ForegroundColor Yellow
