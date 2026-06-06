@@ -303,8 +303,8 @@ jobs:
           # 覆盖 repo 内 .cargo/config.toml（旧路径指向 runner 预装的 D:\OpenCV\build\，不兼容
           # 我们下载到 D:\OpenCV\install 的预构建 OpenCV）。使用 Cargo [env] + force=true 语法，
           # 彻底覆盖 runner 系统级 OPENCV_* 变量。TOML 单引号字面量避免反斜杠转义。
-          $configPath = ".cargo\config.toml"
-          if (Test-Path $configPath) { Rename-Item $configPath "$configPath.bak" }
+          $configPath = Join-Path $env:GITHUB_WORKSPACE ".cargo\config.toml"
+          if (Test-Path $configPath) { Remove-Item $configPath -Force }
           @"
           [env]
           OPENCV_INCLUDE_PATHS = { value = '${incDir}', force = true }
