@@ -68,7 +68,9 @@
 		showTile: optionsStore.getOptionValueByKey('showTile') ? (optionsStore.getOptionValueByKey('showTile') == 'false' ? false : true) : true,
 		unlockScene: (optionsStore.getOptionValueByKey('unlockScene') || '1,2,4').split(',').map((s: string) => s.trim()).filter(Boolean),
 		credUiAllowBroker: true,
-		animationFps: optionsStore.getOptionValueByKey('animationFps') || 'auto'
+		animationFps: optionsStore.getOptionValueByKey('animationFps') || 'auto',
+		pinEnabled: optionsStore.getOptionValueByKey('pinEnabled') === 'true',
+		passkeyEnabled: optionsStore.getOptionValueByKey('passkeyEnabled') === 'true',
 	})
 
 	const refreshCameraList = ()=>{
@@ -250,13 +252,23 @@
 			{
 				key: "ANIMATION_FPS",
 				value: dllConfig.animationFps // "auto" 或具体数值，DLL 解析失败时自动跟随显示器
+			},
+			{
+				key: "PIN_ENABLED",
+				value: dllConfig.pinEnabled ? "1" : "0"
+			},
+			{
+				key: "PASSKEY_TAKEOVER_ENABLED",
+				value: dllConfig.passkeyEnabled ? "1" : "0"
 			}
 		]}).then(()=>{
 			return optionsStore.saveOptions({
 				showTile: dllConfig.showTile,
 				unlockScene: dllConfig.unlockScene.join(','),
 				credUiAllowBroker: "true",
-				animationFps: dllConfig.animationFps
+				animationFps: dllConfig.animationFps,
+				pinEnabled: dllConfig.pinEnabled ? "true" : "false",
+				passkeyEnabled: dllConfig.passkeyEnabled ? "true" : "false"
 			})
 		}).then((errorArray)=>{
 			if(errorArray.length > 0){
@@ -790,6 +802,27 @@
 								<p class="sub">Chrome / Edge 查看密码先使用人脸；passkey 无法通过时自动交还 Windows PIN。</p>
 							</div>
 							<el-tag type="success">人脸优先</el-tag>
+						</div>
+						<div class="option-row">
+							<div class="row-text">
+								<p class="label">Hello PIN 解锁</p>
+								<p class="sub">
+									启用后在锁屏磁贴显示 Hello PIN 输入框，输入 Windows Hello PIN 即可解锁。<br />
+									仅支持本地账户（需已设置 Windows Hello PIN），不支持 Microsoft / Entra 在线账户。<br />
+									PIN 不落盘、不存储，仅用于现场 NGC 解密。
+								</p>
+							</div>
+							<el-switch v-model="dllConfig.pinEnabled" />
+							<div class="option-row">
+								<div class="row-text">
+									<p class="label">Passkey 自接管（实验性）</p>
+									<p class="sub">
+										浏览器扩展拦截 passkey 登录，用 Windows Hello PIN 完成 FIDO2 签名。<br />
+										需安装配套扩展；与原生 passkey 功能重复，默认关闭。
+									</p>
+								</div>
+								<el-switch v-model="dllConfig.passkeyEnabled" />
+							</div>
 						</div>
 						<div class="option-row">
 							<div class="row-text">

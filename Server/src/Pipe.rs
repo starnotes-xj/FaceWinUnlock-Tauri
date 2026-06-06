@@ -184,3 +184,44 @@ fn extract_json_str(json: &str, key: &str) -> Option<String> {
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
 }
+
+/// 向 Unlock EXE 发送 Hello PIN NGC 解密请求
+///
+/// 连接到 PIPE_UNLOCK_NAME，发送 `pin:<SID>:<PIN>`，
+/// 读取响应：`ok` → 成功，`fail:...` → 失败。
+///
+/// # Returns
+/// `Ok(true)` — PIN 正确，凭据已写入 Unlock 的 matched_creds
+/// `Ok(false)` — PIN 错误或解密失败
+/// `Err` — 管道通信失败
+pub fn send_pin_to_unlock(sid: &str, pin: &str, timeout_ms: u64) -> Result<bool, String> {
+    let pipe = pipe_connect_to_server(PIPE_UNLOCK_NAME, timeout_ms)
+        .map_err(|e| format!("连接 Unlock 管道失败: {:?}", e))?;
+
+    let payload = format!("pin:{}:{}", sid, pin);
+    pipe_write_raw(pipe, payload.as_bytes())
+        .map_err(|e| {
+            unsafe { let _ = CloseHandle(pipe); }
+            format!("发送 PIN 请求失败: {:?}", e)
+        })?;
+
+    // 读取响应
+    match pipe_read_raw(pipe) {
+        Ok(data) => {
+            unsafe { let _ = CloseHandle(pipe); }
+            let response = String::from_utf8_lossy(&data);
+            if response.starts_with("ok") {
+                Ok(true)
+            } else {
+                // "fail:..." 或未知响应
+                let reason = response.strip_prefix("fail:").unwrap_or("unknown error");
+                warn!("PIN 解锁失败: {}", reason);
+                Ok(false)
+            }
+        }
+        Err(e) => {
+            unsafe { let _ = CloseHandle(pipe); }
+            Err(format!("读取 PIN 响应失败: {:?}", e))
+        }
+    }
+}

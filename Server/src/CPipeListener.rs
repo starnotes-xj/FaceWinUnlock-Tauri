@@ -71,6 +71,19 @@ pub fn request_unlock_release(reason: &str) {
     }
 }
 
+/// broker 场景专用释放命令。除释放摄像头外，还会设置 35s 冷却期，
+/// 在此期间 Unlock EXE 拒绝新 "run" 命令，防止 credentialuibroker.exe
+/// 新建进程后 DLL static 归零导致面容识别被重新激活。
+/// 正常锁屏/解锁使用 request_unlock_release（不设冷却）。
+pub fn request_broker_release(reason: &str) {
+    info!("CPipeListener - 请求 broker release（含冷却期）: {}", reason);
+    use crate::Pipe::{pipe_connect_to_server, pipe_write_raw, PIPE_UNLOCK_NAME};
+    if let Ok(pipe) = pipe_connect_to_server(PIPE_UNLOCK_NAME, 1_000) {
+        let _ = pipe_write_raw(pipe, b"broker_release");
+        unsafe { let _ = CloseHandle(pipe); }
+    }
+}
+
 fn trigger_broker_pin_fallback(
     shared_creds: &Arc<Mutex<SharedCredentials>>,
     stop_flag: &AtomicBool,
@@ -103,7 +116,7 @@ fn trigger_broker_pin_fallback(
     mark_broker_pin_fallback();
 
     set_anim_state(animation_slot, AnimState::Failure);
-    request_unlock_release(reason);
+    request_broker_release(reason);
     stop_flag.store(true, Ordering::SeqCst);
 
     let raw = creds_pipe_raw.swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
@@ -141,9 +154,20 @@ const INPUT_SOURCE_KEYBOARD: u8 = 2;
 static BROKER_PIN_FALLBACK_GLOBAL: AtomicBool = AtomicBool::new(false);
 
 /// 公开函数：标记 broker PIN 回退 + 立即 disarm 全局钩子。
-/// 由 CSampleCredential::ReportResult 调用（凭据被拒绝路径）。
+///
+/// 由 trigger_broker_pin_fallback（路径 A：超时）和
+/// CSampleCredential::ReportResult（路径 B：凭据被拒绝）调用。
+///
+/// **关键**：额外增加 DLL 引用计数以阻止 Windows 在弹窗切换时卸载 DLL。
+/// DLL 一旦被卸载重载，所有 static 变量（包括 BROKER_PIN_FALLBACK_GLOBAL）
+/// 都会被重置，导致 fallback 标记丢失、面容识别重新激活。
 pub fn mark_broker_pin_fallback() {
-    BROKER_PIN_FALLBACK_GLOBAL.store(true, Ordering::SeqCst);
+    // swap(true) 返回旧值。旧值为 true 说明已设置过，跳过。
+    if BROKER_PIN_FALLBACK_GLOBAL.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // 阻止 DLL 被卸载 → static 变量不会因重载而重置
+    crate::dll_add_ref();
     INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
     INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
 }

@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "FaceWinUnlock Passkey Bridge",
+  "version": "0.1.0",
+  "description": "Intercepts navigator.credentials.get to use Windows Hello PIN-based FIDO2 signing",
+  "permissions": ["storage", "nativeMessaging"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["webauthn-inject.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

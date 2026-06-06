@@ -10,6 +10,7 @@ use windows::Win32::{
         ICredentialProviderEvents,
         ICredentialProviderCredential_Impl, CPFIS_NONE, CPFS_DISPLAY_IN_BOTH,
         CPGSR_NO_CREDENTIAL_NOT_FINISHED, CPGSR_NO_CREDENTIAL_FINISHED,
+        CPFS_DISPLAY_IN_SELECTED_TILE,
         CPGSR_RETURN_CREDENTIAL_FINISHED, CPSI_ERROR,
         CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION, CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE,
         CREDENTIAL_PROVIDER_FIELD_STATE, CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE,
@@ -35,6 +36,9 @@ pub struct SampleCredential {
     /// 动画 UI 上下文（阶段 A）。Advise 时在 LogonUI 进程内创建子窗口+DComp 管线，
     /// UnAdvise 时释放。失败不影响登录功能。
     animation: AnimationSlot,
+    /// Hello PIN 输入缓冲区。PIN 启用时，用户输入的 PIN 暂存于此。
+    /// 提交后清零（SecureZeroMemory 风格）。
+    pin_buffer: Mutex<String>,
 }
 
 impl SampleCredential {
@@ -56,6 +60,7 @@ impl SampleCredential {
             provider_advise_context,
             broker_fallback_enabled,
             animation,
+            pin_buffer: Mutex::new(String::new()),
         }
     }
 }
@@ -158,18 +163,30 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
     /// pcpfs: 输出参数，字段的显示状态
     /// pcpfis: 输出参数，字段的交互状态
     fn GetFieldState(
-        &self, 
-        dwfieldid: u32, 
-        pcpfs: *mut CREDENTIAL_PROVIDER_FIELD_STATE, 
+        &self,
+        dwfieldid: u32,
+        pcpfs: *mut CREDENTIAL_PROVIDER_FIELD_STATE,
         pcpfis: *mut CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE
     ) -> windows_core::Result<()> {
         info!("SampleCredential::GetFieldState - 获取字段 {} 的状态", dwfieldid);
+        let pin_enabled = crate::CSampleProvider::is_pin_enabled();
+        let broker_fallback = self.shared_creds.lock().unwrap().broker_fallback_to_pin;
         unsafe {
             match dwfieldid {
                 // 字段0: 图标，字段1: 文本
-                0 | 1 => {  
+                0 | 1 => {
                     *pcpfs = CPFS_DISPLAY_IN_BOTH; // 在磁贴和详细视图中都显示
                     *pcpfis = CPFIS_NONE;          // 非交互元素（不能点击或编辑）
+                }
+                // 字段2: Hello PIN 输入框（仅 PIN 启用且未 broker 回退时可见）
+                2 if pin_enabled && !broker_fallback => {
+                    *pcpfs = CPFS_DISPLAY_IN_SELECTED_TILE; // 仅选中时显示
+                    *pcpfis = CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE(1); // CPFIS_FOCUSED
+                }
+                // 字段3: 提交按钮（仅 PIN 启用且未 broker 回退时可见）
+                3 if pin_enabled && !broker_fallback => {
+                    *pcpfs = CPFS_DISPLAY_IN_SELECTED_TILE;
+                    *pcpfis = CPFIS_NONE;
                 }
                 _ => {
                     error!("SampleCredential::GetFieldState - 无效的字段ID: {}", dwfieldid);
@@ -219,10 +236,15 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         Err(E_NOTIMPL.into())
     }
 
-    /// 获取提交按钮字段的值（未实现）
-    fn GetSubmitButtonValue(&self, _dwfieldid: u32) -> windows_core::Result<u32> {
-        info!("SampleCredential::GetSubmitButtonValue - 未实现的接口");
-        Err(E_NOTIMPL.into())
+    /// 获取提交按钮字段的值
+    /// 字段 3 为 PIN 提交按钮，点击后返回该字段 ID
+    fn GetSubmitButtonValue(&self, dwfieldid: u32) -> windows_core::Result<u32> {
+        info!("SampleCredential::GetSubmitButtonValue - 字段 {}", dwfieldid);
+        if dwfieldid == 3 && crate::CSampleProvider::is_pin_enabled() {
+            Ok(dwfieldid) // 返回点击的字段 ID，LogonUI 随后调用 GetSerialization
+        } else {
+            Err(E_NOTIMPL.into())
+        }
     }
 
     /// 获取下拉框字段的选项数量（未实现）
@@ -237,9 +259,17 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         Err(E_NOTIMPL.into())
     }
 
-    /// 设置文本字段的值（未实现）
-    fn SetStringValue(&self, _dwfieldid: u32, _psz: &windows_core::PCWSTR) -> windows_core::Result<()> {
-        info!("SampleCredential::SetStringValue - 未实现的接口");
+    /// 设置文本字段的值
+    /// 字段 2 为 Hello PIN 输入框，用户输入的 PIN 在此接收
+    fn SetStringValue(&self, dwfieldid: u32, psz: &windows_core::PCWSTR) -> windows_core::Result<()> {
+        if dwfieldid == 2 && crate::CSampleProvider::is_pin_enabled() {
+            let pin = unsafe { psz.to_string() }.unwrap_or_default();
+            info!("SampleCredential::SetStringValue - 收到 PIN 输入 (长度: {})", pin.len());
+            let mut buffer = self.pin_buffer.lock().unwrap();
+            *buffer = pin;
+            return Ok(());
+        }
+        info!("SampleCredential::SetStringValue - 字段 {} 不支持文本输入", dwfieldid);
         Err(E_NOTIMPL.into())
     }
 
@@ -269,6 +299,70 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         _ppszoptionalstatustext: *mut PWSTR,
         _pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON,
     ) -> windows_core::Result<()> {
+        // ── Hello PIN 路径 ──────────────────────────────────────────────
+        // 用户输入了 PIN 并点击提交 → 发送到 Unlock EXE 进行 NGC 解密
+        let pin_to_send = {
+            let mut pin_buf = self.pin_buffer.lock().unwrap();
+            if pin_buf.is_empty() {
+                None
+            } else {
+                let pin = std::mem::take(&mut *pin_buf);
+                Some(pin)
+            }
+        };
+
+        if let Some(pin) = pin_to_send {
+            info!("SampleCredential::GetSerialization - Hello PIN 模式，开始 NGC 解密");
+
+            // 获取当前用户名，传给 Unlock EXE 进行 SID 查找
+            let username = match get_current_username() {
+                Some(u) => u,
+                None => {
+                    error!("SampleCredential::GetSerialization - 无法获取用户名");
+                    unsafe { *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED; }
+                    return Ok(());
+                }
+            };
+
+            // 发送 PIN 和用户名到 Unlock EXE 进行 NGC 解密
+            // Unlock (SYSTEM) 会根据用户名查找 SID 并执行解密链
+            match crate::Pipe::send_pin_to_unlock(&username, &pin, 15_000) {
+                Ok(true) => {
+                    // PIN 正确 — Unlock 端已设置 matched_creds，
+                    // Creds 线程将收到凭据 → CredentialsChanged → autologon
+                    info!("SampleCredential::GetSerialization - PIN NGC 解密成功，等待 autologon");
+                    unsafe { *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED; }
+                    return Ok(());
+                }
+                Ok(false) => {
+                    // PIN 错误
+                    warn!("SampleCredential::GetSerialization - PIN NGC 解密失败（密码错误）");
+                    unsafe {
+                        if !_ppszoptionalstatustext.is_null() {
+                            let msg = "PIN 错误，请重试";
+                            let wide: Vec<u16> = msg.encode_utf16().chain(Some(0)).collect();
+                            let ptr = CoTaskMemAlloc(wide.len() * 2) as *mut u16;
+                            if !ptr.is_null() {
+                                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+                                *_ppszoptionalstatustext = PWSTR(ptr);
+                            }
+                        }
+                        if !_pcpsioptionalstatusicon.is_null() {
+                            *_pcpsioptionalstatusicon = CPSI_ERROR;
+                        }
+                        *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    error!("SampleCredential::GetSerialization - PIN 管道通信失败: {}", e);
+                    unsafe { *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED; }
+                    return Ok(());
+                }
+            }
+        }
+
+        // ── 面容识别路径（原有逻辑）──────────────────────────────────
         let creds = self.shared_creds.lock().unwrap();
 
         if !creds.is_ready {
@@ -432,7 +526,7 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         if fallback_to_pin {
             warn!("SampleCredential::ReportResult - broker 凭据被拒绝，立即回退 Windows PIN");
             crate::CPipeListener::mark_broker_pin_fallback();
-            crate::CPipeListener::request_unlock_release("broker ReportResult failure");
+            crate::CPipeListener::request_broker_release("broker ReportResult failure");
             if let Some(events) = self.provider_events.lock().unwrap().as_ref() {
                 if let Err(e) = unsafe { events.CredentialsChanged(self.provider_advise_context) } {
                     error!("SampleCredential::ReportResult - 触发 PIN 回退重枚举失败: {:?}", e);
@@ -454,4 +548,36 @@ fn is_animation_enabled() -> bool {
     crate::read_facewinunlock_registry("ANIMATION_UI_ENABLED")
         .map(|v| v.trim() == "1")
         .unwrap_or(false)
+}
+
+/// 获取当前登录用户的 SID 字符串
+///
+/// 使用 GetUserNameW → LookupAccountNameW 获取 SID，
+/// 再用 ConvertSidToStringSidW 转换为字符串。
+/// 获取当前登录用户名
+///
+/// 由于 windows-rs 0.59 中 ConvertSidToStringSidW 可能不可用，
+/// 我们通过 GetUserNameW 获取用户名，然后将用户名传给 Unlock EXE，
+/// 由 SYSTEM 权限的 Unlock 进程查找 SID。
+fn get_current_username() -> Option<String> {
+    use windows::Win32::System::WindowsProgramming::GetUserNameW;
+    use windows_core::PWSTR;
+
+    unsafe {
+        let mut name_len = 0u32;
+        let _ = GetUserNameW(None, &mut name_len);
+        if name_len == 0 {
+            return None;
+        }
+        let mut name_buf: Vec<u16> = vec![0u16; name_len as usize];
+        if GetUserNameW(Some(PWSTR(name_buf.as_mut_ptr())), &mut name_len).is_err() {
+            return None;
+        }
+        let username = String::from_utf16_lossy(&name_buf[..name_len as usize - 1]);
+        if username.is_empty() {
+            None
+        } else {
+            Some(username)
+        }
+    }
 }
