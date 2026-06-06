@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "run_dir": "D:\\RustProject\\FaceWinUnlock-Tauri\\output\\hatch-pet\\emilia",
+  "spritesheet": "D:\\RustProject\\FaceWinUnlock-Tauri\\output\\hatch-pet\\emilia\\final\\spritesheet.webp",
+  "validation": "D:\\RustProject\\FaceWinUnlock-Tauri\\output\\hatch-pet\\emilia\\final\\validation.json",
+  "contact_sheet": "D:\\RustProject\\FaceWinUnlock-Tauri\\output\\hatch-pet\\emilia\\qa\\contact-sheet.png",
+  "review": "D:\\RustProject\\FaceWinUnlock-Tauri\\output\\hatch-pet\\emilia\\qa\\review.json",
+  "package": "C:\\Users\\星记\\.codex\\pets\\emilia"
+}

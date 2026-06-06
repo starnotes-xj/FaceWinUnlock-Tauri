@@ -337,13 +337,11 @@ pub fn recover_password(sid: &str, pin: &str) -> Result<(String, String, String)
 
     if is_modern {
         // ── 现代格式（微软账户 / Win10 1903+）────────────────
-        // 没有 DPAPI 密钥 blob、没有 Vault。
-        // PIN entropy 直接用于解密 protector 的 encryptedCbor。
-        // 成功解密 = PIN 正确。返回空密码（微软账户无缓存密码）。
-        verify_pin_modern(&container_info.container_path, &entropy)?;
-
-        // PIN 正确！微软账户没有缓存明文密码，
-        // 返回用户名 + 空密码 + "." 域
+        let protector_payload = verify_pin_modern(&container_info.container_path, &entropy)?;
+        // PIN 正确，protector 已解密。
+        // 微软账户无缓存密码，返回空密码。
+        // protector_payload 包含 SRK，可用于后续密钥解密。
+        drop(protector_payload); // 暂不使用，后续 Phase 2 会用
         Ok((container_info.username, String::new(), ".".to_string()))
     } else {
         // ── 旧格式（本地账户 / Win10 pre-1903）──────────────
@@ -370,76 +368,131 @@ pub fn recover_password(sid: &str, pin: &str) -> Result<(String, String, String)
     }
 }
 
-/// 现代 NGC 格式的 PIN 验证
+/// 现代 NGC 格式：PIN 验证 + protector 解密
 ///
-/// PIN entropy (82 bytes) = "xT5rZW5qVVbrvpuA\0" (18 bytes) + SHA-512 (64 bytes)
-/// AES-256 密钥 = SHA-512 的前 32 bytes
-///
-/// 加密算法: AES-256-CBC (IV = 16 bytes @ offset 0x3C)
-fn verify_pin_modern(container_path: &std::path::Path, entropy: &[u8]) -> Result<(), NgcError> {
-    use std::fs;
+/// 返回解密后的 protector payload (CBOR 结构，包含 SRK 等)。
+/// 解密成功 = PIN 正确。
+fn verify_pin_modern(container_path: &std::path::Path, entropy: &[u8]) -> Result<Vec<u8>, NgcError> {
+    let aes_key = extract_aes_key(entropy)?;
+    let (cbor_bytes, header) = read_protector_encrypted_cbor(container_path)?;
 
-    // AES key = SHA-512 hash part of entropy (bytes 18..50 = first 32 bytes of SHA-512)
+    let ciphertext = &cbor_bytes[header.payload_offset..];
+    let ct = align_16(ciphertext);
+
+    // AES-256-CBC 解密
+    if let Ok(pt) = dpapi::aes256_cbc_decrypt(aes_key, &header.iv, ct) {
+        if !pt.is_empty() { return Ok(pt); }
+    }
+    // 偏移调整重试
+    for adj in 0..4 {
+        let ct2 = align_16(&ciphertext[adj..]);
+        if ct2.len() < 16 { continue; }
+        if let Ok(pt) = dpapi::aes256_cbc_decrypt(aes_key, &header.iv, ct2) {
+            if !pt.is_empty() { return Ok(pt); }
+        }
+    }
+
+    Err(NgcError::InvalidPin)
+}
+
+/// 提取 AES-256 密钥 (SHA-512 哈希前 32 bytes，跳过 18-byte 固定前缀)
+fn extract_aes_key(entropy: &[u8]) -> Result<&[u8], NgcError> {
     if entropy.len() < 50 {
         return Err(NgcError::DecryptionFailed("entropy too short".to_string()));
     }
-    let aes_key = &entropy[18..50]; // skip "xT5rZW5qVVbrvpuA\0" prefix, take first 32 of SHA-512
+    Ok(&entropy[18..50])
+}
 
+/// 读取并解析 Protectors.json 中的 encryptedCbor
+fn read_protector_encrypted_cbor(container_path: &std::path::Path)
+    -> Result<(Vec<u8>, container::NgcIsoHeader), NgcError>
+{
     let pj = container_path.join("Protectors.json");
-    let json_str = fs::read_to_string(&pj)?;
+    let json_str = std::fs::read_to_string(&pj)?;
     let root: serde_json::Value = serde_json::from_str(&json_str)
         .map_err(|e| NgcError::DecryptionFailed(format!("Protectors.json: {}", e)))?;
 
-    let encrypted_cbor = root.get("pin")
+    let cbor_b64 = root.get("pin")
         .and_then(|p| p.get("secretStore"))
         .and_then(|s| s.get("encryptedCbor"))
         .and_then(|v| v.as_str())
         .ok_or(NgcError::ProtectorNotFound)?;
 
-    let cbor_bytes = base64_decode(encrypted_cbor)
-        .map_err(|e| NgcError::DecryptionFailed(format!("encryptedCbor base64: {}", e)))?;
+    let cbor_bytes = base64_decode(cbor_b64)
+        .map_err(|e| NgcError::DecryptionFailed(format!("eCbor base64: {}", e)))?;
 
     let header = container::parse_ngciso_header(&cbor_bytes)?;
+    Ok((cbor_bytes, header))
+}
 
-    if header.payload_offset == 0 || header.payload_offset >= cbor_bytes.len() {
-        return Err(NgcError::DecryptionFailed("invalid payload offset".to_string()));
+fn align_16(data: &[u8]) -> &[u8] {
+    if data.len() % 16 != 0 { &data[..data.len() - (data.len() % 16)] } else { data }
+}
+
+/// NGC 密钥信息（从 Keys/ 目录解密后）
+#[derive(Debug)]
+pub struct NgcKeyInfo {
+    pub filename: String,
+    pub alg: String,
+    pub bits: u32,
+    pub cache_type: u32,
+    pub decrypted: bool,
+    pub key_size: usize,
+}
+
+/// 用 PIN 解密 NGC 容器中的所有密钥
+///
+/// 返回解密后的密钥列表及其元数据。
+pub fn decrypt_ngc_keys(sid: &str, pin: &str) -> Result<Vec<NgcKeyInfo>, NgcError> {
+    let container_info = container::find_ngc_container(sid)?;
+    let entropy = pin::derive_entropy(pin, &container_info.salt, container_info.rounds)?;
+    let _protector_payload = verify_pin_modern(&container_info.container_path, &entropy)?;
+    let aes_key = extract_aes_key(&entropy)?;
+
+    let keys_dir = container_info.container_path.join("Keys");
+    if !keys_dir.is_dir() {
+        return Err(NgcError::DecryptionFailed("Keys 目录不存在".to_string()));
     }
 
-    let ciphertext = &cbor_bytes[header.payload_offset..];
+    let mut results = Vec::new();
+    for entry in std::fs::read_dir(&keys_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() || path.extension().map_or(true, |e| e != "json") { continue; }
 
-    // 确保 ciphertext 是 16 字节对齐的
-    let ct = if ciphertext.len() % 16 != 0 {
-        &ciphertext[..ciphertext.len() - (ciphertext.len() % 16)]
-    } else {
-        ciphertext
-    };
+        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+        let json_str = std::fs::read_to_string(&path)?;
+        let key_json: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|_| NgcError::DecryptionFailed(format!("Key JSON: {}", fname)))?;
 
-    if ct.len() < 16 {
-        return Err(NgcError::DecryptionFailed("ciphertext too short".to_string()));
+        let alg = key_json.get("alg").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        let bits = key_json.get("bits").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let cache_type = key_json.get("cacheType").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+        // 尝试解密 key
+        let decrypted = if let Some(cbor_b64) = key_json.get("encrypted")
+            .and_then(|e| e.get("encryptedCbor"))
+            .and_then(|v| v.as_str())
+        {
+            if let Ok(key_bytes) = base64_decode(cbor_b64) {
+                if let Ok(hdr) = container::parse_ngciso_header(&key_bytes) {
+                    let ct = align_16(&key_bytes[hdr.payload_offset..]);
+                    dpapi::aes256_cbc_decrypt(aes_key, &hdr.iv, ct).is_ok()
+                } else { false }
+            } else { false }
+        } else { false };
+
+        results.push(NgcKeyInfo {
+            filename: fname,
+            alg,
+            bits,
+            cache_type,
+            decrypted,
+            key_size: 0,
+        });
     }
 
-    // 尝试 AES-256-CBC 解密
-    if let Ok(plaintext) = dpapi::aes256_cbc_decrypt(aes_key, &header.iv, ct) {
-        // 解密成功 = PIN 正确
-        // 验证：解密后的数据应该以有效的 CBOR 或可读文本开头
-        if !plaintext.is_empty() {
-            return Ok(());
-        }
-    }
-
-    // 也尝试不使用 IV 偏移，直接从 payload_offset 开始
-    for offset_adj in 0..4 {
-        let ct2 = &ciphertext[offset_adj..];
-        let ct2 = if ct2.len() % 16 != 0 { &ct2[..ct2.len() - (ct2.len() % 16)] } else { ct2 };
-        if ct2.len() < 16 { continue; }
-        if let Ok(plaintext) = dpapi::aes256_cbc_decrypt(aes_key, &header.iv, ct2) {
-            if !plaintext.is_empty() {
-                return Ok(());
-            }
-        }
-    }
-
-    Err(NgcError::InvalidPin)
+    Ok(results)
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {

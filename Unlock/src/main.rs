@@ -1869,7 +1869,7 @@ fn main() {
 
     // ── NGC 解密链 Smoke Test（CLI 模式）────────────────────────────
     let args: Vec<String> = std::env::args().collect();
-    let is_cli_mode = args.iter().any(|a| a == "--ngc-smoke-test" || a == "--ngc-probe" || a == "--ngc-dump");
+    let is_cli_mode = args.iter().any(|a| a == "--ngc-smoke-test" || a == "--ngc-probe" || a == "--ngc-dump" || a == "--ngc-keys");
 
     // windows_subsystem="windows" → 无控制台。CLI 结果全量写入文件。
     let cli_out_path: Option<std::path::PathBuf> = if is_cli_mode {
@@ -1953,6 +1953,65 @@ fn main() {
             }
         }
         cli_done(cli_out_path.as_ref().unwrap(), true);
+    }
+
+    if args.iter().any(|a| a == "--ngc-keys") {
+        let username = args.iter().position(|a| a == "--ngc-keys")
+            .and_then(|i| args.get(i + 1)).map(|s| s.as_str()).unwrap_or("");
+        let pin = args.iter().position(|a| a == "--ngc-keys")
+            .and_then(|i| args.get(i + 2)).map(|s| s.as_str()).unwrap_or("");
+
+        if username.is_empty() || pin.is_empty() {
+            cli_println!(&cli_out_path, "用法: --ngc-keys <用户名> <PIN>");
+            cli_done(cli_out_path.as_ref().unwrap(), false);
+        }
+
+        cli_println!(&cli_out_path, "=== NGC 密钥解密 ===");
+        cli_println!(&cli_out_path, "用户: {}", username);
+
+        let sid = match ngc::lookup_sid_by_username(username) {
+            Ok(s) => { cli_println!(&cli_out_path, "SID: {}", s); s }
+            Err(e) => { cli_println!(&cli_out_path, "SID 查找失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
+        };
+
+        match ngc::decrypt_ngc_keys(&sid, pin) {
+            Ok(keys) => {
+                cli_println!(&cli_out_path, "共 {} 个密钥:", keys.len());
+                cli_println!(&cli_out_path);
+                let mut decrypted_count = 0;
+                for k in &keys {
+                    let status = if k.decrypted { "✅" } else { "❌" };
+                    let cache_desc = match k.cache_type {
+                        1 => "NGC 登录密钥",
+                        2 => "RSA 认证密钥",
+                        4 => "FIDO2 (ECDSA_P256)",
+                        _ => "未知类型",
+                    };
+                    cli_println!(&cli_out_path, "  {} {} {}bit cacheType:{} ({})",
+                        status, k.alg, k.bits, k.cache_type, cache_desc);
+                    cli_println!(&cli_out_path, "    {}", k.filename);
+                    if k.decrypted { decrypted_count += 1; }
+                }
+                cli_println!(&cli_out_path);
+                cli_println!(&cli_out_path, "解密成功: {}/{}", decrypted_count, keys.len());
+                if decrypted_count > 0 {
+                    let has_fido = keys.iter().any(|k| k.cache_type == 4 && k.decrypted);
+                    let has_login = keys.iter().any(|k| k.cache_type == 1 && k.decrypted);
+                    cli_println!(&cli_out_path);
+                    if has_login {
+                        cli_println!(&cli_out_path, "💡 NGC 登录密钥已解密 → Phase 2 passkey 可用");
+                    }
+                    if has_fido {
+                        cli_println!(&cli_out_path, "🔑 FIDO2 密钥已解密 → Phase 2 passkey 签名可用");
+                    }
+                }
+                cli_done(cli_out_path.as_ref().unwrap(), decrypted_count > 0);
+            }
+            Err(e) => {
+                cli_println!(&cli_out_path, "密钥解密失败: {}", e);
+                cli_done(cli_out_path.as_ref().unwrap(), false);
+            }
+        }
     }
 
     if args.iter().any(|a| a == "--ngc-smoke-test") {
