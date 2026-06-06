@@ -1348,11 +1348,22 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             insert_unlock_log(&db_path, &exe_dir, matched_face_id, true, None);
             last_failed_at = None;
             state.run_requested.store(false, Ordering::SeqCst);
+            // 重置 delay 状态，确保下次锁屏时能重新布防。
+            // 若不重置，依赖 has_credential_client 检测窗口来清除
+            // 存在竞态：新 DLL 在 recognition_loop 30ms 轮询间隔内
+            // 重新连接时 delay_session_armed 未清除，永远不再触发。
+            delayed_run_at = None;
+            delay_session_armed = false;
         } else if !state.release_requested.load(Ordering::SeqCst) {
             if saw_face {
                 insert_unlock_log(&db_path, &exe_dir, None, false, None);
             }
             last_failed_at = Some(Instant::now());
+            // 重置 delay 状态，允许下次 prepare 心跳重新布防。
+            // 识别失败（无人脸/不匹配）后若不重置，delay_session_armed
+            // 保持 true 导致 delay 模式永久失效——用户离开后回来无法自动解锁。
+            delayed_run_at = None;
+            delay_session_armed = false;
             log_service(&exe_dir, "WARN", "face recognition finished without a match");
         }
         state.run_requested.store(false, Ordering::SeqCst);
