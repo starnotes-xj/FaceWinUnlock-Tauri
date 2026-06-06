@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU32, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -93,6 +93,10 @@ struct State {
     /// 重锁宽限期：成功解锁后重新锁屏时，delay 模式在 RE_LOCK_GRACE_SECS
     /// 内不触发，防止用户刚锁屏离开就被立即识别解锁。
     last_successful_unlock_at: AtomicI64,
+    /// 连续识别失败次数，用于 delay 退避。每次识别失败 +1，成功后清零。
+    /// delay 重新布防的冷却时间 = face_recog_delay × 2^min(failures, 4)，
+    /// 防止无人时摄像头反复打开导致风扇狂转、电池耗尽。
+    consecutive_failures: AtomicU32,
 }
 
 impl State {
@@ -111,6 +115,7 @@ impl State {
             active_pipe_handlers: AtomicUsize::new(0),
             dll_run_received: AtomicBool::new(false),
             last_successful_unlock_at: AtomicI64::new(0),
+            consecutive_failures: AtomicU32::new(0),
         })
     }
 }
@@ -1077,6 +1082,41 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                         }
                     }
 
+                    // 连续失败退避：基于距上次失败的时间，而非从现在起算。
+                    // 冷却 = face_recog_delay × 2^min(failures, 4)，封顶 16×。
+                    // 若用户已离开很久（冷却早已过期），立即重试。
+                    // 防止无人时摄像头反复打开跑 DNN 推理导致风扇狂转、电池耗尽。
+                    let failures = state.consecutive_failures.load(Ordering::SeqCst);
+                    if failures > 0 {
+                        if let Some(ref failed_at) = last_failed_at {
+                            let backoff_mult = 1u32 << failures.min(4); // 1,2,4,8,16
+                            let backoff = (face_recog_delay * backoff_mult)
+                                .max(Duration::from_secs(30));
+                            let elapsed = failed_at.elapsed();
+                            if elapsed < backoff {
+                                let remaining = backoff - elapsed;
+                                let backoff_deadline =
+                                    Instant::now() + remaining;
+                                if backoff_deadline > delay_deadline {
+                                    delay_deadline = backoff_deadline;
+                                    log_service(
+                                        &exe_dir,
+                                        "INFO",
+                                        &format!(
+                                            "delay backoff: {} consecutive failures, \
+                                             {:.0}s elapsed, cooldown {:.0}s, \
+                                             remaining {:.0}s",
+                                            failures,
+                                            elapsed.as_secs_f64(),
+                                            backoff.as_secs_f64(),
+                                            remaining.as_secs_f64(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     // 冷启动保护：系统启动不足 COLD_BOOT_GRACE_SECS 秒时，
                     // 推迟面容识别至保护期结束后，避免开机早期 GPU/系统组件未就绪
                     // 导致模型加载失败或识别异常（exit 101 / 崩溃重启循环）。
@@ -1348,10 +1388,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             insert_unlock_log(&db_path, &exe_dir, matched_face_id, true, None);
             last_failed_at = None;
             state.run_requested.store(false, Ordering::SeqCst);
+            state.consecutive_failures.store(0, Ordering::SeqCst);
             // 重置 delay 状态，确保下次锁屏时能重新布防。
-            // 若不重置，依赖 has_credential_client 检测窗口来清除
-            // 存在竞态：新 DLL 在 recognition_loop 30ms 轮询间隔内
-            // 重新连接时 delay_session_armed 未清除，永远不再触发。
             delayed_run_at = None;
             delay_session_armed = false;
         } else if !state.release_requested.load(Ordering::SeqCst) {
@@ -1359,12 +1397,14 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 insert_unlock_log(&db_path, &exe_dir, None, false, None);
             }
             last_failed_at = Some(Instant::now());
+            // 递增连续失败计数，用于 delay 退避。
+            let fails = state.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
             // 重置 delay 状态，允许下次 prepare 心跳重新布防。
-            // 识别失败（无人脸/不匹配）后若不重置，delay_session_armed
-            // 保持 true 导致 delay 模式永久失效——用户离开后回来无法自动解锁。
             delayed_run_at = None;
             delay_session_armed = false;
-            log_service(&exe_dir, "WARN", "face recognition finished without a match");
+            log_service(&exe_dir, "WARN", &format!(
+                "face recognition finished without a match (consecutive failures: {fails})"
+            ));
         }
         state.run_requested.store(false, Ordering::SeqCst);
         state.recognition_active.store(false, Ordering::SeqCst);
