@@ -36,8 +36,8 @@ pub fn derive_entropy(pin: &str, salt: &[u8], rounds: u32) -> Result<Vec<u8>, Ng
     let mut derived = [0u8; 32];
     pbkdf2_hmac::<Sha256>(&pin_utf16le, salt, rounds, &mut derived);
 
-    // Step 3: derived → hex lowercase → UTF-16LE
-    let derived_hex: String = derived.iter().map(|b| format!("{:02x}", b)).collect();
+    // Step 3: derived → hex UPPERCASE → UTF-16LE (必须大写，dpapilab-ng 权威参考)
+    let derived_hex: String = derived.iter().map(|b| format!("{:02X}", b)).collect();
     let derived_utf16le = to_utf16le_bytes(&derived_hex);
 
     // Step 4: SHA-512(derived_utf16le)

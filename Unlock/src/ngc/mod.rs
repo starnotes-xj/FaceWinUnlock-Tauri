@@ -14,8 +14,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub mod container;
-mod pin;
-mod dpapi;
+pub mod pin;
+pub mod dpapi;
 mod vault;
 
 // ─── Error type ────────────────────────────────────────────────────────────
@@ -368,6 +368,63 @@ pub fn recover_password(sid: &str, pin: &str) -> Result<(String, String, String)
     }
 }
 
+/// 公开接口：解密 NGC protector，返回解密后的 payload bytes。
+///
+/// 封装了容器定位、entropy 派生和 protector 解密的完整流程。
+pub fn decrypt_protector(sid: &str, pin: &str) -> Result<Vec<u8>, NgcError> {
+    let container_info = container::find_ngc_container(sid)?;
+    let entropy = pin::derive_entropy(pin, &container_info.salt, container_info.rounds)?;
+    verify_pin_modern(&container_info.container_path, &entropy)
+}
+
+/// 使用 SRK（Storage Root Key）解密单个 NGC 密钥。
+///
+/// # Arguments
+/// * `container_path` — NGC 容器目录路径（如 `%LOCALAPPDATA%\Microsoft\Ngc\{GUID}`）
+/// * `protector_plaintext` — `decrypt_protector`/`verify_pin_modern` 返回的 protector payload
+/// * `key_filename` — Keys 目录下的 JSON 文件名（如 `"{GUID}.json"`）
+///
+/// SRK = protector payload 前 32 字节。
+/// Key JSON 中的 encryptedCbor 用 SRK 做 AES-256-CBC 解密。
+///
+/// # Returns
+/// 解密后的密钥明文 bytes。
+pub fn decrypt_ngc_key(
+    container_path: &std::path::Path,
+    protector_plaintext: &[u8],
+    key_filename: &str,
+) -> Result<Vec<u8>, NgcError> {
+    if protector_plaintext.len() < 32 {
+        return Err(NgcError::DecryptionFailed(
+            "protector payload too short to extract SRK (need >= 32 bytes)".to_string(),
+        ));
+    }
+    let srk = &protector_plaintext[..32];
+
+    let key_path = container_path.join("Keys").join(key_filename);
+    let json_str = std::fs::read_to_string(&key_path)?;
+    let key_json: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| NgcError::DecryptionFailed(format!("Key JSON parse error: {}", e)))?;
+
+    let cbor_b64 = key_json
+        .get("encrypted")
+        .and_then(|e| e.get("encryptedCbor"))
+        .and_then(|v| v.as_str())
+        .ok_or(NgcError::DecryptionFailed(
+            "encryptedCbor not found in key JSON".to_string(),
+        ))?;
+
+    let cbor_bytes = base64_decode(cbor_b64)
+        .map_err(|e| NgcError::DecryptionFailed(format!("base64 decode error: {}", e)))?;
+
+    let header = container::parse_ngciso_header(&cbor_bytes)?;
+
+    let ciphertext = &cbor_bytes[header.payload_offset..];
+    let ct = align_16(ciphertext);
+
+    dpapi::aes256_cbc_decrypt(srk, &header.iv, ct)
+}
+
 /// 现代 NGC 格式：PIN 验证 + protector 解密
 ///
 /// 返回解密后的 protector payload (CBOR 结构，包含 SRK 等)。
@@ -379,11 +436,15 @@ fn verify_pin_modern(container_path: &std::path::Path, entropy: &[u8]) -> Result
     let ciphertext = &cbor_bytes[header.payload_offset..];
     let ct = align_16(ciphertext);
 
-    // AES-256-CBC 解密
+    // AES-256-GCM 解密（现代 NgcIso 格式）
+    // IV[..12] = Nonce, Tag = 末尾16字节
+    if let Ok(pt) = dpapi::aes256_gcm_decrypt(aes_key, &header.iv, ct) {
+        return Ok(pt);
+    }
+    // 回退：旧格式 AES-256-CBC
     if let Ok(pt) = dpapi::aes256_cbc_decrypt(aes_key, &header.iv, ct) {
         if !pt.is_empty() { return Ok(pt); }
     }
-    // 偏移调整重试
     for adj in 0..4 {
         let ct2 = align_16(&ciphertext[adj..]);
         if ct2.len() < 16 { continue; }
@@ -391,7 +452,6 @@ fn verify_pin_modern(container_path: &std::path::Path, entropy: &[u8]) -> Result
             if !pt.is_empty() { return Ok(pt); }
         }
     }
-
     Err(NgcError::InvalidPin)
 }
 
@@ -477,7 +537,9 @@ pub fn decrypt_ngc_keys(sid: &str, pin: &str) -> Result<Vec<NgcKeyInfo>, NgcErro
             if let Ok(key_bytes) = base64_decode(cbor_b64) {
                 if let Ok(hdr) = container::parse_ngciso_header(&key_bytes) {
                     let ct = align_16(&key_bytes[hdr.payload_offset..]);
-                    dpapi::aes256_cbc_decrypt(aes_key, &hdr.iv, ct).is_ok()
+                    dpapi::aes256_gcm_decrypt(aes_key, &hdr.iv, ct)
+                        .or_else(|_| dpapi::aes256_cbc_decrypt(aes_key, &hdr.iv, ct))
+                        .is_ok()
                 } else { false }
             } else { false }
         } else { false };
@@ -493,6 +555,11 @@ pub fn decrypt_ngc_keys(sid: &str, pin: &str) -> Result<Vec<NgcKeyInfo>, NgcErro
     }
 
     Ok(results)
+}
+
+pub fn base64_encode(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {

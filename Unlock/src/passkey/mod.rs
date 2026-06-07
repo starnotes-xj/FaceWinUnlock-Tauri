@@ -19,8 +19,8 @@
 //! 注册表 `PASSKEY_TAKEOVER_ENABLED`（默认 `"0"`）。
 //! 设为 `"1"` 后，Unlock EXE 启动 HTTP 签名服务。
 
-mod fido2;
-mod signer;
+pub mod fido2;
+pub mod signer;
 mod http;
 mod sql;
 

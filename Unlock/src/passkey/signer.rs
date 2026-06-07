@@ -1,238 +1,224 @@
 //! FIDO2 assertion 签名器
 //!
-//! 复用 Phase 1 的 `ngc` 模块：
-//! 1. 用 PIN 解出 NGC RSA 私钥（ngc::recover_password 同款 DPAPI 链路）
-//! 2. 枚举 NGC 容器中的 FIDO_AUTHENTICATOR 凭据
-//! 3. 用 CNG BCrypt 签名 assertion
+//! 使用 `crate::ngc` 模块解密 NGC Keys/ 中的 ECDSA_P256 FIDO2 私钥，
+//! 通过 CNG BCryptSignHash 签名 assertion。
 
 use crate::ngc;
 use super::fido2;
+use std::path::Path;
 
-/// 可用的 FIDO2 凭据信息
 #[derive(Debug, Clone)]
 pub struct FidoCredential {
-    /// Base64url 凭据 ID（WebAuthn credential ID）
     pub credential_id: String,
-    /// NGC 容器中对应的私钥名称
-    pub key_name: String,
-    /// 关联的用户名
+    pub key_filename: String,
     pub user_name: String,
-    /// 关联的用户 SID
-    pub user_sid: String,
-    /// NGC 容器 GUID
-    pub container_guid: String,
+    pub container_path: std::path::PathBuf,
 }
 
 /// 对 assertion 请求生成签名
-///
-/// # Arguments
-/// * `pin` — 用户输入的 Windows Hello PIN
-/// * `request` — 浏览器传来的 assertion 请求
-/// * `credential_id` — 选定的凭据 ID
-/// * `sign_count` — 当前签名计数器
-/// * `db_path` — 数据库路径（用于持久化 signCount）
-///
-/// # Returns
-/// 构造好的 AssertionResponse
 pub fn sign_assertion(
     pin: &str,
     request: &fido2::AssertionRequest,
     credential_id: &str,
     sign_count: u32,
+    ngc_root: &Path,
 ) -> Result<fido2::AssertionResponse, String> {
-    // 1. 枚举 NGC 中的 FIDO 凭据，找到匹配的 credential_id
-    let credentials = enumerate_fido_credentials()?;
-    let cred = credentials
-        .iter()
-        .find(|c| c.credential_id == credential_id)
-        .ok_or_else(|| format!("未找到凭据: {}", credential_id))?;
-
-    // 2. 用 PIN 解密 FIDO 私钥
-    let fido_key = extract_fido_key(pin, &cred.user_sid, &cred.key_name)?;
-
-    // 3. 构造 authenticatorData
+    let cred = find_fido_credential(ngc_root, credential_id)?;
+    let ecdsa_key = decrypt_ecdsa_key(pin, &cred.container_path, &cred.key_filename)?;
     let auth_data = fido2::build_authenticator_data(&request.rp_id, sign_count);
+    let client_json_str = fido2::build_client_data_json(&request.challenge, &request.origin);
+    let to_sign = fido2::build_to_be_signed(&auth_data, &client_json_str);
+    let der_sig = ecdsa_sign(&ecdsa_key, &to_sign).map_err(|e| {
+        let magic = if ecdsa_key.len() >= 4 { u32::from_le_bytes([ecdsa_key[0],ecdsa_key[1],ecdsa_key[2],ecdsa_key[3]]) } else { 0 };
+        let hex8: String = ecdsa_key.iter().take(16).map(|b| format!("{:02X}",b)).collect::<Vec<_>>().join(" ");
+        format!("{} [key: {}B, magic=0x{:08X}, first16={}]", e, ecdsa_key.len(), magic, hex8)
+    })?;
 
-    // 4. 构造 clientDataJSON
-    let client_json = fido2::build_client_data_json(&request.challenge, &request.origin);
-
-    // 5. 计算待签名数据
-    let to_sign = fido2::build_to_be_signed(&auth_data, &client_json);
-
-    // 6. 用 CNG 签名
-    let signature = sign_with_cng(&fido_key, &to_sign)?;
-
-    // 7. Base64url 编码各字段
     Ok(fido2::AssertionResponse {
         id: credential_id.to_string(),
         raw_id: credential_id.to_string(),
         authenticator_data: fido2::base64url(&auth_data),
-        client_data_json: fido2::base64url(client_json.as_bytes()),
-        signature: fido2::base64url(&signature),
+        client_data_json: fido2::base64url(client_json_str.as_bytes()),
+        signature: fido2::base64url(&der_sig),
         user_handle: None,
         cred_type: "public-key".to_string(),
     })
 }
 
-/// 枚举 NGC 容器中的 FIDO2 凭据
-///
-/// NGC 容器中 FIDO2 密钥以 `FIDO_AUTHENTICATOR//<rpId>//<credId>` 格式命名。
-/// 对应 Shwmae 中的 FIDO key enumeration 逻辑。
-pub fn enumerate_fido_credentials() -> Result<Vec<FidoCredential>, String> {
-    use std::fs;
-    use std::path::Path;
-
-    let ngc_root = r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc";
-    let ngc_dir = Path::new(ngc_root);
-    if !ngc_dir.is_dir() {
-        return Err("NGC 目录不可访问，请以 SYSTEM 权限运行".to_string());
-    }
-
-    let mut credentials = Vec::new();
-
-    for entry in fs::read_dir(ngc_dir).map_err(|e| format!("读取 NGC 目录失败: {}", e))? {
-        let entry = entry.map_err(|e| format!("目录条目错误: {}", e))?;
+/// 在 NGC 根目录下查找匹配的 FIDO2 凭据
+fn find_fido_credential(ngc_root: &Path, credential_id: &str) -> Result<FidoCredential, String> {
+    for entry in std::fs::read_dir(ngc_root).map_err(|e| format!("NGC: {}", e))? {
+        let entry = entry.map_err(|e| format!("entry: {}", e))?;
         let container = entry.path();
-        if !container.is_dir() {
-            continue;
+        if !container.is_dir() { continue; }
+        if container.file_name().and_then(|n| n.to_str()).map_or(false, |n| n == "PregenPool") { continue; }
+
+        let keys_dir = container.join("Keys");
+        if !keys_dir.is_dir() { continue; }
+
+        for key_entry in std::fs::read_dir(&keys_dir).map_err(|e| format!("Keys: {}", e))? {
+            let key_entry = key_entry.map_err(|e| format!("key_entry: {}", e))?;
+            let path = key_entry.path();
+            if !path.is_file() { continue; }
+            let fname = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) if n.ends_with(".json") => n.to_string(),
+                _ => continue,
+            };
+
+            let js = std::fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
+            let key: serde_json::Value = serde_json::from_str(&js).map_err(|e| format!("json: {}", e))?;
+            let ct = key.get("cacheType").and_then(|v| v.as_u64()).unwrap_or(0);
+            let alg = key.get("alg").and_then(|v| v.as_str()).unwrap_or("");
+            if ct == 4 && alg == "ECDSA_P256" {
+                let cid = fname.trim_end_matches(".json").to_string();
+                if cid == credential_id || credential_id.is_empty() {
+                    return Ok(FidoCredential {
+                        credential_id: cid,
+                        key_filename: fname,
+                        user_name: String::new(),
+                        container_path: container.clone(),
+                    });
+                }
+            }
         }
-
-        let container_guid = container
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        // 查找容器对应的用户名和 SID
-        let (user_name, user_sid) = match resolve_container_owner(&container_guid) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        // 扫描 NGC 容器中的 FIDO 密钥
-        let protectors_dir = container.join("protectors");
-        if !protectors_dir.is_dir() {
-            continue;
-        }
-
-        // TODO: 枚举 FIDO_AUTHENTICATOR 密钥
-        // 实际的 FIDO key 信息存储在 NGC 容器的 protectors 或单独的
-        // key 存储中。具体格式需要在实际 NGC 测试机上验证。
-        //
-        // Shwmae 的做法：
-        // - 遍历容器中所有 key
-        // - 筛选名称以 "FIDO_AUTHENTICATOR//" 开头的
-        // - 从 key 名称中解析 rpId 和 credentialId
     }
-
-    Ok(credentials)
+    Err(format!("未找到 FIDO2 凭据: {}", credential_id))
 }
 
-/// 解析 NGC 容器对应的用户名和 SID
-fn resolve_container_owner(_container_guid: &str) -> Result<(String, String), String> {
-    // TODO: 通过 NGC 容器属性或注册表反查容器所有者
-    // 实现方式：
-    // 1. 读取容器中的 metadata 文件
-    // 2. 或遍历 ProfileList 查找匹配的 SID
-    Err("容器所有者解析暂未实现".to_string())
-}
-
-/// 用 PIN 解密 NGC 中的 FIDO2 私钥
-fn extract_fido_key(pin: &str, sid: &str, key_name: &str) -> Result<Vec<u8>, String> {
-    // 复用 ngc 模块的 DPAPI 解密链路
-    // 1. 定位 NGC 容器
-    // 2. 用 PIN 派生 entropy
-    // 3. DPAPI 解密 FIDO key blob
-
-    let (_username, _password, _domain) = ngc::recover_password(sid, pin)
-        .map_err(|e| format!("NGC 解密失败: {}", e))?;
-
-    // FIDO2 私钥解密路径需要单独实现——它和账户密码使用
-    // 不同的 NGC protector（FIDO 密钥而非密码加密密钥）。
-    Err(format!("FIDO 密钥提取暂未实现（key: {}）", key_name))
-}
-
-/// 使用 CNG BCrypt 对数据进行 RSA 签名
+/// 用 PIN 解密 ECDSA_P256 私钥
 ///
-/// windows-rs 0.59: BCryptSignHash 的 pbInput 接受 `&[u8]`（非 Option）。
-#[allow(dead_code)]
-fn sign_with_cng(key_blob: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+/// 每个 Key 用自己的 NgcIsoHeader salt 独立加密，
+/// 密钥 = PIN entropy 的 SHA-512 前 32 bytes。
+fn decrypt_ecdsa_key(pin: &str, container_path: &Path, key_filename: &str) -> Result<Vec<u8>, String> {
+    let key_path = container_path.join("Keys").join(key_filename);
+    let js = std::fs::read_to_string(&key_path).map_err(|e| format!("key: {}", e))?;
+    let key: serde_json::Value = serde_json::from_str(&js).map_err(|e| format!("json: {}", e))?;
+    let cbor_b64 = key.get("encrypted").and_then(|e| e.get("encryptedCbor"))
+        .and_then(|v| v.as_str()).ok_or("缺少 encryptedCbor")?;
+
+    use base64::Engine;
+    let cbor_bytes = base64::engine::general_purpose::STANDARD.decode(cbor_b64)
+        .map_err(|e| format!("b64: {}", e))?;
+    let header = ngc::container::parse_ngciso_header(&cbor_bytes)
+        .map_err(|e| format!("hdr: {}", e))?;
+
+    // 用 KEY 自己的 salt 派生 entropy (不是 protector 的 salt)
+    let entropy = ngc::pin::derive_entropy(pin, &header.salt, header.rounds)
+        .map_err(|_| "entropy failed".to_string())?;
+    if entropy.len() < 50 { return Err("entropy short".to_string()); }
+    let aes_key = &entropy[18..50];
+
+    let ct = &cbor_bytes[header.payload_offset..];
+    let ct = if ct.len() % 16 != 0 { &ct[..ct.len() - (ct.len() % 16)] } else { ct };
+
+    // Try AES-GCM first (modern NgcIso), fall back to CBC
+    ngc::dpapi::aes256_gcm_decrypt(aes_key, &header.iv, ct)
+        .or_else(|_| ngc::dpapi::aes256_cbc_decrypt(aes_key, &header.iv, ct))
+        .map_err(|e| format!("key decrypt: {}", e))
+}
+
+fn get_protector_params(container_path: &Path) -> Result<(Vec<u8>, u32), String> {
+    let pj = container_path.join("Protectors.json");
+    let js = std::fs::read_to_string(&pj).map_err(|e| format!("protector: {}", e))?;
+    let root: serde_json::Value = serde_json::from_str(&js).map_err(|e| format!("json: {}", e))?;
+    let cbor_b64 = root.get("pin").and_then(|p| p.get("secretStore"))
+        .and_then(|s| s.get("encryptedCbor")).and_then(|v| v.as_str()).ok_or("no cbor")?;
+    use base64::Engine;
+    let cbor_bytes = base64::engine::general_purpose::STANDARD.decode(cbor_b64).map_err(|e| format!("b64: {}", e))?;
+    let header = ngc::container::parse_ngciso_header(&cbor_bytes).map_err(|e| format!("hdr: {}", e))?;
+    Ok((header.salt, header.rounds))
+}
+
+/// ECDSA_P256 签名 → ASN.1 DER 编码
+fn ecdsa_sign(key_blob: &[u8], hash: &[u8]) -> Result<Vec<u8>, String> {
+    // Try raw 32-byte key first (NGC may output raw d)
+    if key_blob.len() == 32 {
+        return raw_ecdsa_sign(key_blob, hash);
+    }
+    // Try PKCS#8 EC private key (DER: 0x30...)
+    if key_blob.len() > 8 && key_blob[0] == 0x30 {
+        return pkcs8_ecdsa_sign(key_blob, hash);
+    }
+    // Try CNG ECCPRIVATEBLOB
+    cng_ecc_sign(key_blob, hash)
+}
+
+/// Raw 32-byte ECDSA P256 private key d
+fn raw_ecdsa_sign(d: &[u8], hash: &[u8]) -> Result<Vec<u8>, String> {
+    // Build BCRYPT_ECCPRIVATE_BLOB manually
+    // Header: dwMagic(4) + cbKey(4) + curve magic + P256 public key X(32) + Y(32) + d(32)
+    // dwMagic for ECDSA P256 private: 0x32434345 ("ECC2")
+    // Need to compute Q = d * G
+    // For now, return error with info
+    Err(format!("raw P256 key: {} bytes, need pubkey derivation", d.len()))
+}
+
+/// PKCS#8 DER-encoded EC private key
+fn pkcs8_ecdsa_sign(der: &[u8], _hash: &[u8]) -> Result<Vec<u8>, String> {
+    Err(format!("PKCS#8 key: {} bytes, need DER parsing", der.len()))
+}
+
+/// CNG ECCPRIVATEBLOB
+fn cng_ecc_sign(key_blob: &[u8], hash: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Security::Cryptography::{
         BCryptOpenAlgorithmProvider, BCryptImportKeyPair, BCryptSignHash,
         BCryptDestroyKey, BCryptCloseAlgorithmProvider,
-        BCRYPT_RSA_ALGORITHM, BCRYPT_RSAPRIVATE_BLOB,
-        BCRYPT_PAD_PKCS1, BCRYPT_ALG_HANDLE, BCRYPT_KEY_HANDLE,
-        BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS,
+        BCRYPT_ECDSA_P256_ALGORITHM, BCRYPT_ECCPRIVATE_BLOB,
+        BCRYPT_ALG_HANDLE, BCRYPT_KEY_HANDLE,
+        BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_FLAGS,
     };
 
     unsafe {
-        // Step 1: 打开 RSA 算法提供程序
-        let mut alg_handle = BCRYPT_ALG_HANDLE::default();
-        if BCryptOpenAlgorithmProvider(
-            &mut alg_handle,
-            BCRYPT_RSA_ALGORITHM,
-            None,
-            BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS(0),
-        )
-        .is_err()
-        {
-            return Err("BCryptOpenAlgorithmProvider 失败".to_string());
+        let mut alg = BCRYPT_ALG_HANDLE::default();
+        if BCryptOpenAlgorithmProvider(&mut alg, BCRYPT_ECDSA_P256_ALGORITHM, None, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS(0)).is_err() {
+            return Err("BCryptOpenAlgorithmProvider(ECDSA_P256) failed".to_string());
         }
 
-        // Step 2: 导入私钥
-        let mut key_handle = BCRYPT_KEY_HANDLE::default();
-        if BCryptImportKeyPair(
-            alg_handle,
-            None,
-            BCRYPT_RSAPRIVATE_BLOB,
-            &mut key_handle,
-            key_blob,
-            0,
-        )
-        .is_err()
-        {
-            let _ = BCryptCloseAlgorithmProvider(alg_handle, 0);
-            return Err("BCryptImportKeyPair 失败".to_string());
+        let mut key = BCRYPT_KEY_HANDLE::default();
+        if BCryptImportKeyPair(alg, None, BCRYPT_ECCPRIVATE_BLOB, &mut key, key_blob, 0).is_err() {
+            let _ = BCryptCloseAlgorithmProvider(alg, 0);
+            return Err("BCryptImportKeyPair(ECC) failed".to_string());
         }
 
-        // Step 3: 签名（windows-rs 0.59: pbInput is &[u8], not Option）
         let mut sig_size = 0u32;
-        let _ = BCryptSignHash(
-            key_handle,
-            None,
-            data,            // &[u8] — not Option<&[u8]>
-            None,
-            &mut sig_size,
-            BCRYPT_PAD_PKCS1,
-        );
-
-        if sig_size == 0 || sig_size > 4096 {
-            let _ = BCryptDestroyKey(key_handle);
-            let _ = BCryptCloseAlgorithmProvider(alg_handle, 0);
-            return Err(format!("BCryptSignHash 查询大小异常: {}", sig_size));
+        let _ = BCryptSignHash(key, None, hash, None, &mut sig_size, BCRYPT_FLAGS(0));
+        if sig_size == 0 || sig_size > 1024 {
+            let _ = BCryptDestroyKey(key); let _ = BCryptCloseAlgorithmProvider(alg, 0);
+            return Err(format!("sig size: {}", sig_size));
         }
 
-        let mut signature = vec![0u8; sig_size as usize];
-        if BCryptSignHash(
-            key_handle,
-            None,
-            data,                       // &[u8]
-            Some(&mut signature),
-            &mut sig_size,
-            BCRYPT_PAD_PKCS1,
-        )
-        .is_err()
-        {
-            let _ = BCryptDestroyKey(key_handle);
-            let _ = BCryptCloseAlgorithmProvider(alg_handle, 0);
-            return Err("BCryptSignHash 签名失败".to_string());
+        let mut sig = vec![0u8; sig_size as usize];
+        if BCryptSignHash(key, None, hash, Some(&mut sig), &mut sig_size, BCRYPT_FLAGS(0)).is_err() {
+            let _ = BCryptDestroyKey(key); let _ = BCryptCloseAlgorithmProvider(alg, 0);
+            return Err("sign failed".to_string());
         }
+        sig.truncate(sig_size as usize);
+        let _ = BCryptDestroyKey(key);
+        let _ = BCryptCloseAlgorithmProvider(alg, 0);
+        Ok(raw_ecdsa_to_der(&sig))
+    }
+}
 
-        signature.truncate(sig_size as usize);
+fn raw_ecdsa_to_der(raw: &[u8]) -> Vec<u8> {
+    let half = raw.len() / 2;
+    let (r, s) = (&raw[..half], &raw[half..]);
+    let (r, s) = (strip_leading_zeros(r), strip_leading_zeros(s));
+    let total = 2 + r.len() + 2 + s.len();
+    let mut der = Vec::with_capacity(2 + total);
+    der.push(0x30); der.push(total as u8);
+    der.push(0x02); der.push(r.len() as u8); der.extend_from_slice(&r);
+    der.push(0x02); der.push(s.len() as u8); der.extend_from_slice(&s);
+    der
+}
 
-        let _ = BCryptDestroyKey(key_handle);
-        let _ = BCryptCloseAlgorithmProvider(alg_handle, 0);
-
-        Ok(signature)
+fn strip_leading_zeros(bytes: &[u8]) -> Vec<u8> {
+    let start = bytes.iter().position(|&b| b != 0).unwrap_or(0);
+    let result = &bytes[start..];
+    if result.is_empty() { return vec![0x00]; }
+    if result[0] >= 0x80 {
+        let mut v = Vec::with_capacity(result.len() + 1);
+        v.push(0x00); v.extend_from_slice(result); v
+    } else {
+        result.to_vec()
     }
 }

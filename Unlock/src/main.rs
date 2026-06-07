@@ -1869,7 +1869,7 @@ fn main() {
 
     // ── NGC 解密链 Smoke Test（CLI 模式）────────────────────────────
     let args: Vec<String> = std::env::args().collect();
-    let is_cli_mode = args.iter().any(|a| a == "--ngc-smoke-test" || a == "--ngc-probe" || a == "--ngc-dump" || a == "--ngc-keys");
+    let is_cli_mode = args.iter().any(|a| a == "--ngc-smoke-test" || a == "--ngc-probe" || a == "--ngc-dump" || a == "--ngc-keys" || a == "--ngc-sign" || a == "--ngc-enum-cng" || a == "--ngc-sign-probe" || a == "--ngc-container-dump");
 
     // windows_subsystem="windows" → 无控制台。CLI 结果全量写入文件。
     let cli_out_path: Option<std::path::PathBuf> = if is_cli_mode {
@@ -1906,6 +1906,97 @@ fn main() {
         cli_write(&Some(path.to_path_buf()), &format!("\n[{}] 测试结束，结果见本文件。\n", summary));
         let _ = std::fs::write(path.join("..").join("ngc_test_done.txt"), summary);
         std::process::exit(if passed { 0 } else { 1 });
+    }
+
+    if args.iter().any(|a| a == "--ngc-enum-cng") {
+        // CNG/KSP 密钥枚举诊断：确认 FIDO/passkey 私钥能否经 CNG 直接访问。
+        // 若 FIDO 密钥出现在 Passport/Platform KSP 中，签名应走 NCrypt 原地签名，
+        // 而非逆向解密文件格式。
+        cli_println!(&cli_out_path, "=== CNG/KSP 密钥枚举诊断 ===");
+        cli_println!(&cli_out_path, "（以当前进程身份枚举；NGC 密钥属 LocalService，");
+        cli_println!(&cli_out_path, " 若此处为空，可能需要模拟 LocalService 令牌）");
+        for provider in [
+            "Microsoft Passport Key Storage Provider",
+            "Microsoft Platform Crypto Provider",
+            "Microsoft Software Key Storage Provider",
+        ] {
+            cli_println!(&cli_out_path);
+            cli_println!(&cli_out_path, "--- Provider: {} ---", provider);
+            match ngc::dpapi::enum_cng_keys(provider) {
+                Ok(keys) => {
+                    cli_println!(&cli_out_path, "  共 {} 个密钥:", keys.len());
+                    for (name, alg) in &keys {
+                        cli_println!(&cli_out_path, "    [{}] {}", if alg.is_empty() { "?" } else { alg }, name);
+                    }
+                }
+                Err(e) => cli_println!(&cli_out_path, "  枚举失败: {}", e),
+            }
+        }
+        cli_done(cli_out_path.as_ref().unwrap(), true);
+    }
+
+    if args.iter().any(|a| a == "--ngc-container-dump") {
+        // PIN-free：递归 dump NGC 容器真实磁盘结构，用于把现代格式逆向写对。
+        // 仅读结构与已加密 blob（不解密、不碰 PIN）。
+        cli_println!(&cli_out_path, "=== NGC 容器结构 Dump (PIN-free) ===");
+        let ngc_root = std::path::Path::new(r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc");
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        let mut stack: Vec<std::path::PathBuf> = vec![ngc_root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.is_dir() { stack.push(p); } else { files.push(p); }
+                }
+            }
+        }
+        files.sort();
+        cli_println!(&cli_out_path, "共 {} 个文件\n", files.len());
+        for p in &files {
+            let rel = p.strip_prefix(ngc_root).unwrap_or(p);
+            let data = match std::fs::read(p) { Ok(d) => d, Err(_) => { cli_println!(&cli_out_path, "■ {}  (读取失败)", rel.display()); continue; } };
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            cli_println!(&cli_out_path, "■ {}  ({} bytes)", rel.display(), data.len());
+            if name.ends_with(".json") {
+                let txt = String::from_utf8_lossy(&data);
+                let shown: String = txt.chars().take(6000).collect();
+                cli_println!(&cli_out_path, "{}", shown);
+            } else {
+                let n = data.len().min(192);
+                let hex: String = data[..n].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                cli_println!(&cli_out_path, "  hex[{}/{}]: {}", n, data.len(), hex);
+                if data.len() >= 2 && data.len() % 2 == 0 {
+                    let u16s: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let s = String::from_utf16_lossy(&u16s);
+                    let printable = s.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').count();
+                    if printable > s.chars().count() / 2 {
+                        cli_println!(&cli_out_path, "  utf16: {}", s.trim_end_matches('\0'));
+                    }
+                }
+            }
+            cli_println!(&cli_out_path);
+        }
+        cli_done(cli_out_path.as_ref().unwrap(), true);
+    }
+
+    if args.iter().any(|a| a == "--ngc-sign-probe") {
+        // FIDO 签名探针：测多种 PIN 供给策略对 Passport KSP 密钥签名是否成功。
+        // 用法: --ngc-sign-probe <rpId> <PIN>   例: --ngc-sign-probe google.com 1234
+        let idx = args.iter().position(|a| a == "--ngc-sign-probe").unwrap_or(0) + 1;
+        let rp_id = args.get(idx).map(|s| s.as_str()).unwrap_or("");
+        let pin = args.get(idx + 1).map(|s| s.as_str()).unwrap_or("");
+        cli_println!(&cli_out_path, "=== FIDO 签名探针 ===");
+        if rp_id.is_empty() || pin.is_empty() {
+            cli_println!(&cli_out_path, "用法: --ngc-sign-probe <rpId> <PIN>");
+            cli_println!(&cli_out_path, "示例: --ngc-sign-probe google.com 1234");
+            cli_done(cli_out_path.as_ref().unwrap(), false);
+        }
+        let mut any_ok = false;
+        for line in ngc::dpapi::ncrypt_sign_probe(rp_id, pin) {
+            if line.contains("签名成功") { any_ok = true; }
+            cli_println!(&cli_out_path, "{}", line);
+        }
+        cli_done(cli_out_path.as_ref().unwrap(), any_ok);
     }
 
     if args.iter().any(|a| a == "--ngc-dump") {
@@ -1953,6 +2044,24 @@ fn main() {
             }
         }
         cli_done(cli_out_path.as_ref().unwrap(), true);
+    }
+
+    if args.iter().any(|a| a == "--ngc-sign") {
+        let uidx = args.iter().position(|a| a == "--ngc-sign").unwrap_or(0) + 1;
+        let u = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
+        let p = args.get(uidx+1).map(|s| s.as_str()).unwrap_or("");
+        if u.is_empty() || p.is_empty() { cli_println!(&cli_out_path, "用法: --ngc-sign <用户名> <PIN>"); cli_done(cli_out_path.as_ref().unwrap(), false); }
+        cli_println!(&cli_out_path, "=== NGC ECDSA 签名测试 ===");
+        cli_println!(&cli_out_path, "用户: {}", u);
+        use sha2::{Sha256, Digest};
+        let hash = Sha256::digest(b"FaceWinUnlock sign test");
+        cli_println!(&cli_out_path, "SHA-256: {:02x?}", &hash[..8]);
+        let ngc_root = std::path::Path::new(r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc");
+        let req = passkey::fido2::AssertionRequest { rp_id: "test.local".to_string(), challenge: ngc::base64_encode(&hash), origin: "https://test.local".to_string(), timeout: 60000, allow_credentials: vec![] };
+        match passkey::signer::sign_assertion(p, &req, "", 1, ngc_root) {
+            Ok(a) => { cli_println!(&cli_out_path, "ECDSA签名: 成功 (sig len={})", a.signature.len()); cli_done(cli_out_path.as_ref().unwrap(), true); }
+            Err(e) => { cli_println!(&cli_out_path, "签名失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
+        }
     }
 
     if args.iter().any(|a| a == "--ngc-keys") {

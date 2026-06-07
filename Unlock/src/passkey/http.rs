@@ -143,7 +143,10 @@ fn handle_assertion(mut stream: TcpStream, body: &str, exe_dir: &Path, db_path: 
     let sign_count = sql::get_sign_count(db_path, cred_id);
 
     // 签名
-    match signer::sign_assertion(pin, &assertion_req, cred_id, sign_count) {
+    let container_path = std::path::PathBuf::from(
+        r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc"
+    );
+    match signer::sign_assertion(pin, &assertion_req, cred_id, sign_count, &container_path) {
         Ok(response) => {
             // 递增 signCount
             sql::increment_sign_count(db_path, cred_id);
