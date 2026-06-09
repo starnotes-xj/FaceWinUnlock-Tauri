@@ -611,89 +611,13 @@ pub fn close_app(app_handle: AppHandle) -> Result<CustomResult, CustomResult> {
 
     Ok(CustomResult::success(None, None))
 }
-// 用全黑 dummy 输入跑一遍端到端推理，验证当前 backend/target 上所有模型都
-// 真能完成 forward。OpenCV `FaceDetectorYN::create` / `FaceRecognizerSF::create`
-// / `read_net_from_onnx` 在 NPU/OpenVINO 后端只是创建 Net 对象，并不真正初始化
-// inference 引擎；OpenVINO 在**首次 forward** 时才编译模型，遇到不支持的 op
-// （如 sface 的 _minusscalar0）会抛 ze_graph "unsupported opset" 错误。
-//
-// 由此带来的用户可见 bug：选 NPU 后录入面容能跑通预览（首次 detect 也许成功，
-// 部分驱动允许部分 op fallback），但点击"保存"时再调用 recognizer.feature 时
-// 直接报「特征提取失败 ie_ngraph initPlugin」(issue 用户反馈)。
-//
-// 探测策略：构建后立即用 dummy Mat 跑一遍 detect + feature + liveness forward，
-// 任一失败即整体返回错误，触发 load_opencv_model 的 CPU 回退路径（#125）。
-fn probe_opencv_models_inference(
-    detector: &mut Ptr<FaceDetectorYN>,
-    recognizer: &mut Ptr<FaceRecognizerSF>,
-    liveness: &mut opencv::dnn::Net,
-) -> Result<(), String> {
-    // 1) detector: 320×320 BGR 灰度图（中性输入，避免 0 矩阵触发数值异常）
-    let dummy_det = Mat::new_rows_cols_with_default(
-        320, 320, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
-    )
-    .map_err(|e| format!("probe 创建 detector dummy 输入失败: {:?}", e))?;
-    detector
-        .set_input_size(Size::new(320, 320))
-        .map_err(|e| format!("probe detector set_input_size: {:?}", e))?;
-    let mut det_out = Mat::default();
-    detector
-        .detect(&dummy_det, &mut det_out)
-        .map_err(|e| format!("检测器后端不支持当前推理目标: {:?}", e))?;
-
-    // 2) recognizer: sface 输入是 112×112×3 已对齐人脸；这里只测能否完成 forward
-    let dummy_face = Mat::new_rows_cols_with_default(
-        112, 112, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
-    )
-    .map_err(|e| format!("probe 创建 recognizer dummy 输入失败: {:?}", e))?;
-    let mut feat_out = Mat::default();
-    recognizer
-        .feature(&dummy_face, &mut feat_out)
-        .map_err(|e| format!("识别模型后端不支持当前推理目标: {:?}", e))?;
-
-    // 3) liveness: 80×80 输入，按 faces.rs::liveness_score 的实际 blob 配置
-    let dummy_liv = Mat::new_rows_cols_with_default(
-        80, 80, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
-    )
-    .map_err(|e| format!("probe 创建 liveness dummy 输入失败: {:?}", e))?;
-    let blob = opencv::dnn::blob_from_image(
-        &dummy_liv,
-        1.0 / 255.0,
-        Size::new(80, 80),
-        Scalar::new(0.5 * 255.0, 0.5 * 255.0, 0.5 * 255.0, 0.0),
-        true,
-        false,
-        CV_32F,
-    )
-    .map_err(|e| format!("probe liveness blob 创建失败: {:?}", e))?;
-    liveness
-        .set_input(&blob, "", 1.0, Scalar::default())
-        .map_err(|e| format!("probe liveness set_input 失败: {:?}", e))?;
-    let _ = liveness
-        .forward_single("")
-        .map_err(|e| format!("活体模型后端不支持当前推理目标: {:?}", e))?;
-
-    Ok(())
-}
-
-// 用指定 backend/target 构建全部三个 OpenCV 模型；任一失败即返回错误。
-// 不写入全局状态，便于在失败时安全回退到其它后端后再统一赋值。
-fn build_opencv_models(
-    backend_id: i32,
-    target_id: i32,
-) -> Result<
-    (
-        Ptr<FaceDetectorYN>,
-        Ptr<FaceRecognizerSF>,
-        opencv::dnn::Net,
-    ),
-    String,
-> {
-    let detector_path = ROOT_DIR
+// 单个模型构造 helper（per-backend）：
+fn create_detector(backend_id: i32, target_id: i32) -> Result<Ptr<FaceDetectorYN>, String> {
+    let path = ROOT_DIR
         .join("resources")
         .join("face_detection_yunet_2023mar.onnx");
-    let mut detector = FaceDetectorYN::create(
-        detector_path.to_str().unwrap_or(""),
+    FaceDetectorYN::create(
+        path.to_str().unwrap_or(""),
         "",
         Size::new(320, 320),
         0.9,
@@ -702,44 +626,128 @@ fn build_opencv_models(
         backend_id,
         target_id,
     )
-    .map_err(|e| format!("初始化检测器模型失败: {:?}", e))?;
+    .map_err(|e| format!("初始化检测器模型失败: {:?}", e))
+}
 
-    let recognizer_path = ROOT_DIR
+fn create_recognizer(backend_id: i32, target_id: i32) -> Result<Ptr<FaceRecognizerSF>, String> {
+    let path = ROOT_DIR
         .join("resources")
         .join("face_recognition_sface_2021dec.onnx");
-    let mut recognizer = FaceRecognizerSF::create(
-        recognizer_path.to_str().unwrap_or(""),
-        "",
-        backend_id,
-        target_id,
-    )
-    .map_err(|e| format!("初始化识别器模型失败: {:?}", e))?;
+    FaceRecognizerSF::create(path.to_str().unwrap_or(""), "", backend_id, target_id)
+        .map_err(|e| format!("初始化识别器模型失败: {:?}", e))
+}
 
-    let liveness_path = ROOT_DIR.join("resources").join("face_liveness.onnx");
-    let mut liveness = opencv::dnn::read_net_from_onnx(liveness_path.to_str().unwrap_or(""))
+fn create_liveness(backend_id: i32, target_id: i32) -> Result<opencv::dnn::Net, String> {
+    let path = ROOT_DIR.join("resources").join("face_liveness.onnx");
+    let mut net = opencv::dnn::read_net_from_onnx(path.to_str().unwrap_or(""))
         .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?;
-    liveness
-        .set_preferable_backend(backend_id)
+    net.set_preferable_backend(backend_id)
         .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
-    liveness
-        .set_preferable_target(target_id)
+    net.set_preferable_target(target_id)
         .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
+    Ok(net)
+}
 
-    // 仅对 NPU 后端（target=9, OpenVINO Inference Engine）做端到端推理探测。
-    //
-    // 原因：只有 OpenVINO/NPU 才有"create 通过 → 首次 forward 编译模型才发现
-    // op 不支持"的隐藏 bug（sface 的 _minusscalar0 → ze_graph unsupported
-    // opset），必须 probe 才能提前 fallback CPU。
-    //
+// per-model dummy forward probe：用于 NPU 触发 OpenVINO 模型编译，发现不支持的 op。
+fn probe_detector(detector: &mut Ptr<FaceDetectorYN>) -> Result<(), String> {
+    let dummy = Mat::new_rows_cols_with_default(
+        320, 320, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
+    )
+    .map_err(|e| format!("probe detector dummy 输入失败: {:?}", e))?;
+    detector
+        .set_input_size(Size::new(320, 320))
+        .map_err(|e| format!("probe detector set_input_size: {:?}", e))?;
+    let mut out = Mat::default();
+    detector
+        .detect(&dummy, &mut out)
+        .map_err(|e| format!("{:?}", e))?;
+    Ok(())
+}
+
+fn probe_recognizer(recognizer: &mut Ptr<FaceRecognizerSF>) -> Result<(), String> {
+    let dummy = Mat::new_rows_cols_with_default(
+        112, 112, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
+    )
+    .map_err(|e| format!("probe recognizer dummy 输入失败: {:?}", e))?;
+    let mut out = Mat::default();
+    recognizer
+        .feature(&dummy, &mut out)
+        .map_err(|e| format!("{:?}", e))?;
+    Ok(())
+}
+
+fn probe_liveness(liveness: &mut opencv::dnn::Net) -> Result<(), String> {
+    let dummy = Mat::new_rows_cols_with_default(
+        80, 80, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
+    )
+    .map_err(|e| format!("probe liveness dummy 输入失败: {:?}", e))?;
+    let blob = opencv::dnn::blob_from_image(
+        &dummy,
+        1.0 / 255.0,
+        Size::new(80, 80),
+        Scalar::new(0.5 * 255.0, 0.5 * 255.0, 0.5 * 255.0, 0.0),
+        true,
+        false,
+        CV_32F,
+    )
+    .map_err(|e| format!("probe liveness blob 失败: {:?}", e))?;
+    liveness
+        .set_input(&blob, "", 1.0, Scalar::default())
+        .map_err(|e| format!("probe liveness set_input: {:?}", e))?;
+    let _ = liveness
+        .forward_single("")
+        .map_err(|e| format!("{:?}", e))?;
+    Ok(())
+}
+
+// 用指定 backend/target 构建三个 OpenCV 模型。
+//
+// 对 NPU (target=9)：做 per-model 推理探测，跑不动的子模型**单独回退 CPU**，
+// 跑得动的留在 NPU 上。理由：sface 的 _minusscalar0 op 在 Intel NPU 不支持，
+// 但 yunet 检测器在 NPU 能跑、liveness 通常也能跑——要给"已选 NPU"的用户
+// 真正的 NPU 加速，必须 mixed-backend，而不是一刀切全回 CPU。
+// 检测器是最频繁调用的环节，NPU 加速这一项就能显著降低 CPU 负载。
+//
+// 第三个返回值：partial_cpu_models 列出哪些子模型退回了 CPU（供 UI 提示用）。
+fn build_opencv_models(
+    backend_id: i32,
+    target_id: i32,
+) -> Result<
+    (
+        Ptr<FaceDetectorYN>,
+        Ptr<FaceRecognizerSF>,
+        opencv::dnn::Net,
+        Vec<String>,
+    ),
+    String,
+> {
+    let mut detector = create_detector(backend_id, target_id)?;
+    let mut recognizer = create_recognizer(backend_id, target_id)?;
+    let mut liveness = create_liveness(backend_id, target_id)?;
+    let mut partial_cpu_models: Vec<String> = Vec::new();
+
     // OpenCL / OpenCL_FP16（target=1/2）不 probe：OpenCV DNN 内部对不支持的
-    // OpenCL kernel 会按 op 级自动回退 CPU，create 通过即推理可跑。把所有非
-    // CPU 后端都 probe 会让 NVIDIA OpenCL 因 dummy 灰图 + FP16 精度边缘 case
-    // 误判为"不可用"而退化 CPU。
+    // OpenCL kernel 会按 op 级自动回退 CPU，create 通过即推理可跑。在 NVIDIA
+    // 上 dummy 灰图 + FP16 精度边缘 case 会误判可用后端为不可用。
     if target_id == 9 {
-        probe_opencv_models_inference(&mut detector, &mut recognizer, &mut liveness)?;
+        if let Err(e) = probe_detector(&mut detector) {
+            warn!("detector 在 Intel NPU 推理失败，单独回退 CPU（其它模型仍在 NPU）: {}", e);
+            detector = create_detector(0, 0)?;
+            partial_cpu_models.push("detector".to_string());
+        }
+        if let Err(e) = probe_recognizer(&mut recognizer) {
+            warn!("recognizer (sface) 在 Intel NPU 推理失败，单独回退 CPU（其它模型仍在 NPU）: {}", e);
+            recognizer = create_recognizer(0, 0)?;
+            partial_cpu_models.push("recognizer".to_string());
+        }
+        if let Err(e) = probe_liveness(&mut liveness) {
+            warn!("liveness 在 Intel NPU 推理失败，单独回退 CPU（其它模型仍在 NPU）: {}", e);
+            liveness = create_liveness(0, 0)?;
+            partial_cpu_models.push("liveness".to_string());
+        }
     }
 
-    Ok((detector, recognizer, liveness))
+    Ok((detector, recognizer, liveness, partial_cpu_models))
 }
 
 // load_opencv_model 的返回值：告知前端实际生效的推理后端，
@@ -756,6 +764,11 @@ pub struct ModelLoadResult {
     pub fell_back: bool,
     // 回退原因（fell_back 为 true 时给出原始错误，供前端提示/日志）
     pub fallback_reason: Option<String>,
+    // 仅 NPU 后端：哪些子模型因 op 不支持单独回退到 CPU（detector/recognizer/liveness）。
+    // 主模型 active_backend 仍是 NPU，被列出的子模型在 CPU 上独立加载，
+    // 实现 mixed-backend：NPU 上能跑的模型 NPU 加速，跑不动的模型 CPU 兜底。
+    #[serde(default)]
+    pub partial_cpu_models: Vec<String>,
 }
 
 #[tauri::command]
@@ -790,26 +803,45 @@ pub fn load_opencv_model(
             active_target: target_id,
             fell_back: false,
             fallback_reason: None,
+            partial_cpu_models: Vec::new(),
         });
     }
 
     // 先尝试用户选择的后端；失败且并非 CPU 时回退到 CPU(0,0)。
-    let (detector, recognizer, liveness, active_backend, active_target, fell_back, fallback_reason) =
-        match build_opencv_models(backend_id, target_id) {
-            Ok((d, r, l)) => (d, r, l, backend_id, target_id, false, None),
-            Err(e) if backend_id != 0 || target_id != 0 => {
-                warn!(
-                    "使用推理后端 ({},{}) 加载 OpenCV 模型失败: {}；自动回退到 CPU。\
-                     如需使用 Intel NPU，请确认已安装 OpenVINO 运行时及对应的 OpenCV DNN 插件。",
-                    backend_id, target_id, e
-                );
-                let (d, r, l) = build_opencv_models(0, 0).map_err(|cpu_err| {
-                    format!("加载 OpenCV 模型失败（已尝试回退 CPU）：{}", cpu_err)
-                })?;
-                (d, r, l, 0, 0, true, Some(e))
-            }
-            Err(e) => return Err(e),
-        };
+    // NPU 路径下 build_opencv_models 内部已做 per-model fallback：跑不动的子模型
+    // 自动以 CPU 重建，剩余仍在 NPU 上。所以这里"失败"只会发生在 backend/target
+    // 完全无法初始化（如缺 OpenVINO 运行时），而非个别 op 不支持。
+    let (
+        detector,
+        recognizer,
+        liveness,
+        active_backend,
+        active_target,
+        fell_back,
+        fallback_reason,
+        partial_cpu_models,
+    ) = match build_opencv_models(backend_id, target_id) {
+        Ok((d, r, l, partials)) => (d, r, l, backend_id, target_id, false, None, partials),
+        Err(e) if backend_id != 0 || target_id != 0 => {
+            warn!(
+                "使用推理后端 ({},{}) 加载 OpenCV 模型失败: {}；自动回退到 CPU。\
+                 如需使用 Intel NPU，请确认已安装 OpenVINO 运行时及对应的 OpenCV DNN 插件。",
+                backend_id, target_id, e
+            );
+            let (d, r, l, _) = build_opencv_models(0, 0).map_err(|cpu_err| {
+                format!("加载 OpenCV 模型失败（已尝试回退 CPU）：{}", cpu_err)
+            })?;
+            (d, r, l, 0, 0, true, Some(e), Vec::new())
+        }
+        Err(e) => return Err(e),
+    };
+
+    if !partial_cpu_models.is_empty() {
+        info!(
+            "推理后端 ({},{}) 已激活；以下子模型因后端不支持单独回退 CPU: {:?}",
+            active_backend, active_target, partial_cpu_models
+        );
+    }
 
     app_state.detector = Some(OpenCVResource { inner: detector });
     app_state.recognizer = Some(OpenCVResource { inner: recognizer });
@@ -822,6 +854,7 @@ pub fn load_opencv_model(
         active_target,
         fell_back,
         fallback_reason,
+        partial_cpu_models,
     })
 }
 

@@ -601,45 +601,80 @@ struct Models {
     recognizer: Ptr<FaceRecognizerSF>,
 }
 
-fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<Models> {
-    let mut detector = FaceDetectorYN::create(
+fn create_detector_with_backend(
+    resources: &Path,
+    backend_id: i32,
+    target_id: i32,
+) -> opencv::Result<Ptr<FaceDetectorYN>> {
+    FaceDetectorYN::create(
         resources.join("face_detection_yunet_2023mar.onnx").to_str().unwrap_or(""),
         "",
         Size::new(320, 320),
         0.9,
         0.3,
         5000,
-        inference.backend_id,
-        inference.target_id,
-    )?;
-    let mut recognizer = FaceRecognizerSF::create(
+        backend_id,
+        target_id,
+    )
+}
+
+fn create_recognizer_with_backend(
+    resources: &Path,
+    backend_id: i32,
+    target_id: i32,
+) -> opencv::Result<Ptr<FaceRecognizerSF>> {
+    FaceRecognizerSF::create(
         resources.join("face_recognition_sface_2021dec.onnx").to_str().unwrap_or(""),
         "",
-        inference.backend_id,
-        inference.target_id,
-    )?;
+        backend_id,
+        target_id,
+    )
+}
 
-    // 仅对 NPU 后端（target=9, OpenVINO）做端到端推理探测。OpenVINO 在 create
-    // 时只构建 Net 对象，首次 forward 编译模型才发现不支持的 op（sface 的
-    // _minusscalar0），必须 probe 才能让上层 load_models_with_fallback 在 Err
-    // 时回退 CPU。OpenCL / OpenCL_FP16 内部有 op 级自动回退，不需要 probe；
-    // 全后端 probe 会让 NVIDIA OpenCL 因 dummy 灰图边缘 case 误判不可用。
+// load_models 返回 (Models, partial_cpu_models)：partial 列表的子模型在 CPU 上
+// 重建，未列出的子模型在用户请求的 backend/target 上。让上层 log_service 写
+// 这个事件到 unlock.log。
+fn load_models(
+    resources: &Path,
+    inference: InferenceBackend,
+) -> opencv::Result<(Models, Vec<&'static str>)> {
+    let mut detector = create_detector_with_backend(
+        resources, inference.backend_id, inference.target_id,
+    )?;
+    let mut recognizer = create_recognizer_with_backend(
+        resources, inference.backend_id, inference.target_id,
+    )?;
+    let mut partial_cpu_models: Vec<&'static str> = Vec::new();
+
+    // 仅对 NPU 后端（target=9, OpenVINO）做 per-model 推理探测：跑不动的子模型
+    // 单独回退 CPU，跑得动的留在 NPU 上。理由：sface 的 _minusscalar0 op 在
+    // Intel NPU 不支持但 yunet 检测器在 NPU 能跑——要让用户选 NPU 后真正获得
+    // NPU 加速，必须 mixed-backend 而不是一刀切全回 CPU。
+    //
+    // OpenCV NPU/OpenVINO 在 create 时只构建 Net 对象，首次 forward 编译模型
+    // 才会发现不支持的 op，所以必须 dummy forward 触发编译。
     if inference.target_id == 9 {
         let dummy_det = Mat::new_rows_cols_with_default(
             320, 320, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
         )?;
         detector.set_input_size(Size::new(320, 320))?;
         let mut det_out = Mat::default();
-        detector.detect(&dummy_det, &mut det_out)?;
+        if detector.detect(&dummy_det, &mut det_out).is_err() {
+            detector = create_detector_with_backend(resources, 0, 0)?;
+            partial_cpu_models.push("detector");
+        }
 
         let dummy_face = Mat::new_rows_cols_with_default(
             112, 112, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
         )?;
         let mut feat_out = Mat::default();
-        recognizer.feature(&dummy_face, &mut feat_out)?;
+        if recognizer.feature(&dummy_face, &mut feat_out).is_err() {
+            recognizer = create_recognizer_with_backend(resources, 0, 0)?;
+            partial_cpu_models.push("recognizer");
+        }
     }
 
-    Ok(Models { detector, recognizer })
+    Ok((Models { detector, recognizer }, partial_cpu_models))
 }
 
 fn load_models_with_fallback(
@@ -648,7 +683,7 @@ fn load_models_with_fallback(
     exe_dir: &Path,
 ) -> Option<(Models, InferenceBackend)> {
     match load_models(resources, inference) {
-        Ok(models) => {
+        Ok((models, partial_cpu_models)) => {
             log_service(
                 exe_dir,
                 "INFO",
@@ -657,6 +692,16 @@ fn load_models_with_fallback(
                     inference.label, inference.backend_id, inference.target_id
                 ),
             );
+            if !partial_cpu_models.is_empty() {
+                log_service(
+                    exe_dir,
+                    "INFO",
+                    &format!(
+                        "the following sub-models fell back to CPU because {} backend does not support them: {:?}; other sub-models stay on {}",
+                        inference.label, partial_cpu_models, inference.label
+                    ),
+                );
+            }
             Some((models, inference))
         }
         Err(e) if inference != CPU_INFERENCE => {
@@ -669,7 +714,7 @@ fn load_models_with_fallback(
                 ),
             );
             match load_models(resources, CPU_INFERENCE) {
-                Ok(models) => Some((models, CPU_INFERENCE)),
+                Ok((models, _)) => Some((models, CPU_INFERENCE)),
                 Err(cpu_err) => {
                     log_service(
                         exe_dir,
