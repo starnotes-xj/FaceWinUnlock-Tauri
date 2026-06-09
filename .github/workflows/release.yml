@@ -345,19 +345,54 @@ jobs:
       # tauri.conf.json 硬编码 D:\OpenCV\build\x64\vc16\bin\opencv_world4120.dll
       # 作为 resource 路径（开发者本地编译产物布局）。CI 上 OpenCV 解压到
       # D:\OpenCV\install\，需镜像到硬编码路径，否则 tauri build.rs 资源校验 panic。
-      - name: Mirror OpenCV DLLs to repo-conf hardcoded path
+      #
+      # 此外：opencv_world4120.dll 用 WITH_OPENVINO=ON 编译（见
+      # scripts/build_opencv_prebuilt.ps1:122），加载时强制依赖 openvino.dll +
+      # tbb12.dll 等运行时；安装包必须随附这些 DLL，否则启动即报 "找不到
+      # openvino.dll"。把 OpenVINO 运行时 + TBB 也复制到 mirror 目录，并动态
+      # 注入 tauri.conf.json resources，让 tauri build 一并打包到 NSIS/MSI。
+      - name: Mirror OpenCV + OpenVINO DLLs and inject into Tauri resources
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $srcBin = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.dll" | Select-Object -First 1).Directory.FullName
-          if (-not $srcBin) { throw "Cannot locate opencv_world*.dll under D:\OpenCV\install" }
           $dstBin = "D:\OpenCV\build\x64\vc16\bin"
           New-Item -ItemType Directory -Path $dstBin -Force | Out-Null
-          Get-ChildItem $srcBin -Filter "opencv_*.dll" | ForEach-Object {
-            Copy-Item $_.FullName $dstBin -Force
+
+          # 1) OpenCV world DLL（+ 任何同目录的 opencv_* DLL）
+          $cvSrcBin = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.dll" | Select-Object -First 1).Directory.FullName
+          if (-not $cvSrcBin) { throw "Cannot locate opencv_world*.dll under D:\OpenCV\install" }
+          Get-ChildItem $cvSrcBin -Filter "opencv_*.dll" | ForEach-Object { Copy-Item $_.FullName $dstBin -Force }
+
+          # 2) OpenVINO 运行时 DLL + 插件清单 XML
+          $ovBin = "D:\OpenVINO\runtime\bin\intel64\Release"
+          $tbbBin = "D:\OpenVINO\runtime\3rdparty\tbb\bin"
+          $injected = New-Object System.Collections.Generic.List[string]
+          foreach ($srcDir in @($ovBin, $tbbBin)) {
+            if (-not (Test-Path $srcDir)) { continue }
+            Get-ChildItem $srcDir -File | Where-Object { $_.Extension -in @(".dll", ".xml") } | ForEach-Object {
+              Copy-Item $_.FullName $dstBin -Force
+              $injected.Add($_.Name)
+            }
           }
-          Write-Host "Mirrored DLLs to ${dstBin}:"
-          Get-ChildItem $dstBin -Filter "opencv_*.dll" | Select-Object Name, Length
+          Write-Host "Mirrored $($injected.Count) OpenVINO/TBB files + OpenCV DLLs to ${dstBin}"
+
+          # 3) 动态把 OpenVINO/TBB 文件注入 tauri.conf.json 的 resources
+          #    （opencv_world4120.dll 已在 tauri.conf.json 中硬编码引用，不重复添加）
+          $confPath = "UI\src-tauri\tauri.conf.json"
+          $conf = Get-Content -Raw $confPath -Encoding UTF8 | ConvertFrom-Json -AsHashtable -Depth 50
+          $existing = [System.Collections.Generic.HashSet[string]]::new()
+          foreach ($k in $conf.bundle.resources.Keys) { $existing.Add($k) | Out-Null }
+          foreach ($name in $injected) {
+            $key = Join-Path $dstBin $name
+            if (-not $existing.Contains($key)) {
+              $conf.bundle.resources[$key] = $name
+            }
+          }
+          $conf | ConvertTo-Json -Depth 50 | Set-Content $confPath -Encoding UTF8
+          Write-Host "tauri.conf.json resources count: $($conf.bundle.resources.Count)"
+          Get-ChildItem $dstBin | Measure-Object -Property Length -Sum | ForEach-Object {
+            Write-Host "Total mirror size: $([math]::Round($_.Sum / 1MB, 1)) MB"
+          }
 
       # ---- Tauri UI build ----
       - name: Cache npm dependencies
