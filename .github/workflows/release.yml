@@ -322,8 +322,9 @@ jobs:
           cargo clean -p clang-sys
           cargo clean -p opencv
           cargo build --release -p winlogon -p unlock
-          # 清理临时配置，防止污染后续步骤
-          Remove-Item $configPath -Force
+          # 不要删除 .cargo/config.toml —— 后续 "Build Tauri installer" 同样调用 cargo，
+          # 需要这套 [env] 覆盖才能找到 D:\OpenCV\install。删除会导致 tauri build 时
+          # opencv crate 退回 repo 自带的 D:\OpenCV\build 路径，runner 上不存在 → 失败。
 
       - name: Verify Server DLL & Unlock EXE
         shell: pwsh
