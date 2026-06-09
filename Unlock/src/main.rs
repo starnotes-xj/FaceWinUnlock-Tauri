@@ -28,7 +28,7 @@ use std::{
 };
 
 use opencv::{
-    core::{Mat, Ptr, Size},
+    core::{Mat, Ptr, Scalar, Size, CV_8UC3},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     prelude::*,
     videoio::{self, VideoCapture},
@@ -602,7 +602,7 @@ struct Models {
 }
 
 fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<Models> {
-    let detector = FaceDetectorYN::create(
+    let mut detector = FaceDetectorYN::create(
         resources.join("face_detection_yunet_2023mar.onnx").to_str().unwrap_or(""),
         "",
         Size::new(320, 320),
@@ -612,12 +612,32 @@ fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<
         inference.backend_id,
         inference.target_id,
     )?;
-    let recognizer = FaceRecognizerSF::create(
+    let mut recognizer = FaceRecognizerSF::create(
         resources.join("face_recognition_sface_2021dec.onnx").to_str().unwrap_or(""),
         "",
         inference.backend_id,
         inference.target_id,
     )?;
+
+    // 非 CPU 后端必须端到端推理探测一次：OpenCV NPU/OpenVINO 在 create 时不真正
+    // 初始化 inference 引擎，首次 forward 才编译模型。sface 的 _minusscalar0 op
+    // 在 Intel NPU 上不被支持，create 成功但首次 feature() 调用会崩溃。
+    // 上层 load_models_with_fallback 在 Err 时自动回退到 CPU 后端。
+    if inference.backend_id != 0 || inference.target_id != 0 {
+        let dummy_det = Mat::new_rows_cols_with_default(
+            320, 320, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
+        )?;
+        detector.set_input_size(Size::new(320, 320))?;
+        let mut det_out = Mat::default();
+        detector.detect(&dummy_det, &mut det_out)?;
+
+        let dummy_face = Mat::new_rows_cols_with_default(
+            112, 112, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
+        )?;
+        let mut feat_out = Mat::default();
+        recognizer.feature(&dummy_face, &mut feat_out)?;
+    }
+
     Ok(Models { detector, recognizer })
 }
 
@@ -1449,6 +1469,12 @@ fn get_idle_millis() -> u32 {
 
 /// 自动锁屏监控线程
 fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
+    /// 授权后摄像头冷却时间。防止用户安静使用电脑（看视频、听歌等）时 OS 级
+    /// idle 持续累积，每 1 秒循环都重新跑 face 验证 → 摄像头反复开关闪烁。
+    /// 冷却期内即使 idle 仍 >= timeout 也不再开摄像头；冷却期满后再次检测。
+    const AUTH_COOLDOWN: Duration = Duration::from_secs(60);
+    let mut last_authorized_at: Option<Instant> = None;
+
     let db_path = exe_dir.join("database.db");
     let resources = exe_dir.join("resources");
 
@@ -1491,10 +1517,21 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
 
         let idle_ms = get_idle_millis();
         if idle_ms < (auto_lock_timeout * 1000) as u32 {
-            // 用户有活动，更新最后活跃时间
+            // 用户有活动，清空冷却（用户活跃即表示"在场"，无需 cooldown 保护），
+            // 同时更新最后活跃时间。
+            last_authorized_at = None;
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
             state.last_user_active.store(now, Ordering::SeqCst);
             continue;
+        }
+
+        // 空闲超时但仍在授权冷却期内，跳过摄像头检测（防止闪烁）。
+        // 用户在 OS idle 累积期间（如安静看视频）只要冷却期内有过授权，
+        // 都视为"在场"，不再反复打开摄像头。
+        if let Some(last) = last_authorized_at {
+            if last.elapsed() < AUTH_COOLDOWN {
+                continue;
+            }
         }
 
         // 空闲超时，且没有正在进行的解锁请求（避免冲突）
@@ -1552,11 +1589,13 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         drop(cam);
 
         if authorized {
-            // 授权用户在场，更新活跃时间，继续监控
+            // 授权用户在场，记录授权时间启动 cooldown + 更新活跃时间，继续监控
+            last_authorized_at = Some(Instant::now());
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
             state.last_user_active.store(now, Ordering::SeqCst);
         } else {
-            // 无人或非授权人员 → 锁屏
+            // 无人或非授权人员 → 锁屏；清空 cooldown，因为下个会话又是新场景
+            last_authorized_at = None;
             let _ = unsafe { LockWorkStation() };
             // 锁屏后等 5 秒再继续检查
             thread::sleep(Duration::from_secs(5));

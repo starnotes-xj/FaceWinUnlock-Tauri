@@ -11,9 +11,9 @@ use crate::{
 };
 use tauri_plugin_log::log::{info, warn};
 use opencv::{
-    core::{Mat, MatTraitConst, Ptr, Size},
+    core::{Mat, MatTraitConst, Ptr, Scalar, Size, CV_32F, CV_8UC3},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
-    prelude::NetTrait,
+    prelude::*,
     videoio::{self, VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst},
 };
 use serde::{Deserialize, Serialize};
@@ -611,6 +611,71 @@ pub fn close_app(app_handle: AppHandle) -> Result<CustomResult, CustomResult> {
 
     Ok(CustomResult::success(None, None))
 }
+// 用全黑 dummy 输入跑一遍端到端推理，验证当前 backend/target 上所有模型都
+// 真能完成 forward。OpenCV `FaceDetectorYN::create` / `FaceRecognizerSF::create`
+// / `read_net_from_onnx` 在 NPU/OpenVINO 后端只是创建 Net 对象，并不真正初始化
+// inference 引擎；OpenVINO 在**首次 forward** 时才编译模型，遇到不支持的 op
+// （如 sface 的 _minusscalar0）会抛 ze_graph "unsupported opset" 错误。
+//
+// 由此带来的用户可见 bug：选 NPU 后录入面容能跑通预览（首次 detect 也许成功，
+// 部分驱动允许部分 op fallback），但点击"保存"时再调用 recognizer.feature 时
+// 直接报「特征提取失败 ie_ngraph initPlugin」(issue 用户反馈)。
+//
+// 探测策略：构建后立即用 dummy Mat 跑一遍 detect + feature + liveness forward，
+// 任一失败即整体返回错误，触发 load_opencv_model 的 CPU 回退路径（#125）。
+fn probe_opencv_models_inference(
+    detector: &mut Ptr<FaceDetectorYN>,
+    recognizer: &mut Ptr<FaceRecognizerSF>,
+    liveness: &mut opencv::dnn::Net,
+) -> Result<(), String> {
+    // 1) detector: 320×320 BGR 灰度图（中性输入，避免 0 矩阵触发数值异常）
+    let dummy_det = Mat::new_rows_cols_with_default(
+        320, 320, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
+    )
+    .map_err(|e| format!("probe 创建 detector dummy 输入失败: {:?}", e))?;
+    detector
+        .set_input_size(Size::new(320, 320))
+        .map_err(|e| format!("probe detector set_input_size: {:?}", e))?;
+    let mut det_out = Mat::default();
+    detector
+        .detect(&dummy_det, &mut det_out)
+        .map_err(|e| format!("检测器后端不支持当前推理目标: {:?}", e))?;
+
+    // 2) recognizer: sface 输入是 112×112×3 已对齐人脸；这里只测能否完成 forward
+    let dummy_face = Mat::new_rows_cols_with_default(
+        112, 112, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
+    )
+    .map_err(|e| format!("probe 创建 recognizer dummy 输入失败: {:?}", e))?;
+    let mut feat_out = Mat::default();
+    recognizer
+        .feature(&dummy_face, &mut feat_out)
+        .map_err(|e| format!("识别模型后端不支持当前推理目标: {:?}", e))?;
+
+    // 3) liveness: 80×80 输入，按 faces.rs::liveness_score 的实际 blob 配置
+    let dummy_liv = Mat::new_rows_cols_with_default(
+        80, 80, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
+    )
+    .map_err(|e| format!("probe 创建 liveness dummy 输入失败: {:?}", e))?;
+    let blob = opencv::dnn::blob_from_image(
+        &dummy_liv,
+        1.0 / 255.0,
+        Size::new(80, 80),
+        Scalar::new(0.5 * 255.0, 0.5 * 255.0, 0.5 * 255.0, 0.0),
+        true,
+        false,
+        CV_32F,
+    )
+    .map_err(|e| format!("probe liveness blob 创建失败: {:?}", e))?;
+    liveness
+        .set_input(&blob, "", 1.0, Scalar::default())
+        .map_err(|e| format!("probe liveness set_input 失败: {:?}", e))?;
+    let _ = liveness
+        .forward_single("")
+        .map_err(|e| format!("活体模型后端不支持当前推理目标: {:?}", e))?;
+
+    Ok(())
+}
+
 // 用指定 backend/target 构建全部三个 OpenCV 模型；任一失败即返回错误。
 // 不写入全局状态，便于在失败时安全回退到其它后端后再统一赋值。
 fn build_opencv_models(
@@ -627,7 +692,7 @@ fn build_opencv_models(
     let detector_path = ROOT_DIR
         .join("resources")
         .join("face_detection_yunet_2023mar.onnx");
-    let detector = FaceDetectorYN::create(
+    let mut detector = FaceDetectorYN::create(
         detector_path.to_str().unwrap_or(""),
         "",
         Size::new(320, 320),
@@ -642,7 +707,7 @@ fn build_opencv_models(
     let recognizer_path = ROOT_DIR
         .join("resources")
         .join("face_recognition_sface_2021dec.onnx");
-    let recognizer = FaceRecognizerSF::create(
+    let mut recognizer = FaceRecognizerSF::create(
         recognizer_path.to_str().unwrap_or(""),
         "",
         backend_id,
@@ -659,6 +724,14 @@ fn build_opencv_models(
     liveness
         .set_preferable_target(target_id)
         .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
+
+    // 非 CPU 后端必须端到端推理探测一次，否则用户首次"特征提取"才发现 NPU
+    // 不支持 sface 的某个 op 而崩溃（issue: 选 NPU 录入面容时点保存报
+    // "特征提取失败 InferenceEngineNet::initPlugin ... unsupported opset"）。
+    // 失败由上层 load_opencv_model 捕获后自动 fallback 到 CPU (#125)。
+    if backend_id != 0 || target_id != 0 {
+        probe_opencv_models_inference(&mut detector, &mut recognizer, &mut liveness)?;
+    }
 
     Ok((detector, recognizer, liveness))
 }
