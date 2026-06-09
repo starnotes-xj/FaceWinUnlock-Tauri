@@ -289,7 +289,7 @@ jobs:
             target
           key: rust-release-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build Server DLL + Unlock EXE
+      - name: Build Server DLL + Unlock EXE + UIA Helper
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -321,20 +321,26 @@ jobs:
           # 清除缓存的构建脚本输出，强制 opencv crate 重新探测
           cargo clean -p clang-sys
           cargo clean -p opencv
-          cargo build --release -p winlogon -p unlock
+          # uia-helper 产出 FaceWinUnlock-UIA-Helper.exe，tauri.conf.json 把它作为
+          # resource 引用（../../target/release/FaceWinUnlock-UIA-Helper.exe），必须
+          # 在 tauri build 之前构建好，否则 build.rs 的 resource 校验会 panic。
+          cargo build --release -p winlogon -p unlock -p uia-helper
           # 不要删除 .cargo/config.toml —— 后续 "Build Tauri installer" 同样调用 cargo，
           # 需要这套 [env] 覆盖才能找到 D:\OpenCV\install。删除会导致 tauri build 时
           # opencv crate 退回 repo 自带的 D:\OpenCV\build 路径，runner 上不存在 → 失败。
 
-      - name: Verify Server DLL & Unlock EXE
+      - name: Verify Server DLL & Unlock EXE & UIA Helper
         shell: pwsh
         run: |
           $dll = "target\release\FaceWinUnlock_Tauri.dll"
           $exe = "target\release\FaceWinUnlock-Server.exe"
+          $uia = "target\release\FaceWinUnlock-UIA-Helper.exe"
           if (-not (Test-Path $dll)) { throw "Missing: $dll" }
           if (-not (Test-Path $exe)) { throw "Missing: $exe" }
+          if (-not (Test-Path $uia)) { throw "Missing: $uia" }
           Write-Host "Server DLL: $((Get-Item $dll).Length) bytes"
           Write-Host "Unlock EXE: $((Get-Item $exe).Length) bytes"
+          Write-Host "UIA Helper: $((Get-Item $uia).Length) bytes"
 
       # ---- Tauri UI build ----
       - name: Cache npm dependencies
