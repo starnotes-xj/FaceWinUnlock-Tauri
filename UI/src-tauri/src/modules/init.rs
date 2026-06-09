@@ -169,7 +169,10 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         ("RETRY_DELAY", "1.0"),
         ("UNLOCK_GRACE_PERIOD", "0.0"),
         ("CREDUI_ALLOW_GENERIC", "0"),
-        ("CREDUI_ALLOW_BROKER", "1"),
+        // credentialuibroker.exe 托管 PIN 设置/重置流程；早期默认 "1"（允许介入）
+        // 会破坏 PIN 设置（用户输完新 PIN 显示未设置）。改默认 "0"，仅允许 UAC
+        // (consent.exe) 用人脸提权。用户可在 UI 中显式置 1 开浏览器查看密码人脸。
+        ("CREDUI_ALLOW_BROKER", "0"),
         ("CREDUI_BROKER_FALLBACK_TIMEOUT", "5.0"),
         ("CREDUI_UIA_DETECT", "0"),
         ("DLL_LOG_PATH", log_dir_value),
@@ -192,6 +195,18 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
             app_key
                 .set_value("DLL_LOG_PATH", &log_dir_value)
                 .map_err(|e| CustomResult::error(Some(format!("迁移 DLL_LOG_PATH 失败: {e}")), None))?;
+        }
+    }
+
+    // 迁移：旧默认 CREDUI_ALLOW_BROKER=1 会破坏 PIN 设置（用户报告 v0.4.4 装完
+    // 无法重新设 PIN）。检测到 "1" 强制改为 "0"。用户若需浏览器查看密码人脸，
+    // 在 UI 设置中重新开启 → 写为 "1"（之后不会再触发迁移因为已是 "1"，但
+    // 设这个值的用户已知 PIN 风险）。
+    if let Ok(current) = app_key.get_value::<String, _>("CREDUI_ALLOW_BROKER") {
+        if current.trim() == "1" {
+            app_key
+                .set_value("CREDUI_ALLOW_BROKER", &"0")
+                .map_err(|e| CustomResult::error(Some(format!("迁移 CREDUI_ALLOW_BROKER 失败: {e}")), None))?;
         }
     }
 

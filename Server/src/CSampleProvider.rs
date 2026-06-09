@@ -113,7 +113,23 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             }
         }
 
+        // credentialuibroker.exe 内除了浏览器查看密码 / passkey 还托管 Microsoft
+        // Passport (NGC) 的 PIN 设置/重置流程。我们无法在 broker 内精确区分子场景
+        // （dwflags/auth package/CLSID/rgbSerialization 在 PIN 设置与浏览器查看密码
+        // 时完全一致），介入会破坏 PIN 设置：用户反馈"装了 v0.4.4 之后无法重新设置
+        // PIN，输入新 PIN 后正常退出但显示未设置"。
+        //
+        // 默认对 broker 场景返回 E_NOTIMPL，让 Windows PIN 原生处理。用户可写
+        // 注册表 CREDUI_ALLOW_BROKER=1 显式开启浏览器查看密码/passkey 的人脸路径
+        // （代价：PIN 设置流程仍可能受影响）。UAC (consent.exe) 不受此影响。
         if cpus.0 == 4 && host == "credentialuibroker.exe" {
+            let allow_broker = crate::read_facewinunlock_registry("CREDUI_ALLOW_BROKER")
+                .unwrap_or_else(|_| "0".to_string());
+            if allow_broker != "1" {
+                info!("SampleProvider::SetUsageScenario - credentialuibroker.exe 场景已跳过（CREDUI_ALLOW_BROKER!=1），防止 PIN 设置流程被破坏");
+                inner.is_scenario_supported = false;
+                return Err(E_NOTIMPL.into());
+            }
             info!("SampleProvider::SetUsageScenario - credentialuibroker.exe 启用先人脸、失败后回退 Windows PIN");
         }
 
