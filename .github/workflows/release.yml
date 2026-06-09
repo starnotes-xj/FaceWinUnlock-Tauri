@@ -342,6 +342,23 @@ jobs:
           Write-Host "Unlock EXE: $((Get-Item $exe).Length) bytes"
           Write-Host "UIA Helper: $((Get-Item $uia).Length) bytes"
 
+      # tauri.conf.json 硬编码 D:\OpenCV\build\x64\vc16\bin\opencv_world4120.dll
+      # 作为 resource 路径（开发者本地编译产物布局）。CI 上 OpenCV 解压到
+      # D:\OpenCV\install\，需镜像到硬编码路径，否则 tauri build.rs 资源校验 panic。
+      - name: Mirror OpenCV DLLs to repo-conf hardcoded path
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $srcBin = (Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.dll" | Select-Object -First 1).Directory.FullName
+          if (-not $srcBin) { throw "Cannot locate opencv_world*.dll under D:\OpenCV\install" }
+          $dstBin = "D:\OpenCV\build\x64\vc16\bin"
+          New-Item -ItemType Directory -Path $dstBin -Force | Out-Null
+          Get-ChildItem $srcBin -Filter "opencv_*.dll" | ForEach-Object {
+            Copy-Item $_.FullName $dstBin -Force
+          }
+          Write-Host "Mirrored DLLs to ${dstBin}:"
+          Get-ChildItem $dstBin -Filter "opencv_*.dll" | Select-Object Name, Length
+
       # ---- Tauri UI build ----
       - name: Cache npm dependencies
         uses: actions/cache@v4
