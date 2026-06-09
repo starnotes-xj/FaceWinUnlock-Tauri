@@ -619,11 +619,12 @@ fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<
         inference.target_id,
     )?;
 
-    // 非 CPU 后端必须端到端推理探测一次：OpenCV NPU/OpenVINO 在 create 时不真正
-    // 初始化 inference 引擎，首次 forward 才编译模型。sface 的 _minusscalar0 op
-    // 在 Intel NPU 上不被支持，create 成功但首次 feature() 调用会崩溃。
-    // 上层 load_models_with_fallback 在 Err 时自动回退到 CPU 后端。
-    if inference.backend_id != 0 || inference.target_id != 0 {
+    // 仅对 NPU 后端（target=9, OpenVINO）做端到端推理探测。OpenVINO 在 create
+    // 时只构建 Net 对象，首次 forward 编译模型才发现不支持的 op（sface 的
+    // _minusscalar0），必须 probe 才能让上层 load_models_with_fallback 在 Err
+    // 时回退 CPU。OpenCL / OpenCL_FP16 内部有 op 级自动回退，不需要 probe；
+    // 全后端 probe 会让 NVIDIA OpenCL 因 dummy 灰图边缘 case 误判不可用。
+    if inference.target_id == 9 {
         let dummy_det = Mat::new_rows_cols_with_default(
             320, 320, CV_8UC3, Scalar::new(128.0, 128.0, 128.0, 0.0),
         )?;

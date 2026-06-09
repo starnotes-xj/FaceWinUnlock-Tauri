@@ -725,11 +725,17 @@ fn build_opencv_models(
         .set_preferable_target(target_id)
         .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
 
-    // 非 CPU 后端必须端到端推理探测一次，否则用户首次"特征提取"才发现 NPU
-    // 不支持 sface 的某个 op 而崩溃（issue: 选 NPU 录入面容时点保存报
-    // "特征提取失败 InferenceEngineNet::initPlugin ... unsupported opset"）。
-    // 失败由上层 load_opencv_model 捕获后自动 fallback 到 CPU (#125)。
-    if backend_id != 0 || target_id != 0 {
+    // 仅对 NPU 后端（target=9, OpenVINO Inference Engine）做端到端推理探测。
+    //
+    // 原因：只有 OpenVINO/NPU 才有"create 通过 → 首次 forward 编译模型才发现
+    // op 不支持"的隐藏 bug（sface 的 _minusscalar0 → ze_graph unsupported
+    // opset），必须 probe 才能提前 fallback CPU。
+    //
+    // OpenCL / OpenCL_FP16（target=1/2）不 probe：OpenCV DNN 内部对不支持的
+    // OpenCL kernel 会按 op 级自动回退 CPU，create 通过即推理可跑。把所有非
+    // CPU 后端都 probe 会让 NVIDIA OpenCL 因 dummy 灰图 + FP16 精度边缘 case
+    // 误判为"不可用"而退化 CPU。
+    if target_id == 9 {
         probe_opencv_models_inference(&mut detector, &mut recognizer, &mut liveness)?;
     }
 
