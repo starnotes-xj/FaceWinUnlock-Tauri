@@ -92,6 +92,21 @@ def rewrite(model):
     graph = model.graph
     inits = {init.name: init for init in graph.initializer}
     changed = 0
+    new_dims = (1, CHANNELS, 1, 1)
+
+    def fix_value_decl(name: str) -> None:
+        # sface 这类老导出把 initializer 同名登记在 graph.input / value_info，
+        # 那里仍声明旧形状 {1}；onnxruntime 严格校验「声明 vs initializer」
+        # 形状一致，不同步更新会拒载（Shape of initializer does not match）。
+        for coll in (graph.input, graph.value_info):
+            for vi in coll:
+                if vi.name != name:
+                    continue
+                tt = vi.type.tensor_type
+                del tt.shape.dim[:]
+                for d in new_dims:
+                    tt.shape.dim.add().dim_value = d
+                log(f"同步更新 {name!r} 的形状声明 → {list(new_dims)}")
 
     for node in graph.node:
         if node.op_type not in ELTWISE_OPS:
@@ -104,11 +119,12 @@ def rewrite(model):
             if arr.size != 1:
                 continue  # 只处理标量；已是张量的常量本就走正常路径
             val = float(arr.reshape(-1)[0])
-            new_arr = np.full((1, CHANNELS, 1, 1), val, dtype=arr.dtype)
+            new_arr = np.full(new_dims, val, dtype=arr.dtype)
             new_init = numpy_helper.from_array(new_arr, init.name)
             graph.initializer.remove(init)
             graph.initializer.append(new_init)
             inits[init.name] = new_init
+            fix_value_decl(init.name)
             changed += 1
             log(f"扩展标量常量 {inp!r}(={val}) → [1,{CHANNELS},1,1]，"
                 f"所属节点 {node.name or node.op_type}")
