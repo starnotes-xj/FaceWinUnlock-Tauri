@@ -394,6 +394,32 @@ jobs:
             Write-Host "Total mirror size: $([math]::Round($_.Sum / 1MB, 1)) MB"
           }
 
+      # ---- 生成 NPU 优化版 sface（Intel NPU 真正可用的关键步骤）----
+      # OpenCV 把 sface 预处理里的「减标量」导成标量特例层，OpenVINO/NPU 无法
+      # 编译（报 onnx_node!_minusscalar0 unsupported opset）。这里把标量常量改写
+      # 成等价的 [1,3,1,1] 张量，让它走标准 nGraph Subtract，NPU 即可编译。
+      # 脚本内含 onnxruntime 数值等价校验，校验不过会退回拷贝原模型，绝不产出坏模型。
+      # 产物 face_recognition_sface_2021dec_npu.onnx 一定存在，供 tauri 打包。
+      - name: Generate NPU-optimized sface model
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet onnx onnxruntime numpy
+          $src = "UI/resources/face_recognition_sface_2021dec.onnx"
+          $dst = "UI/resources/face_recognition_sface_2021dec_npu.onnx"
+          python scripts/optimize_sface_for_npu.py $src $dst
+          if (-not (Test-Path $dst)) { throw "NPU sface 产物缺失: $dst" }
+          Write-Host "NPU sface 模型: $((Get-Item $dst).Length) bytes"
+
+          # 动态注入 tauri.conf.json（不静态写入，避免本地 dev 缺该 CI 产物就构建失败）。
+          $confPath = "UI\src-tauri\tauri.conf.json"
+          $conf = Get-Content -Raw $confPath -Encoding UTF8 | ConvertFrom-Json -AsHashtable -Depth 50
+          $key = "../resources/face_recognition_sface_2021dec_npu.onnx"
+          $conf.bundle.resources[$key] = "resources/face_recognition_sface_2021dec_npu.onnx"
+          $conf | ConvertTo-Json -Depth 50 | Set-Content $confPath -Encoding UTF8
+          Write-Host "已注入 NPU sface 到 tauri resources，当前 resources 数: $($conf.bundle.resources.Count)"
+
       # ---- Tauri UI build ----
       - name: Cache npm dependencies
         uses: actions/cache@v4

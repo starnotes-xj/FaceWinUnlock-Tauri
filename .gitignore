@@ -44,3 +44,6 @@ UI/src-tauri/nsis/installer.nsi
 UI/resources/debug_*.js
 UI/resources/debug_*.png
 UI/resources/frame_*_preview.png
+
+# NPU 优化版 sface（由 scripts/optimize_sface_for_npu.py 在 CI 中生成，不入仓库）
+UI/resources/face_recognition_sface_2021dec_npu.onnx

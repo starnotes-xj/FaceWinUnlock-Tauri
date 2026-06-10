@@ -630,9 +630,16 @@ fn create_detector(backend_id: i32, target_id: i32) -> Result<Ptr<FaceDetectorYN
 }
 
 fn create_recognizer(backend_id: i32, target_id: i32) -> Result<Ptr<FaceRecognizerSF>, String> {
-    let path = ROOT_DIR
-        .join("resources")
-        .join("face_recognition_sface_2021dec.onnx");
+    // NPU(target=9) 优先用 CI 生成的 NPU 优化版 sface（标量算子已改写成 nGraph
+    // 可编译的 [1,3,1,1] 张量），让识别器真正跑在 NPU 上；该文件不存在（如本地
+    // dev 构建未生成）或非 NPU 后端时退回基础模型。数学等价，特征互通。
+    let dir = ROOT_DIR.join("resources");
+    let npu = dir.join("face_recognition_sface_2021dec_npu.onnx");
+    let path = if target_id == 9 && npu.exists() {
+        npu
+    } else {
+        dir.join("face_recognition_sface_2021dec.onnx")
+    };
     FaceRecognizerSF::create(path.to_str().unwrap_or(""), "", backend_id, target_id)
         .map_err(|e| format!("初始化识别器模型失败: {:?}", e))
 }

@@ -623,12 +623,15 @@ fn create_recognizer_with_backend(
     backend_id: i32,
     target_id: i32,
 ) -> opencv::Result<Ptr<FaceRecognizerSF>> {
-    FaceRecognizerSF::create(
-        resources.join("face_recognition_sface_2021dec.onnx").to_str().unwrap_or(""),
-        "",
-        backend_id,
-        target_id,
-    )
+    // NPU(target=9) 优先用 CI 生成的 NPU 优化版 sface（标量算子改写成 [1,3,1,1]
+    // 张量，OpenVINO 可编译），让识别器跑在 NPU 上；文件缺失或非 NPU 退回基础模型。
+    let npu = resources.join("face_recognition_sface_2021dec_npu.onnx");
+    let path = if target_id == 9 && npu.exists() {
+        npu
+    } else {
+        resources.join("face_recognition_sface_2021dec.onnx")
+    };
+    FaceRecognizerSF::create(path.to_str().unwrap_or(""), "", backend_id, target_id)
 }
 
 // load_models 返回 (Models, partial_cpu_models)：partial 列表的子模型在 CPU 上
