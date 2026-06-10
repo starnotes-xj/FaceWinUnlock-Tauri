@@ -402,6 +402,10 @@ jobs:
       # 产物 face_recognition_sface_2021dec_npu.onnx 一定存在，供 tauri 打包。
       - name: Generate NPU-optimized sface model
         shell: pwsh
+        env:
+          # 强制 Python 全程 UTF-8 I/O，避免 Windows cp1252 stdout 打印中文日志崩溃。
+          PYTHONUTF8: '1'
+          PYTHONIOENCODING: 'utf-8'
         run: |
           $ErrorActionPreference = "Stop"
           python -m pip install --quiet --upgrade pip

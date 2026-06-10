@@ -41,6 +41,15 @@ eltwise，进而转成 nGraph 的 Subtract/Add/Mul/Divide —— NPU 即可编�
 import shutil
 import sys
 
+# Windows CI 上 Python stdout 默认 cp1252，打印中文会抛 UnicodeEncodeError 并
+# 中断整个脚本（连兜底拷贝都执行不到，导致产物缺失 → CI 失败）。强制 stdout/
+# stderr 用 UTF-8 且对无法编码的字符降级 replace，确保日志永不致命。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        pass
+
 CHANNELS = 3  # sface 输入为 [1,3,112,112]
 ELTWISE_OPS = {"Sub", "Add", "Mul", "Div"}
 ATOL = 2e-4
@@ -48,7 +57,14 @@ RTOL = 2e-3
 
 
 def log(msg: str) -> None:
-    print(f"[optimize_sface_for_npu] {msg}", flush=True)
+    # 双保险：即便 reconfigure 没生效，也绝不让打印中断脚本。
+    try:
+        print(f"[optimize_sface_for_npu] {msg}", flush=True)
+    except Exception:  # noqa: BLE001
+        try:
+            print("[optimize_sface_for_npu]", msg.encode("ascii", "replace").decode("ascii"), flush=True)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def input_shape(model):
