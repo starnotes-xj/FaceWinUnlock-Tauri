@@ -26,6 +26,38 @@
     const optionsStore = useOptionsStore();
     const riskDialogVisible = ref(false);
 
+    // ── Passkey 提取 ──────────────────────────────────────────────
+    const extractPin = ref('');
+    const extractLoading = ref(false);
+    const extractMsg = ref('');
+    const extractOk = ref(false);
+
+    async function extractPasskeyKeys() {
+        if (!extractPin.value || extractPin.value.length < 4) {
+            extractMsg.value = '请输入 Windows Hello PIN（至少4位）'
+            extractOk.value = false
+            return
+        }
+        extractLoading.value = true
+        extractMsg.value = ''
+        try {
+            const result = await invoke('extract_passkey_keys', { pin: extractPin.value })
+            extractMsg.value = result.msg || '完成'
+            extractOk.value = result.code === 200
+            if (extractOk.value) {
+                ElMessage.success(result.msg || 'Passkey 密钥提取成功！')
+            } else {
+                ElMessage.warning(result.msg || '提取失败')
+            }
+        } catch (e) {
+            extractMsg.value = String(e)
+            extractOk.value = false
+            ElMessage.error('提取失败: ' + String(e))
+        } finally {
+            extractLoading.value = false
+        }
+    }
+
     let is_initialized = optionsStore.getOptionByKey('is_initialized');
     if(is_initialized.index != -1 && is_initialized.data.val == 'true'){
         initialized.value = true;
@@ -47,7 +79,7 @@
 
     // 步骤切换
     const handleNextStep = () => {
-        if (activeStep.value < 2) activeStep.value++;
+        if (activeStep.value < 3) activeStep.value++;
     };
 
     // 环境自检（摄像头检测不作为阻塞项——VM 环境通常无摄像头）
@@ -212,6 +244,7 @@
             <el-steps :active="activeStep" finish-status="success" align-center>
                 <el-step title="环境检测" />
                 <el-step title="系统部署" />
+                <el-step title="Passkey 提取" />
                 <el-step title="账户验证" />
             </el-steps>
 
@@ -315,6 +348,39 @@
                 </div>
 
                 <div v-if="activeStep === 2">
+                    <div class="deploy-box">
+                        <h3>提取 Passkey 密钥</h3>
+                        <p>从 Windows Hello NGC 容器中提取已注册的 FIDO2 私钥，</p>
+                        <p>用于人脸识别后绕过 PIN 直接签名 passkey 断言。</p>
+                        <div style="max-width: 360px; margin: 20px auto; text-align: left;">
+                            <el-input
+                                v-model="extractPin"
+                                type="password"
+                                placeholder="输入 Windows Hello PIN"
+                                show-password
+                                :disabled="extractLoading"
+                                style="margin-bottom: 12px;"
+                            />
+                            <el-button
+                                type="primary"
+                                :loading="extractLoading"
+                                :disabled="!extractPin || extractPin.length < 4"
+                                @click="extractPasskeyKeys"
+                                style="width: 100%;"
+                            >{{ extractLoading ? '提取中…' : '开始提取' }}</el-button>
+                            <p v-if="extractMsg" :style="{color: extractOk ? '#67C23A' : '#F56C6C', marginTop: '10px', textAlign: 'center'}">
+                                {{ extractMsg }}
+                            </p>
+                            <p style="margin-top:16px; color:#909399; font-size:13px;">
+                                提取的私钥文件保存在 <code>C:\FaceWinUnlock\captured_keys\</code>，<br/>
+                                配置文件写入安装目录 <code>passkey_keys.json</code>。
+                            </p>
+                        </div>
+                        <el-button type="primary" @click="handleNextStep">跳过 / 下一步</el-button>
+                    </div>
+                </div>
+
+                <div v-if="activeStep === 3">
                     <div style="max-width: 450px; margin: 0 auto;">
                         <AccountAuthForm 
                             v-model="authForm" 

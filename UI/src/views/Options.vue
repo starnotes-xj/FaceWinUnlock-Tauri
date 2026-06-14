@@ -82,6 +82,36 @@
 		pinConfirm: '',
 		saving: false,
 	})
+	// ── Passkey 密钥提取 ──────────────────────────────────────────
+	const extractLoading = ref(false)
+	const extractMsg = ref('')
+	const extractOk = ref(false)
+
+	async function extractPasskeyKeys() {
+		if (!pinStore.hasStored) {
+			extractMsg.value = '请先在上方预存 PIN'
+			extractOk.value = false
+			return
+		}
+		extractLoading.value = true
+		extractMsg.value = ''
+		try {
+			const result: any = await invoke('extract_passkey_keys', { pin: pinStore.pin })
+			extractMsg.value = result?.msg || '密钥提取成功'
+			extractOk.value = result?.code === 200
+			if (extractOk.value) {
+				ElMessage.success(result?.msg || '密钥提取成功！')
+			} else {
+				ElMessage.error(result?.msg || '提取失败')
+			}
+		} catch (e: any) {
+			extractMsg.value = String(e)
+			extractOk.value = false
+			ElMessage.error('密钥提取失败: ' + String(e))
+		} finally {
+			extractLoading.value = false
+		}
+	}
 
 	// 获取当前 Windows 用户名，再查询是否已存 PIN
 	invoke('get_now_username').then((result: any) => {
@@ -925,6 +955,23 @@
 									</p>
 								</div>
 								<el-switch v-model="dllConfig.passkeyEnabled" />
+							</div>
+							<!-- Passkey 密钥提取 -->
+							<div v-if="dllConfig.passkeyEnabled" style="padding: 12px 0; border-bottom: 1px solid #eee;">
+								<div class="row-text" style="margin-bottom: 8px;">
+									<p class="label">NGC 密钥提取</p>
+									<p class="sub">
+										从 Windows Hello 容器提取已注册的 FIDO2 / Passkey 私钥。<br />
+										需先在上方<b>预存 PIN</b>。提取约需 1 分钟。
+									</p>
+								</div>
+								<div style="display:flex; align-items:center; gap:10px;">
+									<el-button type="primary" size="small" :loading="extractLoading" :disabled="!pinStore.hasStored" @click="extractPasskeyKeys">
+										{{ extractLoading ? '提取中…' : '提取 Passkey 密钥' }}
+									</el-button>
+									<el-tag v-if="extractMsg" :type="extractOk ? 'success' : 'danger'" size="small">{{ extractMsg }}</el-tag>
+									<el-tag v-if="!pinStore.hasStored" type="info" size="small">请先在上方预存 PIN</el-tag>
+								</div>
 							</div>
 						</div>
 						<div v-if="dllConfig.pinEnabled" style="padding: 16px 0; border-bottom: 1px solid #f2f6fc;">
