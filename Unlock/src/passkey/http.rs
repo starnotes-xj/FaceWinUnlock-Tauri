@@ -133,20 +133,14 @@ fn handle_assertion(mut stream: TcpStream, body: &str, exe_dir: &Path, db_path: 
         .map(|c| c.id.as_str())
         .unwrap_or("");
 
-    if pin.is_empty() {
-        let resp = json_error("缺少 PIN");
-        let _ = stream.write_all(&http_response(400, &resp));
-        return;
-    }
-
     // 获取当前 signCount
     let sign_count = sql::get_sign_count(db_path, cred_id);
 
-    // 签名
+    // 签名（key_store 优先，NGC PIN 回退）
     let container_path = std::path::PathBuf::from(
         r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc"
     );
-    match signer::sign_assertion(pin, &assertion_req, cred_id, sign_count, &container_path) {
+    match signer::sign_assertion(pin, &assertion_req, cred_id, sign_count, &container_path, exe_dir) {
         Ok(response) => {
             // 递增 signCount
             sql::increment_sign_count(db_path, cred_id);

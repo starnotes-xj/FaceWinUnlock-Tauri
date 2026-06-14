@@ -1,14 +1,35 @@
-# C 方案：动态捕获 Windows Hello FIDO2 私钥（实现交接文档）
+# C 方案：获取 Windows Hello FIDO2 私钥（最终成果文档）
 
 > 本文件自包含，实现者无需额外上下文。目标读者：负责实现的 AI / 开发者。
 > 适用机器：**无 TPM** 的 Windows 11 25H2（Build 26200.8246）。
 
 ---
 
-## 0. 一句话目标
+## 🔥 最终方案（2026-06-14 验证成功）
 
-**在 Windows 自己解密 FIDO2 私钥的那一刻把明文私钥拦下来**，存好供本地 FIDO 签名器使用，
-从而实现「人脸识别 → 秒过 passkey 登录」。不再尝试离线复刻 NGC 派生（那条 = 失败的 A/B 方案）。
+**动态捕获路径已废弃。** 最终成功的方案是 **SYSTEM DPAPI 离线解密**：
+
+```
+NGC 容器 18.dat (262B)
+  → 64B NgcIsoHeader (version=1, algorithm GUID, IV, flags, key_size=32)
+  → 198B DPAPI blob
+  → CryptUnprotectData(no entropy, LOCAL_MACHINE) as SYSTEM
+  → 32B raw ECDSA_P256 private key scalar d ✅
+```
+
+**关键发现**：
+- **无需 PIN**：DPAPI blob 不依赖任何 PIN 派生的 entropy
+- **无需 KDF**：直接调用 `CryptUnprotectData` 即可解密
+- **25H2 格式变化**：NGC 容器从 JSON 改为二进制 `.dat` 文件
+- **工具**：`key_capture/src/ngc_crack.rs` — 扫描容器、DPAPI 解密、ECDSA 公钥推导一站式
+
+**已验证**：成功从用户 "星记" 的 NGC 容器中提取 4 个 ECDSA_P256 私钥，全部通过自洽校验（`d·G` == stored pubkey）。
+
+---
+
+## 0. 一句话目标（原）
+
+> ~~在 Windows 自己解密 FIDO2 私钥的那一刻把明文私钥拦下来~~（动态捕获）→ **已改为离线 DPAPI 解密**。
 
 ---
 
@@ -236,3 +257,66 @@ cargo build --release -p key_capture
 先别贪全链。**先只做「捕获 + 公钥校验」**（§3→§7）跑通——证明能在 25H2 无 TPM 机器上把
 FIDO2 私钥拦下来并验证为真。这一步成了，整条 C 方案才成立；不成（明文始终不出现在用户态、
 或全程在某不可达的隔离里），再回头评估值不值得继续。**§7 的公钥比对是 go/no-go 闸门。**
+
+---
+
+## 13. 25H2 NGC 二进制格式（实测解码）
+
+### 13.1 目录结构
+
+```
+Ngc\{ContainerGUID}\
+    1.dat          — UTF-16LE 编码的用户 SID
+    6.dat          — 标志位 (68B)
+    7.dat          — UTF-16LE "Microsoft Platform Crypto Provider"
+    8.dat          — 类型标志 (2B)
+    10.dat         — 标志 (4B)
+    11.dat         — 随机种子 (20B)
+    Protectors\
+        1\
+            15.dat  — DPAPI 加密的 protector blob (292B)
+    {CredentialTypeGUID}\
+        {KeyHash1}\
+            1.dat   — KSP 密钥名 (UTF-16LE hex)
+            2.dat   — KSP Provider 名 (UTF-16LE)
+            3.dat   — 密钥 GUID (UTF-16LE)
+            7.dat   — FIDO2 凭据元数据 (CBOR: rpId, credId, user)
+            12.dat  — 算法名，如 "ECDSA_P256" (UTF-16LE)
+            18.dat  — ★★★ DPAPI 加密的 ECDSA 私钥 (262B)
+        {KeyHash2}\ ...
+```
+
+### 13.2 18.dat 格式（262 字节）
+
+```
+Offset  Size  Content
+0x00    4     Version (=1)
+0x04    16    Algorithm GUID (d08c9ddf-0115-d111-8c7a-00c04fc297eb)
+0x14    4     Key type/ID
+0x18    16    IV (same across all keys in container)
+0x28    4     Flags
+0x2C    4     Flags
+0x30    4     Data length related?
+0x34    4     Zero
+0x38    4     =1
+0x3C    4     Key size (=32, AES-256)
+0x40    198   DPAPI blob → CryptUnprotectData → 32B ECDSA d
+```
+
+### 13.3 解密工具链
+
+| 工具 | 用途 |
+|------|------|
+| `ngc_crack.exe --sid <SID> <PIN>` | 扫描容器、DPAPI 解密、AES 尝试、ECDSA 搜索 |
+| `ngc_crack.exe --dump` | dump 所有 .dat 文件 hex |
+| `key_verify.exe <file>` | 验证 32B/104B/PKCS#8 ECDSA 密钥 |
+| 运行方式 | `PsExec -accepteula -s ngc_crack.exe --sid S-1-5-... PIN` |
+
+### 13.4 已验证密钥（用户 "星记", PIN=145236987）
+
+| 密钥目录 | RP | 凭据 ID | 私钥 d (前8字节) |
+|----------|-----|---------|-------------------|
+| 2773e521... | google.com | GOOGLE_ACCOUNT:1011... | 2f6a704350147b44 |
+| fa01ec8f... | webauthn.io | webauthn.io-starnotes | c6ffc030cd10fcdb |
+| 56d07ac4... | (旧密钥) | - | 1359d63ff4cc2036 |
+| 96776417... | (旧密钥) | - | dbf2e4721673e93a |

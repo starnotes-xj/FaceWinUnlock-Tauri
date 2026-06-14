@@ -22,6 +22,7 @@
 pub mod fido2;
 pub mod signer;
 mod http;
+mod key_store;
 mod sql;
 
 use std::path::Path;

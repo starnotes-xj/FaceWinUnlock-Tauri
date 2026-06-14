@@ -1,4 +1,5 @@
-use std::{fs, path::Path};
+use std::path::{Path, PathBuf};
+use std::fs;
 
 use opencv::videoio::{VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst};
 use tauri_plugin_log::log;
@@ -301,4 +302,156 @@ fn run_hidden(program: &str, args: &[&str]) -> std::io::Result<std::process::Out
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Passkey 密钥自动提取（通过 SYSTEM 计划任务运行 ngc_crack.exe）
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn extract_passkey_keys(pin: String) -> Result<CustomResult, CustomResult> {
+
+    // 1. 确认管理员权限
+    if !is_elevated() {
+        return Err(CustomResult::error(Some("需要管理员权限才能提取 passkey 密钥".to_string()), None));
+    }
+
+    // 2. 获取当前用户 SID
+    let sid = match get_current_sid() {
+        Ok(s) => s,
+        Err(e) => return Err(CustomResult::error(Some(format!("获取 SID 失败: {e}")), None)),
+    };
+
+    // 3. 找到 ngc_crack.exe（安装目录下）
+    let ngc_crack = ROOT_DIR.join("ngc_crack.exe");
+    if !ngc_crack.exists() {
+        return Err(CustomResult::error(
+            Some(format!("未找到 ngc_crack.exe: {}", ngc_crack.display())),
+            None,
+        ));
+    }
+
+    let out_dir = r"C:\FaceWinUnlock\captured_keys";
+    if let Err(e) = fs::create_dir_all(out_dir) {
+        return Err(CustomResult::error(
+            Some(format!("无法创建输出目录 {out_dir}: {e}")),
+            None,
+        ));
+    }
+
+    let task_name = "FaceWinUnlockNgcCrack";
+    let ngc_exe = ngc_crack.to_string_lossy().to_string();
+
+    // 4. 通过 SYSTEM 计划任务运行 ngc_crack
+    log::info!("创建 SYSTEM 计划任务: {} --sid {} <PIN>", ngc_exe, sid);
+
+    let create_args = [
+        "/Create", "/TN", task_name,
+        "/TR", &format!("\"{}\" --sid \"{}\" \"{}\"", ngc_exe, sid, pin),
+        "/SC", "ONCE", "/ST", "23:59",
+        "/RU", "SYSTEM", "/F",
+    ];
+    let _ = run_hidden("schtasks", &create_args);
+
+    // 5. 立即运行
+    let run_args = ["/Run", "/TN", task_name];
+    let _ = run_hidden("schtasks", &run_args);
+
+    // 6. 轮询等待完成（最多 2 分钟）
+    let max_wait = 120;
+    let mut waited = 0;
+    let mut found_keys = false;
+
+    while waited < max_wait {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        waited += 2;
+
+        // 检查是否有生成的 .bin 文件
+        if let Ok(entries) = fs::read_dir(out_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with("_18_no_entropy.bin") && entry.path().metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                    found_keys = true;
+                    break;
+                }
+            }
+        }
+        if found_keys { break; }
+
+        // 检查任务状态
+        let query = run_hidden("schtasks", &["/Query", "/TN", task_name]).ok();
+        let running = query.map(|o| String::from_utf8_lossy(&o.stdout).contains("Running")).unwrap_or(false);
+        if !running && waited > 10 && !found_keys {
+            break; // 任务已结束
+        }
+    }
+
+    // 7. 删除计划任务
+    let _ = run_hidden("schtasks", &["/Delete", "/TN", task_name, "/F"]);
+
+    // 8. 生成 passkey_keys.json
+    if found_keys {
+        match generate_passkey_keys_json(out_dir) {
+            Ok(json_path) => {
+                log::info!("passkey_keys.json 已生成: {}", json_path.display());
+                Ok(CustomResult::success(
+                    Some(format!("密钥提取成功！配置文件: {}", json_path.display()).into()),
+                    None,
+                ))
+            }
+            Err(e) => Err(CustomResult::error(
+                Some(format!("密钥提取成功，但生成配置文件失败: {e}")), None,
+            )),
+        }
+    } else {
+        Err(CustomResult::error(
+            Some(format!("密钥提取失败：超时未生成密钥文件。请确认 PIN 正确且已注册过 passkey。输出目录: {out_dir}")), None,
+        ))
+    }
+}
+
+/// 获取当前用户 SID（复用 pin_commands 的可靠实现）
+fn get_current_sid() -> Result<String, String> {
+    let username = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    crate::modules::pin_commands::get_user_sid(username)
+}
+
+/// 扫描 ngc_crack 输出目录，生成 passkey_keys.json
+fn generate_passkey_keys_json(out_dir: &str) -> Result<PathBuf, String> {
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+
+    // 扫描每个 32 字节的密钥文件
+    if let Ok(dir) = fs::read_dir(out_dir) {
+        for entry in dir.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.ends_with("_18_no_entropy.bin") {
+                let fpath = entry.path();
+                if fpath.metadata().map(|m| m.len() == 32).unwrap_or(false) {
+                    let parts: Vec<&str> = fname.split('_').collect();
+                    let key_hash = parts.first().unwrap_or(&"unknown").to_string();
+
+                    entries.push(serde_json::json!({
+                        "credential_id": key_hash,
+                        "rp_id": "",
+                        "key_file": fpath.to_string_lossy().to_string(),
+                        "_comment": "将 rp_id 改为实际的 relying party（如 google.com, webauthn.io），credential_id 去 webauthn.io 或 Chrome DevTools 查看"
+                    }));
+                }
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return Err("未找到有效的 32 字节密钥文件".into());
+    }
+
+    let json_path = ROOT_DIR.join("passkey_keys.json");
+    let json_str = serde_json::to_string_pretty(&entries)
+        .map_err(|e| format!("序列化 JSON: {e}"))?;
+    fs::write(&json_path, json_str.as_bytes())
+        .map_err(|e| format!("写入文件: {e}"))?;
+
+    Ok(json_path)
 }

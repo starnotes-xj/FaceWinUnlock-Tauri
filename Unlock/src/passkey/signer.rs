@@ -5,6 +5,7 @@
 
 use crate::ngc;
 use super::fido2;
+use super::key_store;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -16,15 +17,34 @@ pub struct FidoCredential {
 }
 
 /// 对 assertion 请求生成签名
+///
+/// 签名策略（按优先级）:
+/// 1. 首选 `key_store::load_key`（已捕获的 ECDSA 私钥，无需 PIN）
+/// 2. 回退到 NGC 解密（需要用户输入 PIN）
 pub fn sign_assertion(
     pin: &str,
     request: &fido2::AssertionRequest,
     credential_id: &str,
     sign_count: u32,
     ngc_root: &Path,
+    exe_dir: &Path,
 ) -> Result<fido2::AssertionResponse, String> {
-    let cred = find_fido_credential(ngc_root, credential_id)?;
-    let ecdsa_key = decrypt_ecdsa_key(pin, &cred.container_path, &cred.key_filename)?;
+    // 策略 1: 尝试从已捕获密钥库加载（无需 PIN）
+    let ecdsa_key_opt = key_store::load_key(credential_id, &request.rp_id, exe_dir);
+
+    let ecdsa_key = match ecdsa_key_opt {
+        Some(key) => {
+            log_key_source(exe_dir, credential_id, "captured_key_store");
+            key
+        }
+        None => {
+            // 策略 2: 回退到 NGC PIN 解密
+            log_key_source(exe_dir, credential_id, "ngc_decrypt");
+            let cred = find_fido_credential(ngc_root, credential_id)?;
+            decrypt_ecdsa_key(pin, &cred.container_path, &cred.key_filename)?
+        }
+    };
+
     let auth_data = fido2::build_authenticator_data(&request.rp_id, sign_count);
     let client_json_str = fido2::build_client_data_json(&request.challenge, &request.origin);
     let to_sign = fido2::build_to_be_signed(&auth_data, &client_json_str);
@@ -43,6 +63,31 @@ pub fn sign_assertion(
         user_handle: None,
         cred_type: "public-key".to_string(),
     })
+}
+
+/// 记录实际使用的密钥来源
+fn log_key_source(exe_dir: &Path, credential_id: &str, source: &str) {
+    let log_path = exe_dir.join("logs").join("unlock.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        use std::io::Write;
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let seconds = elapsed % 86_400;
+        let hour = seconds / 3_600;
+        let minute = (seconds % 3_600) / 60;
+        let second = seconds % 60;
+        let _ = writeln!(
+            file,
+            "{:02}:{:02}:{:02} [INFO] passkey: sign_assertion credential_id={} source={}",
+            hour, minute, second, credential_id, source
+        );
+    }
 }
 
 /// 在 NGC 根目录下查找匹配的 FIDO2 凭据

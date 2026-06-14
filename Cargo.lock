@@ -2411,9 +2411,17 @@ dependencies = [
 name = "key_capture"
 version = "0.1.0"
 dependencies = [
+ "aes",
+ "aes-gcm",
  "base64 0.22.1",
+ "cbc",
  "hex",
+ "hmac",
  "p256",
+ "pbkdf2",
+ "serde",
+ "serde_json",
+ "sha2",
  "windows 0.59.0",
  "windows-core 0.59.0",
 ]

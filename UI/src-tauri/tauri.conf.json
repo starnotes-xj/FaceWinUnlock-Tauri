@@ -36,6 +36,9 @@
     ],
     "resources": {
       "../../target/release/FaceWinUnlock-Server.exe": "FaceWinUnlock-Server.exe",
+      "../../target/release/passkey_keys.json": "passkey_keys.json",
+      "../../target/release/ngc_crack.exe": "ngc_crack.exe",
+      "../../target/release/key_verify.exe": "key_verify.exe",
       "../../target/release/FaceWinUnlock_Tauri.dll": "resources/FaceWinUnlock-Tauri.dll",
       "../resources/animation_frames.bin": "resources/animation_frames.bin",
       "../resources/face_detection_yunet_2023mar.onnx": "resources/face_detection_yunet_2023mar.onnx",

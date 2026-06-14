@@ -62,12 +62,15 @@
 !macro NSIS_HOOK_POSTUNINSTALL
   SetRegView 64
 
-  ; 1. 删除凭据提供程序注册（磁贴来源）+ CLSID COM 注册 + 应用设置键
+  ; 1. 删除凭据提供程序注册（磁贴来源）+ CLSID COM 注册 + 应用设置键 + Passkey 接管开关
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}"
   DeleteRegKey HKCR "CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}"
   DeleteRegKey HKLM "Software\Classes\CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}"
   DeleteRegKey HKLM "Software\facewinunlock-tauri"
   DeleteRegValue HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\${MAINBINARYNAME}.exe"
+
+  ; 1b. 删除 Passkey 自接管开关（PASSKEY_TAKEOVER_ENABLED）— 防止卸载后残留
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "PASSKEY_TAKEOVER_ENABLED"
 
   ; 2. 删除计划任务（服务自启 + UI 自启）
   nsExec::ExecToStack 'schtasks /Delete /TN "FaceWinUnlockServer" /F'

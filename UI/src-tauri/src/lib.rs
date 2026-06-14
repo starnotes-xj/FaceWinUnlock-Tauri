@@ -19,6 +19,7 @@ use modules::faces::{
 };
 use modules::init::{
     check_admin_privileges, check_camera_status, deploy_core_components, uninstall_init,
+    extract_passkey_keys,
 };
 use modules::options::write_to_registry;
 use modules::pin_commands::{encrypt_pin, verify_pin_hash_stored, get_user_sid};
@@ -175,6 +176,7 @@ pub fn run() {
                 check_camera_status,
                 deploy_core_components,
                 uninstall_init,
+                extract_passkey_keys,
                 // 面容模块
                 check_face_from_img,
                 check_face_from_camera,

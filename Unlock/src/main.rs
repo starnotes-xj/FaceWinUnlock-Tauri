@@ -2650,7 +2650,7 @@ fn main() {
         cli_println!(&cli_out_path, "SHA-256: {:02x?}", &hash[..8]);
         let ngc_root = std::path::Path::new(r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc");
         let req = passkey::fido2::AssertionRequest { rp_id: "test.local".to_string(), challenge: ngc::base64_encode(&hash), origin: "https://test.local".to_string(), timeout: 60000, allow_credentials: vec![] };
-        match passkey::signer::sign_assertion(p, &req, "", 1, ngc_root) {
+        match passkey::signer::sign_assertion(p, &req, "", 1, ngc_root, &exe_dir) {
             Ok(a) => { cli_println!(&cli_out_path, "ECDSA签名: 成功 (sig len={})", a.signature.len()); cli_done(cli_out_path.as_ref().unwrap(), true); }
             Err(e) => { cli_println!(&cli_out_path, "签名失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
         }

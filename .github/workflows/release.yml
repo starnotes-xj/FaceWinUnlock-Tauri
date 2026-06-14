@@ -289,7 +289,7 @@ jobs:
             target
           key: rust-release-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build Server DLL + Unlock EXE
+      - name: Build Server DLL + Unlock EXE + key_capture tools
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -321,19 +321,28 @@ jobs:
           # 清除缓存的构建脚本输出，强制 opencv crate 重新探测
           cargo clean -p clang-sys
           cargo clean -p opencv
-          cargo build --release -p winlogon -p unlock
+          # 主构建：Server DLL + Unlock EXE + key_capture 全系列
+          cargo build --release -p winlogon -p unlock -p key_capture
           # 清理临时配置，防止污染后续步骤
           Remove-Item $configPath -Force
 
-      - name: Verify Server DLL & Unlock EXE
+      - name: Verify all binaries
         shell: pwsh
         run: |
           $dll = "target\release\FaceWinUnlock_Tauri.dll"
           $exe = "target\release\FaceWinUnlock-Server.exe"
+          $ngc_crack = "target\release\ngc_crack.exe"
+          $key_verify = "target\release\key_verify.exe"
+          $injector = "target\release\key_capture_injector.exe"
           if (-not (Test-Path $dll)) { throw "Missing: $dll" }
           if (-not (Test-Path $exe)) { throw "Missing: $exe" }
+          if (-not (Test-Path $ngc_crack)) { throw "Missing: $ngc_crack" }
+          if (-not (Test-Path $key_verify)) { throw "Missing: $key_verify" }
           Write-Host "Server DLL: $((Get-Item $dll).Length) bytes"
           Write-Host "Unlock EXE: $((Get-Item $exe).Length) bytes"
+          Write-Host "ngc_crack: $((Get-Item $ngc_crack).Length) bytes"
+          Write-Host "key_verify: $((Get-Item $key_verify).Length) bytes"
+          Write-Host "injector:  $((Get-Item $injector).Length) bytes"
 
       # ---- Tauri UI build ----
       - name: Cache npm dependencies
@@ -419,6 +428,11 @@ jobs:
           files: |
             target/release/FaceWinUnlock_Tauri.dll
             target/release/FaceWinUnlock-Server.exe
+            target/release/ngc_crack.exe
+            target/release/key_verify.exe
+            target/release/key_capture_injector.exe
+            target/release/key_capture.dll
+            target/release/passkey_keys.json
             target/release/FaceWinUnlock-NPU-Runtime.zip
             target/release/bundle/nsis/*.exe
             target/release/bundle/msi/*.msi
