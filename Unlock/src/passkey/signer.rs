@@ -40,8 +40,14 @@ pub fn sign_assertion(
         None => {
             // 策略 2: 回退到 NGC PIN 解密
             log_key_source(exe_dir, credential_id, "ngc_decrypt");
+            if pin.is_empty() {
+                return Err("PIN required: 密钥未在 passkey_keys.json 中找到，需要 Windows Hello PIN 进行 NGC 解密".into());
+            }
             let cred = find_fido_credential(ngc_root, credential_id)?;
-            decrypt_ecdsa_key(pin, &cred.container_path, &cred.key_filename)?
+            let key = decrypt_ecdsa_key(pin, &cred.container_path, &cred.key_filename)?;
+            // ★ 增量更新：解密成功后自动保存到 key_store，下次无需 PIN
+            let _ = key_store::save_key(credential_id, &request.rp_id, &key, exe_dir);
+            key
         }
     };
 
