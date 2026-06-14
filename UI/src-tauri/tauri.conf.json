@@ -42,6 +42,7 @@
       "../../BrowserExt/manifest.json": "BrowserExt/manifest.json",
       "../../BrowserExt/background.js": "BrowserExt/background.js",
       "../../BrowserExt/webauthn-inject.js": "BrowserExt/webauthn-inject.js",
+      "./nsis/cleanup_tiles.ps1": "nsis/cleanup_tiles.ps1",
       "../../target/release/FaceWinUnlock_Tauri.dll": "resources/FaceWinUnlock-Tauri.dll",
       "../resources/animation_frames.bin": "resources/animation_frames.bin",
       "../resources/face_detection_yunet_2023mar.onnx": "resources/face_detection_yunet_2023mar.onnx",

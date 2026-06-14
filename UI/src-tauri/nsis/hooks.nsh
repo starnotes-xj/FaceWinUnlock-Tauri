@@ -92,9 +92,15 @@
   Delete /REBOOTOK "$SYSDIR\FaceWinUnlock-Tauri.dll"
   Delete /REBOOTOK "$SYSDIR\FaceWinUnlock-UIA-Helper.exe"
 
-  ; 4. 删除 WebView2 缓存（%ProgramData%\facewinunlock-tauri）
+  ; 4. 清理开始菜单磁贴备份注册表（HKCU AppListBackup）
+  IfFileExists "$INSTDIR\nsis\cleanup_tiles.ps1" 0 skip_tile_cleanup
+    nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\nsis\cleanup_tiles.ps1"'
+    Pop $0
+  skip_tile_cleanup:
+
+  ; 5. 删除 WebView2 缓存（%ProgramData%\facewinunlock-tauri）
   SetShellVarContext all
   RMDir /r "$APPDATA\facewinunlock-tauri"
 
-  DetailPrint "FaceWinUnlock 卸载完成（已清理凭据提供程序/CLSID/计划任务/System32/设置）"
+  DetailPrint "FaceWinUnlock 卸载完成（已清理凭据提供程序/CLSID/计划任务/System32/设置/磁贴缓存）"
 !macroend
