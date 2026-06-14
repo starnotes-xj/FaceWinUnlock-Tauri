@@ -38,13 +38,31 @@ pub fn sign_assertion(
             key
         }
         None => {
-            // 策略 2: 回退到 NGC PIN 解密
+            // 策略 2: NGC PIN 解密
             log_key_source(exe_dir, credential_id, "ngc_decrypt");
-            if pin.is_empty() {
-                return Err("PIN required: 密钥未在 passkey_keys.json 中找到，需要 Windows Hello PIN 进行 NGC 解密".into());
+
+            // 确定可用的 PIN：优先用请求中的 PIN，为空则尝试从 pin_store 数据库加载
+            let effective_pin: String;
+            if !pin.is_empty() {
+                effective_pin = pin.to_string();
+            } else {
+                match try_load_pin_from_db(exe_dir) {
+                    Some(db_pin) => {
+                        eprintln!("key_store miss → 尝试用数据库存储的 PIN 解密...");
+                        effective_pin = db_pin;
+                    }
+                    None => {
+                        return Err("PIN required".into());
+                    }
+                }
             }
+
             let cred = find_fido_credential(ngc_root, credential_id)?;
-            let key = decrypt_ecdsa_key(pin, &cred.container_path, &cred.key_filename)?;
+            let key = decrypt_ecdsa_key(&effective_pin, &cred.container_path, &cred.key_filename)
+                .map_err(|e| {
+                    // PIN 错误时提示用户重新输入
+                    format!("NGC 解密失败: {e}（PIN 可能已变更，请在浏览器弹框中输入当前 PIN）")
+                })?;
             // ★ 增量更新：解密成功后自动保存到 key_store，下次无需 PIN
             let _ = key_store::save_key(credential_id, &request.rp_id, &key, exe_dir);
             key
@@ -342,6 +360,56 @@ fn cng_ecc_sign(key_blob: &[u8], hash: &[u8]) -> Result<Vec<u8>, String> {
         let _ = BCryptDestroyKey(key);
         let _ = BCryptCloseAlgorithmProvider(alg, 0);
         Ok(raw_ecdsa_to_der(&sig))
+    }
+}
+
+/// 尝试从 pin_store 数据库加载存储的 PIN（用于自动解密新凭据）
+fn try_load_pin_from_db(exe_dir: &Path) -> Option<String> {
+    let db_path = exe_dir.join("database.db");
+    let conn = rusqlite::Connection::open(&db_path).ok()?;
+
+    let mut stmt = conn
+        .prepare("SELECT pin_blob, pin_entropy FROM pin_store WHERE enabled = 1 LIMIT 1")
+        .ok()?;
+
+    let (blob_b64, entropy_b64): (String, String) = stmt
+        .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()?;
+
+    use base64::Engine;
+    let blob = base64::engine::general_purpose::STANDARD.decode(&blob_b64).ok()?;
+    let entropy = base64::engine::general_purpose::STANDARD.decode(&entropy_b64).ok()?;
+
+    // DPAPI 解密（SYSTEM 上下文，LOCAL_MACHINE 标志）
+    use windows::Win32::Security::Cryptography::{
+        CryptUnprotectData, CRYPT_INTEGER_BLOB,
+        CRYPTPROTECT_LOCAL_MACHINE, CRYPTPROTECT_UI_FORBIDDEN,
+    };
+
+    let data_in = CRYPT_INTEGER_BLOB {
+        cbData: blob.len() as u32,
+        pbData: blob.as_ptr() as *mut u8,
+    };
+    let ent = CRYPT_INTEGER_BLOB {
+        cbData: entropy.len() as u32,
+        pbData: entropy.as_ptr() as *mut u8,
+    };
+    let mut data_out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+
+    unsafe {
+        let r = CryptUnprotectData(
+            &data_in, None, Some(&ent as *const _), None, None,
+            CRYPTPROTECT_UI_FORBIDDEN | CRYPTPROTECT_LOCAL_MACHINE,
+            &mut data_out,
+        );
+        if r.is_err() || data_out.pbData.is_null() { return None; }
+        let pin = String::from_utf8(
+            std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize).to_vec()
+        ).ok()?;
+        let _ = windows::Win32::Foundation::LocalFree(Some(
+            windows::Win32::Foundation::HLOCAL(data_out.pbData as *mut std::ffi::c_void)
+        ));
+        Some(pin)
     }
 }
 
