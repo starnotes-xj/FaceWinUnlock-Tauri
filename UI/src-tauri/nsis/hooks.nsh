@@ -43,6 +43,11 @@
   ; 让安装后的主程序默认按管理员权限启动。主 EXE 也会嵌入 requireAdministrator manifest，
   ; 这里再写 AppCompat RUNASADMIN 作为快捷方式/外壳启动兜底。
   WriteRegStr HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\${MAINBINARYNAME}.exe" "RUNASADMIN"
+  ; Passkey 浏览器扩展 — 写入注册表让 Chrome/Edge 自动发现本地扩展
+  ; Chrome External Extensions: https://developer.chrome.com/docs/extensions/how-to/distribute/install-extensions
+  WriteRegStr HKLM "Software\Google\Chrome\Extensions\facewinunlock-passkey-bridge" "update_url" "file:///$INSTDIR\BrowserExt\update.xml"
+  WriteRegStr HKLM "Software\Microsoft\Edge\Extensions\facewinunlock-passkey-bridge" "update_url" "file:///$INSTDIR\BrowserExt\update.xml"
+
   WriteRegStr HKLM "Software\facewinunlock-tauri" "DLL_LOG_PATH" "$INSTDIR\logs"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "ANIMATION_FRAMES_PATH" "$INSTDIR\resources\animation_frames.bin"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "UNLOCK_GRACE_PERIOD" "0.0"
@@ -69,7 +74,12 @@
   DeleteRegKey HKLM "Software\facewinunlock-tauri"
   DeleteRegValue HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\${MAINBINARYNAME}.exe"
 
-  ; 1b. 删除 Passkey 自接管开关（PASSKEY_TAKEOVER_ENABLED）— 防止卸载后残留
+  ; 1b. 清理浏览器扩展注册（Chrome / Edge 外部扩展条目）
+  DeleteRegKey HKLM "Software\Google\Chrome\Extensions\facewinunlock-passkey-bridge"
+  DeleteRegKey HKLM "Software\Microsoft\Edge\Extensions\facewinunlock-passkey-bridge"
+  DeleteRegValue HKLM "Software\Policies\Google\Chrome\ExtensionInstallForcelist" "1"
+
+  ; 1c. 删除 Passkey 自接管开关（PASSKEY_TAKEOVER_ENABLED）— 防止卸载后残留
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "PASSKEY_TAKEOVER_ENABLED"
 
   ; 2. 删除计划任务（服务自启 + UI 自启）
