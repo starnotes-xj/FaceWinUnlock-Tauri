@@ -1,14 +1,16 @@
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::{
     Shell::ICredentialProviderEvents,
     WindowsAndMessaging::{
-        CallNextHookEx, HHOOK, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-        WH_MOUSE_LL,
+        CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, MSG, PM_NOREMOVE, PeekMessageW,
+        PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+        WH_KEYBOARD_LL, WH_MOUSE_LL, WM_QUIT,
     },
 };
 
@@ -60,6 +62,16 @@ fn broker_fallback_timeout() -> Duration {
         .unwrap_or(5.0)
         .clamp(1.5, 30.0);
     Duration::from_millis((seconds * 1000.0) as u64)
+}
+
+/// 后台线程 DLL 引用计数守护：线程存活期间保持 DLL 加载，退出时 dll_release。
+/// 使 stop_and_join 可安全「分离不 join」——DllCanUnloadNow 会等线程退出后才卸载，
+/// 既不在宿主 UI 线程 join 阻塞（broker 不冻死），又不会因 DLL 提前卸载导致分离线程崩溃。
+struct DllRefGuard;
+impl Drop for DllRefGuard {
+    fn drop(&mut self) {
+        crate::dll_release();
+    }
 }
 
 pub fn request_unlock_release(reason: &str) {
@@ -139,6 +151,8 @@ static INPUT_HOOKS_ARMED: AtomicBool = AtomicBool::new(false);
 static INPUT_RUN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static INPUT_RUN_SOURCE: AtomicU8 = AtomicU8::new(0);
 static INPUT_HOOK_REF_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// 专用输入钩子线程的线程 ID（0 = 未运行）。uninstall 用它 PostThreadMessage(WM_QUIT)。
+static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 const INPUT_SOURCE_MOUSE: u8 = 1;
 const INPUT_SOURCE_KEYBOARD: u8 = 2;
 
@@ -194,43 +208,70 @@ unsafe extern "system" fn keyboard_hook_fn(code: i32, wparam: WPARAM, lparam: LP
 
 fn install_input_hooks() {
     let previous_refs = INPUT_HOOK_REF_COUNT.fetch_add(1, Ordering::SeqCst);
-    if previous_refs == 0 {
-        INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
-        INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
-        INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
+    if previous_refs > 0 {
+        return; // 已有专用钩子线程在运行，复用之
     }
+    INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
+    INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+    INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
 
-    if IS_MOUSE_HOOK_INSTALLED
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
+    // 低级钩子（WH_MOUSE_LL/WH_KEYBOARD_LL）必须在「安装它的线程」上跑消息泵、并在
+    // 「同一线程」卸载。此前在 broker 的 Advise/UnAdvise 线程装/卸——跨线程、或该线程
+    // teardown 时不泵消息，会让 UnhookWindowsHookEx 永久阻塞 → CredentialUIBroker.exe
+    // 卡死（实测根因）。改为专用线程：本线程装钩子 → GetMessage 泵消息（驱动 LL 回调）
+    // → 收到 WM_QUIT 在本线程卸钩子退出。uninstall 仅 PostThreadMessage(WM_QUIT)，非阻塞。
+    crate::dll_add_ref(); // 钩子线程生命周期内保持 DLL 加载（卸钩子前 DLL 不卸载）
+    thread::spawn(|| {
+        let _dll_ref = DllRefGuard;
+
+        // 先建立本线程的消息队列，确保后续 uninstall 的 PostThreadMessage 不会丢失。
+        let mut msg = MSG::default();
+        unsafe { let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE); }
+        HOOK_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+
         match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_fn), None, 0) } {
             Ok(hook) => {
                 MOUSE_HOOK_RAW.store(hook.0 as isize, Ordering::SeqCst);
+                IS_MOUSE_HOOK_INSTALLED.store(true, Ordering::SeqCst);
                 info!("锁屏鼠标输入 Hook 已安装");
             }
-            Err(e) => {
-                IS_MOUSE_HOOK_INSTALLED.store(false, Ordering::SeqCst);
-                error!("设置鼠标 Hook 失败: {:?}", e);
-            }
+            Err(e) => error!("设置鼠标 Hook 失败: {:?}", e),
         }
-    }
-
-    if IS_KEYBOARD_HOOK_INSTALLED
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
         match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_fn), None, 0) } {
             Ok(hook) => {
                 KEYBOARD_HOOK_RAW.store(hook.0 as isize, Ordering::SeqCst);
+                IS_KEYBOARD_HOOK_INSTALLED.store(true, Ordering::SeqCst);
                 info!("锁屏键盘输入 Hook 已安装");
             }
-            Err(e) => {
-                IS_KEYBOARD_HOOK_INSTALLED.store(false, Ordering::SeqCst);
-                error!("设置键盘 Hook 失败: {:?}", e);
+            Err(e) => error!("设置键盘 Hook 失败: {:?}", e),
+        }
+
+        // 消息泵：LL 钩子回调经本线程消息队列派发。GetMessage 阻塞至 WM_QUIT(返回0)/错误(-1)。
+        loop {
+            let r = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+            if r.0 == 0 || r.0 == -1 {
+                break;
+            }
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
         }
-    }
+
+        // 在「同一线程」卸钩子——绝不跨线程，从根上消除 UnhookWindowsHookEx 阻塞。
+        let raw_m = MOUSE_HOOK_RAW.swap(0, Ordering::SeqCst);
+        if raw_m != 0 {
+            unsafe { let _ = UnhookWindowsHookEx(HHOOK(raw_m as *mut _)); }
+        }
+        IS_MOUSE_HOOK_INSTALLED.store(false, Ordering::SeqCst);
+        let raw_k = KEYBOARD_HOOK_RAW.swap(0, Ordering::SeqCst);
+        if raw_k != 0 {
+            unsafe { let _ = UnhookWindowsHookEx(HHOOK(raw_k as *mut _)); }
+        }
+        IS_KEYBOARD_HOOK_INSTALLED.store(false, Ordering::SeqCst);
+        HOOK_THREAD_ID.store(0, Ordering::SeqCst);
+        info!("输入 Hook 线程已退出（钩子已在本线程安全卸载）");
+    });
 }
 
 fn uninstall_input_hooks() {
@@ -243,31 +284,19 @@ fn uninstall_input_hooks() {
     };
 
     if previous_refs > 1 {
-        return;
+        return; // 还有其它实例在用钩子线程，不关
     }
 
     INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
     INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
     INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
 
-    if IS_MOUSE_HOOK_INSTALLED
-        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        let raw = MOUSE_HOOK_RAW.swap(0, Ordering::SeqCst);
-        if raw != 0 {
-            let _ = unsafe { UnhookWindowsHookEx(HHOOK(raw as *mut _)) };
-        }
-    }
-
-    if IS_KEYBOARD_HOOK_INSTALLED
-        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        let raw = KEYBOARD_HOOK_RAW.swap(0, Ordering::SeqCst);
-        if raw != 0 {
-            let _ = unsafe { UnhookWindowsHookEx(HHOOK(raw as *mut _)) };
-        }
+    // 只给专用钩子线程发 WM_QUIT，让它在「自己线程」上卸钩子退出——绝不在调用方
+    // （broker/winlogon 的 UI 线程）上 UnhookWindowsHookEx，从根上消除 teardown 卡死。
+    // 非阻塞：本函数立即返回；钩子线程收到 WM_QUIT 后卸钩子、释放 DLL 引用、退出。
+    let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
+    if tid != 0 {
+        unsafe { let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0)); }
     }
 }
 
@@ -280,6 +309,13 @@ pub struct CPipeListener {
     creds_pipe_raw: Arc<AtomicIsize>,
     /// 是否安装了鼠标/键盘 Hook。所有已启用场景都可用 Hook 触发 run，CREDUI 额外保留自动 run 兜底。
     use_input_hooks: bool,
+    /// 是否主场景（登录/解锁）。仅主场景在 stop_and_join 中向 Unlock EXE 发 release 释放摄像头；
+    /// CREDUI/broker 场景不发——既符合文档约定（锁屏可能仍需 Unlock EXE），也避免在
+    /// CredentialUIBroker.exe 的 UI 线程 teardown 路径上执行阻塞管道连接而拖慢/冻结关闭。
+    is_primary_scenario: bool,
+    /// creds 线程已退出标志（drop-guard 置位，覆盖 break/return/panic 所有退出路径）。
+    /// stop_and_join 据此判断 creds 线程是否已结束、可否安全 join——否则分离，绝不冻宿主 UI 线程。
+    creds_finished: Arc<AtomicBool>,
 }
 
 impl CPipeListener {
@@ -299,6 +335,8 @@ impl CPipeListener {
         let stop_flag      = Arc::new(AtomicBool::new(false));
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
+        // creds 线程退出标志，供 stop_and_join 判断可否安全 join（否则分离，绝不冻宿主 UI 线程）
+        let creds_finished = Arc::new(AtomicBool::new(false));
         let use_input_hooks = true;
         // 所有场景（登录/解锁/CREDUI）统一由鼠标/键盘输入 Hook 触发 "run"，不自动开始识别。
         // 不启用 auto_run 的原因：① 锁屏后人未走开即被自动解锁，削弱锁屏安全意义（且
@@ -312,6 +350,7 @@ impl CPipeListener {
         let scenario_label = if is_primary_scenario { "登录/解锁" } else { "CREDUI/UAC" };
 
         // ── Client 线程（发送 prepare；输入 Hook 触发后发送 run）────────────────────
+        crate::dll_add_ref(); // client 线程生命周期内保持 DLL 加载（stop_and_join 分离不 join）
         let client_thread = {
             let stop_flag = stop_flag.clone();
             let anim_slot = animation_slot.clone();
@@ -321,6 +360,7 @@ impl CPipeListener {
             let send_events_for_client = SendableEvents(events.clone(), advise_context);
             let broker_timeout = broker_fallback_timeout();
             thread::spawn(move || {
+                let _dll_ref = DllRefGuard; // 退出（含下方 return）时 dll_release，分离安全
                 let connect_enabled = read_facewinunlock_registry("CONNECT_TO_PIPE")
                     .unwrap_or_else(|_| "1".to_string());
                 if connect_enabled != "1" {
@@ -508,13 +548,24 @@ impl CPipeListener {
         };
 
         // ── Creds 线程（接收凭据 + 驱动 Success 动画）────────────────────
+        crate::dll_add_ref(); // creds 线程生命周期内保持 DLL 加载（stop_and_join 分离不 join）
         let creds_thread = {
             let is_unlocked    = is_unlocked.clone();
             let stop_flag      = stop_flag.clone();
             let creds_pipe_raw = creds_pipe_raw.clone();
+            let creds_finished = creds_finished.clone();
             let send_events    = SendableEvents(events, advise_context);
             let anim_slot      = animation_slot.clone();
             thread::spawn(move || {
+                let _dll_ref = DllRefGuard; // 退出时 dll_release，分离安全
+                // 退出守卫：任何路径（break/return/panic）退出都置 finished，
+                // 供 stop_and_join 判断 creds 线程已结束（用于关句柄循环的提前退出）。
+                struct FinishGuard(Arc<AtomicBool>);
+                impl Drop for FinishGuard {
+                    fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); }
+                }
+                let _finish_guard = FinishGuard(creds_finished);
+
                 info!("CPipeListener::start - 进入凭据Client线程");
 
                 loop {
@@ -540,11 +591,38 @@ impl CPipeListener {
                     // 存储句柄以便 stop_and_join 可以关闭它来打断 ReadFile
                     creds_pipe_raw.store(pipe.0 as isize, Ordering::SeqCst);
 
+                    // store 后立即复查 stop：避免 stop_and_join 的句柄关闭恰好发生在本 store
+                    // 之前、漏掉本句柄，导致下面 ReadFile 永久阻塞、冻死宿主 UI 线程
+                    //（passkey 取消时 CredentialUIBroker.exe 卡死的竞态根因）。
+                    // 用 compare_exchange 取回所有权——成功才由本线程关闭，避免与 stop_and_join double-close。
+                    if stop_flag.load(Ordering::SeqCst) {
+                        if creds_pipe_raw
+                            .compare_exchange(pipe.0 as isize, INVALID_HANDLE_VALUE.0 as isize,
+                                              Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            unsafe { let _ = CloseHandle(pipe); }
+                        }
+                        break;
+                    }
+
                     // 阻塞等待 Unlock EXE 推送凭据
                     match pipe_read_raw(pipe) {
                         Ok(data) if !data.is_empty() => {
                             // 先清除句柄存储
                             creds_pipe_raw.store(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
+
+                            // ── 检测 inject_pin 命令（KSP 增强版：DLL 端 SendInput）──
+                            let data_str = String::from_utf8_lossy(&data);
+                            if data_str.starts_with("inject_pin:") {
+                                let pin = data_str["inject_pin:".len()..].trim_end_matches('\0').to_string();
+                                if !pin.is_empty() {
+                                    info!("CPipeListener - 收到 PIN 注入命令，执行 SendInput...");
+                                    inject_pin_sendinput(&pin);
+                                    info!("CPipeListener - PIN 已注入到前台窗口");
+                                }
+                                continue;
+                            }
 
                             match parse_credentials(&data) {
                                 Some((user, pwd, domain)) => {
@@ -555,8 +633,14 @@ impl CPipeListener {
                                         {
                                             let mut creds = shared_creds.lock().unwrap();
                                             if creds.broker_fallback_to_pin {
-                                                warn!("凭据线程：broker 已回退 PIN，丢弃迟到的人脸凭据");
-                                                continue;
+                                                // ── Approach B：面容已过，覆盖 broker PIN 回退 ──
+                                                // 即使 broker 已超时进入 PIN 模式，面容凭据到达后
+                                                // 仍然提交——人脸识别比 PIN 输入更可靠。
+                                                info!("凭据线程：面容凭据到达，覆盖 broker PIN 回退");
+                                                creds.broker_fallback_to_pin = false;
+                                                // 同时通知全局标记（其他管道实例也会检查）
+                                                BROKER_PIN_FALLBACK_GLOBAL.store(false, Ordering::SeqCst);
+                                                // 也要释放 pin_buffer，让 GetSerialization 走密码路径
                                             }
                                             info!("凭据线程：收到凭据，用户: {}", user);
                                             creds.username = user;
@@ -624,32 +708,135 @@ impl CPipeListener {
             creds_thread:  Some(creds_thread),
             creds_pipe_raw,
             use_input_hooks,
+            is_primary_scenario,
+            creds_finished,
         }))
     }
 
-    /// 停止两个后台线程并等待其退出
+    /// 停止两个后台线程：发 stop + 关句柄解阻塞，随后**分离**（绝不在宿主 UI 线程 join）。
+    /// 两线程已用 dll_add_ref/dll_release 守护 DLL 生命周期，DllCanUnloadNow 会等它们
+    /// 退出后才卸载——故可安全分离，UI 线程立即返回，CredentialUIBroker.exe 永不因
+    /// teardown 的线程 join 而冻结（passkey / 查看密码取消卡死的根治）。
     pub fn stop_and_join(&mut self) {
+        info!("CPipeListener::stop_and_join - 开始（信号 stop + 关句柄 + 分离）");
         self.stop_flag.store(true, Ordering::SeqCst);
         if self.use_input_hooks {
             uninstall_input_hooks();
             self.use_input_hooks = false;
         }
 
-        // 关闭凭据管道句柄，打断凭据线程中正在阻塞的 ReadFile
-        let raw = self.creds_pipe_raw.swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
-        if raw != INVALID_HANDLE_VALUE.0 as isize {
-            let h = HANDLE(raw as *mut _);
-            unsafe { let _ = CloseHandle(h); }
+        // 反复关闭 creds 线程持有的管道句柄打断其 ReadFile，让它尽快看到 stop 退出、
+        // 释放 DLL 引用。必须循环而非单次 swap：creds 线程可能在我们首次关闭之后才 store
+        // 新句柄（断开后立即重连的竞态），单次会漏掉。短暂有界(≤500ms)，不等待、不 join。
+        let close_deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            let raw = self.creds_pipe_raw.swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
+            if raw != INVALID_HANDLE_VALUE.0 as isize {
+                unsafe { let _ = CloseHandle(HANDLE(raw as *mut _)); }
+            }
+            if self.creds_finished.load(Ordering::SeqCst) { break; }
+            if Instant::now() >= close_deadline { break; }
+            thread::sleep(Duration::from_millis(20));
         }
 
-        if let Some(t) = self.client_thread.take() { let _ = t.join(); }
-        if let Some(t) = self.creds_thread.take()  { let _ = t.join(); }
+        // 关键：绝不在宿主 UI 线程 join 后台线程——drop JoinHandle 即分离。
+        // DLL 引用计数保证 DLL 在两线程退出前不卸载，分离安全；UI 线程立即返回。
+        let _ = self.client_thread.take();
+        let _ = self.creds_thread.take();
+        info!("CPipeListener::stop_and_join - 已分离后台线程（DLL 引用计数守护其生命周期）");
 
-        // 对话框关闭且不是面容识别成功时，通知 Unlock EXE 释放摄像头。
-        if !self.is_unlocked.load(Ordering::SeqCst) {
+        // 仅主场景（登录/解锁）在此向 Unlock EXE 发 release 释放摄像头。
+        // CREDUI/broker 不发：① 文档约定 CREDUI 不发 exit/release（锁屏可能仍需 Unlock EXE）；
+        // ② request_unlock_release 是阻塞管道连接，绝不能在 broker 的 UI 线程 teardown 上执行。
+        if self.is_primary_scenario && !self.is_unlocked.load(Ordering::SeqCst) {
             request_unlock_release("manual verification or dialog cancel");
         }
+        info!("CPipeListener::stop_and_join - 完成");
     }
+}
+
+/// KSP 增强版：DLL 端 SendInput PIN 注入。
+///
+/// 在全系统中精确定位 PIN 输入框，设焦点后用 SendInput 注入。
+/// 优先通过 EnumWindows 找 Chrome CredUI 对话框中的 Edit/PasswordBox，
+/// 设焦点后 SendInput 自然进入该控件（不依赖前台窗口）。
+/// 定位失败回退盲打。
+fn inject_pin_sendinput(pin: &str) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_RETURN, SetFocus,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, GetClassNameW,
+        GetWindow, GW_CHILD,
+    };
+    use windows::Win32::Foundation::{HWND, BOOL, LPARAM};
+
+    let our_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+
+    // ── 枚举所有顶层窗口，找同进程 CredUI/PIN 对话框 + 其 Edit 子控件 ──
+    struct FindCtx { pid: u32, found_hwnd: HWND }
+    let mut ctx = FindCtx { pid: our_pid, found_hwnd: HWND(std::ptr::null_mut()) };
+
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut FindCtx);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != ctx.pid { return BOOL(1); }
+        // 只看 CredUI/PIN 相关窗口类
+        let mut cls = [0u16; 64];
+        GetClassNameW(hwnd, &mut cls);
+        let cls_str = String::from_utf16_lossy(&cls);
+        // Chrome PIN 框可能是 Credential Dialog Xaml Host 或 Windows.UI.Core.CoreWindow
+        let is_credui = cls_str.contains("Credential") || cls_str.contains("CoreWindow")
+            || cls_str.contains("WindowsSecurity") || cls_str.contains("AADCredential");
+        if !is_credui { return BOOL(1); }
+        // 找子 Edit
+        let child = GetWindow(hwnd, GW_CHILD).unwrap_or(HWND(std::ptr::null_mut()));
+        ctx.found_hwnd = find_edit_recursive(child);
+        if ctx.found_hwnd.0.is_null() { BOOL(1) } else { BOOL(0) }
+    }
+    unsafe fn find_edit_recursive(hwnd: HWND) -> HWND {
+        if hwnd.0.is_null() { return hwnd; }
+        let mut cls = [0u16; 64];
+        GetClassNameW(hwnd, &mut cls);
+        let s = String::from_utf16_lossy(&cls);
+        if s.contains("Edit") || s.contains("PasswordBox") || s.contains("TextBox") { return hwnd; }
+        let mut child = GetWindow(hwnd, GW_CHILD).unwrap_or(HWND(std::ptr::null_mut()));
+        while !child.0.is_null() {
+            let r = find_edit_recursive(child);
+            if !r.0.is_null() { return r; }
+            child = GetWindow(child, windows::Win32::UI::WindowsAndMessaging::GW_HWNDNEXT).unwrap_or(HWND(std::ptr::null_mut()));
+        }
+        HWND(std::ptr::null_mut())
+    }
+
+    unsafe { let _ = EnumWindows(Some(callback), LPARAM(&mut ctx as *mut _ as isize)); }
+
+    if !ctx.found_hwnd.0.is_null() {
+        info!("inject_pin: 找到 PIN Edit HWND=0x{:X}", ctx.found_hwnd.0 as usize);
+        unsafe { let _ = SetFocus(Some(ctx.found_hwnd)); }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    } else {
+        warn!("inject_pin: 未找到 PIN Edit，回退盲打");
+    }
+
+    // ── SendInput 注入 PIN ──
+    for ch in pin.encode_utf16() {
+        unsafe {
+            let down = INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(0), wScan: ch, dwFlags: KEYEVENTF_UNICODE, time: 0, dwExtraInfo: 0 } } };
+            let up   = INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(0), wScan: ch, dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0), time: 0, dwExtraInfo: 0 } } };
+            SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    unsafe {
+        let down = INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_RETURN, wScan: 0, dwFlags: KEYBD_EVENT_FLAGS(0), time: 0, dwExtraInfo: 0 } } };
+        let up   = INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_RETURN, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 } } };
+        SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
+    }
+    info!("inject_pin: PIN + Enter 已发送");
 }
 
 impl Drop for CPipeListener {

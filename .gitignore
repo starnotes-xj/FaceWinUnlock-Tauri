@@ -44,3 +44,9 @@ UI/src-tauri/nsis/installer.nsi
 UI/resources/debug_*.js
 UI/resources/debug_*.png
 UI/resources/frame_*_preview.png
+
+# 逆向分析：二进制 / Ghidra 工程不入库（体积大 + 含微软系统 DLL）
+reverse_analysis/ghidra_project/
+reverse_analysis/*.dll
+reverse_analysis/*.bin
+C:/FaceWinUnlock/

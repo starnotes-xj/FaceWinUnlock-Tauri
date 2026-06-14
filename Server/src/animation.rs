@@ -149,6 +149,8 @@ struct AnimStateData {
 
 struct RenderState {
     stop: AtomicBool,
+    /// 渲染线程已退出标志。Drop 据此判断能否安全 join（否则分离，绝不冻结宿主 UI 线程）。
+    finished: AtomicBool,
     anim: Mutex<AnimStateData>,
 }
 
@@ -169,6 +171,7 @@ impl AnimationContext {
 
         let render_state = Arc::new(RenderState {
             stop: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
             anim: Mutex::new(AnimStateData {
                 state: AnimState::Scanning,
                 entered_at: Instant::now(),
@@ -178,9 +181,11 @@ impl AnimationContext {
         let thread_state = render_state.clone();
         let thread = std::thread::spawn(move || {
             let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
-            if let Err(e) = run_render_loop(hwnd, &search_utf16, thread_state) {
+            if let Err(e) = run_render_loop(hwnd, &search_utf16, thread_state.clone()) {
                 log::error!("[anim] render loop failed: {:?}", e);
             }
+            // 标记渲染线程已退出，供 Drop 判断可否安全 join。
+            thread_state.finished.store(true, Ordering::SeqCst);
         });
 
         Ok(Self {
@@ -210,7 +215,24 @@ impl Drop for AnimationContext {
     fn drop(&mut self) {
         self.render_state.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.render_thread.take() {
-            let _ = t.join();
+            // 关键：绝不在宿主 UI 线程上无限 join 渲染线程。
+            // broker(CredentialUIBroker.exe) 取消 / 关闭 PIN 框时父窗口正在销毁，
+            // 渲染线程可能正卡在绑定该 HWND 的 DComp Commit/EndDraw 上；无限 join
+            // 会把 broker 的 UI 线程一并冻死（用户反馈的“卡死”根因）。
+            // 正常情况下渲染线程在数十毫秒内即看到 stop 退出；这里有界等待，
+            // 超时(2s)则分离线程不再 join，让宿主线程继续完成窗口销毁。
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !self.render_state.finished.load(Ordering::SeqCst)
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if self.render_state.finished.load(Ordering::SeqCst) {
+                let _ = t.join(); // 已退出，瞬间返回，干净回收
+            } else {
+                log::warn!("[anim] 渲染线程 2s 未退出，分离以避免冻结宿主 UI 线程");
+                drop(t); // 丢弃 JoinHandle = 分离线程（不 join），不阻塞宿主线程
+            }
         }
     }
 }
@@ -919,6 +941,10 @@ fn run_render_loop(
 
             d2d_context.SetTarget(None);
             let _bh = bitmap;
+            // 退出前若已收到 stop，跳过这最后一次 EndDraw/Commit 直接返回——
+            // broker 取消时父窗口正在销毁，对其 HWND 的 DComp 提交可能阻塞，
+            // 早返回让渲染线程尽快退出、释放 DComp 资源，避免冻结宿主 UI 线程。
+            if state.stop.load(Ordering::SeqCst) { return Ok(()); }
             dcomp_surface.EndDraw()?;
             dcomp_device.Commit()?;
 

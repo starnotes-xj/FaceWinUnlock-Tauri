@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::fido2::{self, AssertionRequest};
+use super::fido2::{AssertionRequest};
 use super::signer;
 use super::sql;
 

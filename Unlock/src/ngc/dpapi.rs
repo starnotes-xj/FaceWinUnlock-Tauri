@@ -571,9 +571,9 @@ fn probe_sign(
 pub fn ncrypt_sign_probe(rp_id: &str, pin: &str) -> Vec<String> {
     use windows::Win32::Security::Cryptography::{
         NCryptOpenStorageProvider, NCryptEnumKeys, NCryptFreeBuffer, NCryptFreeObject,
-        NCryptOpenKey, NCryptSetProperty, NCryptSignHash,
+        NCryptOpenKey,
         NCRYPT_PROV_HANDLE, NCRYPT_KEY_HANDLE, NCRYPT_HANDLE, NCryptKeyName,
-        NCRYPT_FLAGS, CERT_KEY_SPEC, BCRYPT_PKCS1_PADDING_INFO, NCRYPT_PAD_PKCS1_FLAG,
+        NCRYPT_FLAGS, CERT_KEY_SPEC,
     };
     use windows_core::PCWSTR;
     use sha2::{Digest, Sha256};

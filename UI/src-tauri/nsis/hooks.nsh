@@ -60,6 +60,28 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  SetRegView 64
+
+  ; 1. 删除凭据提供程序注册（磁贴来源）+ CLSID COM 注册 + 应用设置键
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}"
+  DeleteRegKey HKCR "CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}"
+  DeleteRegKey HKLM "Software\Classes\CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}"
+  DeleteRegKey HKLM "Software\facewinunlock-tauri"
   DeleteRegValue HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\${MAINBINARYNAME}.exe"
-  DetailPrint "FaceWinUnlock 卸载完成"
+
+  ; 2. 删除计划任务（服务自启 + UI 自启）
+  nsExec::ExecToStack 'schtasks /Delete /TN "FaceWinUnlockServer" /F'
+  Pop $0
+  nsExec::ExecToStack 'schtasks /Delete /TN "FaceWinUnlockAutoStart" /F'
+  Pop $0
+
+  ; 3. 删除 System32 残留（被占用则安排重启后删）
+  Delete /REBOOTOK "$SYSDIR\FaceWinUnlock-Tauri.dll"
+  Delete /REBOOTOK "$SYSDIR\FaceWinUnlock-UIA-Helper.exe"
+
+  ; 4. 删除 WebView2 缓存（%ProgramData%\facewinunlock-tauri）
+  SetShellVarContext all
+  RMDir /r "$APPDATA\facewinunlock-tauri"
+
+  DetailPrint "FaceWinUnlock 卸载完成（已清理凭据提供程序/CLSID/计划任务/System32/设置）"
 !macroend

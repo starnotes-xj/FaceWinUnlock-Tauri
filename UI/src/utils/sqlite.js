@@ -57,6 +57,33 @@ const databseTable = [
             // 上次更新时间
             { name: 'lastTime', type: 'TEXT', defaultValue: "datetime('now', 'localtime')" }
         ]
+    },{
+        // PIN 加密存储表 (用于 PIN 优先解锁流程)
+        // 预存用户输入的 Windows Hello PIN，加密后用于自动填充
+        // 解密流程: pin_blob 经 DPAPI(entropy=SID) 解密 → 明文 PIN
+        //          然后由 DLL 调 NCryptSetProperty(SmartcardPin) 验证
+        name: 'pin_store',
+        columns: [
+            { name: 'id', type: 'INTEGER', primaryKey: true, autoIncrement: true, notNull: true },
+            // 关联的 face_id (一对一, NULL 表示全局默认)
+            { name: 'face_id', type: 'INTEGER' },
+            // Windows 用户名
+            { name: 'user_name', type: 'TEXT', notNull: true },
+            // DPAPI 加密的 PIN 字节序列 (base64)
+            { name: 'pin_blob', type: 'TEXT', notNull: true },
+            // DPAPI entropy 字节 (base64) — 用 SID + 机器特征派生
+            { name: 'pin_entropy', type: 'TEXT', notNull: true },
+            // PIN hash (SHA256 十六进制) — 用于快速校验不暴露明文
+            { name: 'pin_hash', type: 'TEXT', notNull: true },
+            // 加密方式标识: "dpapi-sid" | "dpapi-machine" | "aes-gcm"
+            { name: 'crypto_method', type: 'TEXT', notNull: true, defaultValue: "'dpapi-sid'" },
+            // 是否启用
+            { name: 'enabled', type: 'INTEGER', notNull: true, defaultValue: '1' },
+            // 备注/来源
+            { name: 'note', type: 'TEXT' },
+            { name: 'createTime', type: 'TEXT', defaultValue: "datetime('now', 'localtime')" },
+            { name: 'lastTime', type: 'TEXT', defaultValue: "datetime('now', 'localtime')" }
+        ]
     }
 ];
 

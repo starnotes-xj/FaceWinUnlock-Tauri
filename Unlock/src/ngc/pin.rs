@@ -15,42 +15,71 @@ use super::NgcError;
 /// Windows Hello PIN 的固定熵前缀（null-terminated）
 const FIXED_ENTROPY_PREFIX: &[u8] = b"xT5rZW5qVVbrvpuA\0";
 
-/// 从明文 PIN 和 protector 参数派生 DPAPI entropy
-///
-/// # Arguments
-/// * `pin` - 明文 PIN（如 "123456"）
-/// * `salt` - 从 protector 提取的 PBKDF2 salt
-/// * `rounds` - PBKDF2 迭代次数
-///
-/// # Returns
-/// 派生出的 DPAPI entropy 字节序列
+/// 从明文 PIN 和 protector 参数派生 DPAPI entropy（Shwmae 原始方法）
 pub fn derive_entropy(pin: &str, salt: &[u8], rounds: u32) -> Result<Vec<u8>, NgcError> {
-    // Step 1: PIN → ASCII → 大写十六进制 → UTF-16LE
-    let pin_hex: String = pin.as_bytes()
-        .iter()
-        .map(|b| format!("{:02X}", b))
-        .collect();
-    let pin_utf16le = to_utf16le_bytes(&pin_hex);
+    derive_with_pin_encoding(pin, salt, rounds, PinEncoding::HexUtf16)
+}
 
-    // Step 2: PBKDF2-HMAC-SHA256(pin_utf16le, salt, rounds) → 32 bytes
+/// PIN 编码变体——KDF 差异的关键
+#[derive(Clone, Copy)]
+pub enum PinEncoding {
+    HexUtf16,   // hex(PIN) → UTF-16LE (Shwmae 原始方法)
+    RawUtf16,   // PIN → UTF-16LE 直接
+    RawBytes,   // PIN → 原始 ASCII 字节
+    HexLower,   // hex(PIN, lowercase) → UTF-16LE
+}
+
+/// 用指定的 PIN 编码方式派生 DPAPI entropy
+fn derive_with_pin_encoding(
+    pin: &str, salt: &[u8], rounds: u32, encoding: PinEncoding
+) -> Result<Vec<u8>, NgcError> {
+    let pbkdf2_input = match encoding {
+        PinEncoding::HexUtf16 => {
+            let pin_hex: String = pin.as_bytes().iter().map(|b| format!("{:02X}", b)).collect();
+            to_utf16le_bytes(&pin_hex)
+        }
+        PinEncoding::RawUtf16 => to_utf16le_bytes(pin),
+        PinEncoding::RawBytes => pin.as_bytes().to_vec(),
+        PinEncoding::HexLower => {
+            let pin_hex: String = pin.as_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+            to_utf16le_bytes(&pin_hex)
+        }
+    };
+
+    // PBKDF2-HMAC-SHA256 → 32 bytes
     let mut derived = [0u8; 32];
-    pbkdf2_hmac::<Sha256>(&pin_utf16le, salt, rounds, &mut derived);
+    pbkdf2_hmac::<Sha256>(&pbkdf2_input, salt, rounds, &mut derived);
 
-    // Step 3: derived → hex UPPERCASE → UTF-16LE (必须大写，dpapilab-ng 权威参考)
+    // derived → hex UPPERCASE → UTF-16LE → SHA-512
     let derived_hex: String = derived.iter().map(|b| format!("{:02X}", b)).collect();
     let derived_utf16le = to_utf16le_bytes(&derived_hex);
-
-    // Step 4: SHA-512(derived_utf16le)
     let mut hasher = Sha512::new();
     hasher.update(&derived_utf16le);
     let hash = hasher.finalize();
 
-    // Step 5: 前置固定熵
+    // 前置固定熵 "xT5rZW5qVVbrvpuA\0"
     let mut entropy = Vec::with_capacity(FIXED_ENTROPY_PREFIX.len() + hash.len());
     entropy.extend_from_slice(FIXED_ENTROPY_PREFIX);
     entropy.extend_from_slice(&hash);
-
     Ok(entropy)
+}
+
+/// 尝试所有 PIN 编码方式，返回所有成功派生的 entropy 变体
+pub fn derive_entropy_all_variants(
+    pin: &str, salt: &[u8], rounds: u32
+) -> Vec<(String, Vec<u8>)> {
+    use PinEncoding::*;
+    let encodings = [
+        ("HexUtf16", HexUtf16),
+        ("RawUtf16", RawUtf16),
+        ("RawBytes", RawBytes),
+        ("HexLower", HexLower),
+    ];
+    encodings.iter().filter_map(|(name, enc)| {
+        derive_with_pin_encoding(pin, salt, rounds, *enc)
+            .ok()
+            .map(|e| (name.to_string(), e))
+    }).collect()
 }
 
 /// 将 ASCII 字符串转换为 UTF-16LE 字节序列

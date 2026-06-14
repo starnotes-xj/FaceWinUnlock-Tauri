@@ -1,0 +1,60 @@
+=== Searching: softwarekey ===
+  Found at: 180099222
+=== Searching: Protector ===
+  Found at: 1800969e2
+  Found at: 180096a03
+  Found at: 180096a75
+  Found at: 180096a92
+  Found at: 180096ab5
+  Found at: 180096ad1
+  Found at: 180096afa
+  Found at: 180096b83
+  Found at: 180096ba1
+  Found at: 180096bca
+  Found at: 180096bf4
+  Found at: 180096c1a
+  Found at: 180096c62
+  Found at: 18009739c
+  Found at: 1800973c3
+  Found at: 1800987e7
+  Found at: 180098807
+  Found at: 180098847
+  Found at: 18009886d
+  Found at: 18009888c
+=== Searching: SRK ===
+=== Searching: DeriveKey ===
+=== Searching: KDF ===
+=== Searching: PIN ===
+=== Searching: PinDerive ===
+=== Searching: SecretAgreement ===
+=== Searching: BCryptDeriveKey ===
+=== Searching: HKDF ===
+=== Searching: entropy ===
+
+=== All relevant functions ===
+  DelayLoad_NCryptCreatePersistedKey at 18000812f size=12
+  DelayLoad_NCryptFinalizeKey at 180008153 size=12
+  DelayLoad_NCryptDeleteKey at 180008165 size=12
+  DelayLoad_BCryptDestroyKey at 180008202 size=12
+  DelayLoad_NCryptImportKey at 1800082d5 size=12
+  DelayLoad_BCryptExportKey at 1800082e7 size=12
+  DelayLoad_BCryptImportKeyPair at 1800082f9 size=12
+  DelayLoad_NCryptOpenKey at 18000832c size=12
+  DelayLoad_NCryptExportKey at 180008398 size=12
+  DelayLoad_CryptExportPublicKeyInfoEx at 1800083aa size=12
+  DelayLoad_CryptProtectData at 1800083bc size=12
+  DelayLoad_CryptUnprotectData at 1800083ce size=12
+  DelayLoad_WinBioProtectData at 1800085d8 size=12
+  DelayLoad_WinBioUnprotectData at 1800085ea size=12
+  DelayLoad_WinBioNgcGetAuthorizationWithTicket at 180008675 size=12
+  DelayLoad_WinBioNgcCloseAuthorizationSession at 180008687 size=12
+  DelayLoad_WinBioNgcOpenAuthorizationSession at 180008699 size=12
+  DelayLoad_WinBioNgcAuthorizeEnrollment at 1800086ab size=12
+  DelayLoad_NgcGetKeyAttestationForContainerService at 18000882a size=12
+  DelayLoad_NgcQueryEnabled at 18000883c size=12
+  NgcIsoCtnrInitialize at 180011d70 size=64
+  NgcIsoCtnrInitializePregenPool at 180011dc0 size=70
+  NgcIsoCtnrTriggerPregen at 180011e20 size=27
+  NgcIsoCtnrUninitializePregenPool at 180011e50 size=64
+
+=== SOFTWAREKEY FUNCTION DISASSEMBLY ===

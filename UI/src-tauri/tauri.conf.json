@@ -36,7 +36,6 @@
     ],
     "resources": {
       "../../target/release/FaceWinUnlock-Server.exe": "FaceWinUnlock-Server.exe",
-      "../../target/release/FaceWinUnlock-UIA-Helper.exe": "resources/FaceWinUnlock-UIA-Helper.exe",
       "../../target/release/FaceWinUnlock_Tauri.dll": "resources/FaceWinUnlock-Tauri.dll",
       "../resources/animation_frames.bin": "resources/animation_frames.bin",
       "../resources/face_detection_yunet_2023mar.onnx": "resources/face_detection_yunet_2023mar.onnx",

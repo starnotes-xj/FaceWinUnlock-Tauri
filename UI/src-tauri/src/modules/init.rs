@@ -113,7 +113,6 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
     };
 
     copy_to_system32(DLL_NAME)?;
-    copy_to_system32("FaceWinUnlock-UIA-Helper.exe")?;
 
     // 2. 注册 Credential Provider（HKLM）
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
@@ -260,25 +259,46 @@ pub fn uninstall_init() -> Result<CustomResult, CustomResult> {
         ));
     }
 
-    // 1. 删除注册表项
+    // 1. 结束后台服务进程，避免 DLL/EXE 被占用
+    let _ = run_hidden("taskkill", &["/F", "/IM", "FaceWinUnlock-Server.exe"]);
+
+    // 2. 删除计划任务（UI 自启 + 服务自启）
+    for tn in ["FaceWinUnlockAutoStart", "FaceWinUnlockServer"] {
+        let _ = run_hidden("schtasks", &["/Delete", "/TN", tn, "/F"]);
+    }
+
+    // 3. 删除注册表：CP 列表项（磁贴来源）、CLSID、应用设置键
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let cp_path = format!(r"{}\{}", CP_REG_PATH, CP_GUID);
-    let _ = hklm.delete_subkey_all(&cp_path);
-
+    let _ = hklm.delete_subkey_all(format!(r"{}\{}", CP_REG_PATH, CP_GUID));
+    let _ = hklm.delete_subkey_all(r"SOFTWARE\facewinunlock-tauri");
     let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
-    let clsid_path = format!(r"{}\{}", CLSID_ROOT, CP_GUID);
-    let _ = hkcr.delete_subkey_all(&clsid_path);
+    let _ = hkcr.delete_subkey_all(format!(r"{}\{}", CLSID_ROOT, CP_GUID));
 
-    // 2. 删除 DLL
-    let dst = Path::new(SYSTEM32).join(DLL_NAME);
-    if dst.exists() {
-        std::fs::remove_file(&dst).map_err(|e| {
-            CustomResult::error(
-                Some(format!("删除 DLL 失败: {}", e)),
-                None,
-            )
-        })?;
+    // 4. 删除 System32 文件（主 DLL + 已废弃的 UIA-Helper），best-effort 不因占用而中断
+    for f in [DLL_NAME, "FaceWinUnlock-UIA-Helper.exe"] {
+        let p = Path::new(SYSTEM32).join(f);
+        if p.exists() {
+            let _ = fs::remove_file(&p);
+        }
+    }
+
+    // 5. 删除 WebView2 缓存（%ProgramData%\facewinunlock-tauri）
+    if let Ok(pd) = std::env::var("ProgramData") {
+        let cache = Path::new(&pd).join("facewinunlock-tauri");
+        if cache.exists() {
+            let _ = fs::remove_dir_all(&cache);
+        }
     }
 
     Ok(CustomResult::success(None, None))
+}
+
+/// 隐藏窗口执行外部命令（best-effort，用于卸载时调用 taskkill / schtasks）
+fn run_hidden(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new(program)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
 }

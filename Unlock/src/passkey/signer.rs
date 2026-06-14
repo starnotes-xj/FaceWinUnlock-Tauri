@@ -87,9 +87,9 @@ fn find_fido_credential(ngc_root: &Path, credential_id: &str) -> Result<FidoCred
 
 /// 用 PIN 解密 ECDSA_P256 私钥
 ///
-/// 每个 Key 用自己的 NgcIsoHeader salt 独立加密，
-/// 密钥 = PIN entropy 的 SHA-512 前 32 bytes。
+/// NgcIso 加密的 key；尝试多种密钥派生方式。
 fn decrypt_ecdsa_key(pin: &str, container_path: &Path, key_filename: &str) -> Result<Vec<u8>, String> {
+    // 1. 读取 key 的 encryptedCbor
     let key_path = container_path.join("Keys").join(key_filename);
     let js = std::fs::read_to_string(&key_path).map_err(|e| format!("key: {}", e))?;
     let key: serde_json::Value = serde_json::from_str(&js).map_err(|e| format!("json: {}", e))?;
@@ -99,22 +99,41 @@ fn decrypt_ecdsa_key(pin: &str, container_path: &Path, key_filename: &str) -> Re
     use base64::Engine;
     let cbor_bytes = base64::engine::general_purpose::STANDARD.decode(cbor_b64)
         .map_err(|e| format!("b64: {}", e))?;
-    let header = ngc::container::parse_ngciso_header(&cbor_bytes)
+    let key_hdr = ngc::container::parse_ngciso_header(&cbor_bytes)
         .map_err(|e| format!("hdr: {}", e))?;
 
-    // 用 KEY 自己的 salt 派生 entropy (不是 protector 的 salt)
-    let entropy = ngc::pin::derive_entropy(pin, &header.salt, header.rounds)
-        .map_err(|_| "entropy failed".to_string())?;
-    if entropy.len() < 50 { return Err("entropy short".to_string()); }
-    let aes_key = &entropy[18..50];
+    let ct = &cbor_bytes[key_hdr.payload_offset..];
+    let iv = &key_hdr.iv;
 
-    let ct = &cbor_bytes[header.payload_offset..];
-    let ct = if ct.len() % 16 != 0 { &ct[..ct.len() - (ct.len() % 16)] } else { ct };
+    // 2. 尝试多种 PIN 编码 × 两种 salt
+    let prot_params = get_protector_params(container_path).ok();
+    let mut all_entropies: Vec<(String, Vec<u8>)> = Vec::new();
 
-    // Try AES-GCM first (modern NgcIso), fall back to CBC
-    ngc::dpapi::aes256_gcm_decrypt(aes_key, &header.iv, ct)
-        .or_else(|_| ngc::dpapi::aes256_cbc_decrypt(aes_key, &header.iv, ct))
-        .map_err(|e| format!("key decrypt: {}", e))
+    // 用 key 自己的 salt
+    for (enc_name, ent) in ngc::pin::derive_entropy_all_variants(pin, &key_hdr.salt, key_hdr.rounds) {
+        all_entropies.push((format!("key_salt+{enc_name}"), ent));
+    }
+    // 用 protector 的 salt
+    if let Some((ref prot_salt, prot_rounds)) = &prot_params {
+        for (enc_name, ent) in ngc::pin::derive_entropy_all_variants(pin, prot_salt, *prot_rounds) {
+            all_entropies.push((format!("prot_salt+{enc_name}"), ent));
+        }
+    }
+
+    for (variant, entropy) in &all_entropies {
+        if let Some((_method, pt)) = ngc::try_multiple_key_derivations(entropy, iv, ct) {
+            return Ok(pt);
+        }
+    }
+
+    let prot_salt_hex = prot_params.as_ref()
+        .map(|(s,_)| format!("{:02X?}", s.iter().take(8).collect::<Vec<_>>()))
+        .unwrap_or_else(|| "none".to_string());
+    Err(format!("key decrypt: all derivations failed [key_salt={:02X?}.. prot_salt={}.. iv={:02X?}.. ct_len={}]",
+        &key_hdr.salt.iter().take(8).collect::<Vec<_>>(),
+        prot_salt_hex,
+        &iv.iter().take(8).collect::<Vec<_>>(),
+        ct.len()))
 }
 
 fn get_protector_params(container_path: &Path) -> Result<(Vec<u8>, u32), String> {
@@ -145,17 +164,93 @@ fn ecdsa_sign(key_blob: &[u8], hash: &[u8]) -> Result<Vec<u8>, String> {
 
 /// Raw 32-byte ECDSA P256 private key d
 fn raw_ecdsa_sign(d: &[u8], hash: &[u8]) -> Result<Vec<u8>, String> {
-    // Build BCRYPT_ECCPRIVATE_BLOB manually
-    // Header: dwMagic(4) + cbKey(4) + curve magic + P256 public key X(32) + Y(32) + d(32)
-    // dwMagic for ECDSA P256 private: 0x32434345 ("ECC2")
-    // Need to compute Q = d * G
-    // For now, return error with info
-    Err(format!("raw P256 key: {} bytes, need pubkey derivation", d.len()))
+    // 从 raw 32-byte 私钥构建完整的 BCRYPT_ECCPRIVATE_BLOB (104 bytes)
+    let blob = raw_d_to_ecc_private_blob(d)?;
+    cng_ecc_sign(&blob, hash)
 }
 
-/// PKCS#8 DER-encoded EC private key
-fn pkcs8_ecdsa_sign(der: &[u8], _hash: &[u8]) -> Result<Vec<u8>, String> {
-    Err(format!("PKCS#8 key: {} bytes, need DER parsing", der.len()))
+/// 将 raw 32-byte P256 私钥转换为 BCRYPT_ECCPRIVATE_BLOB
+fn raw_d_to_ecc_private_blob(d: &[u8]) -> Result<Vec<u8>, String> {
+    use p256::{
+        elliptic_curve::sec1::ToEncodedPoint,
+        SecretKey,
+    };
+
+    if d.len() != 32 {
+        return Err(format!("raw P256 key: expected 32 bytes, got {}", d.len()));
+    }
+
+    let sk = SecretKey::from_bytes(d.into())
+        .map_err(|e| format!("invalid P256 private key: {e}"))?;
+    let pub_key = sk.public_key();
+    let point = pub_key.to_encoded_point(false);
+    let x = point.x().ok_or("no x coordinate")?;
+    let y = point.y().ok_or("no y coordinate")?;
+
+    // BCRYPT_ECCPRIVATE_BLOB 格式:
+    // dwMagic (4) = BCRYPT_ECDSA_PRIVATE_P256_MAGIC = 0x32434345 ("ECC2")
+    // cbKey   (4) = 32
+    // X       (32)
+    // Y       (32)
+    // d       (32)
+    // Total:  104 bytes
+    let mut blob = Vec::with_capacity(104);
+    blob.extend_from_slice(&0x32434345u32.to_le_bytes()); // dwMagic
+    blob.extend_from_slice(&32u32.to_le_bytes());          // cbKey
+    blob.extend_from_slice(x.as_slice());                   // X
+    blob.extend_from_slice(y.as_slice());                   // Y
+    blob.extend_from_slice(d);                              // d
+    Ok(blob)
+}
+
+/// PKCS#8 DER-encoded EC private key → sign
+fn pkcs8_ecdsa_sign(der: &[u8], hash: &[u8]) -> Result<Vec<u8>, String> {
+    // 用 BCrypt 导入 PKCS#8 格式并签名
+    use windows::Win32::Security::Cryptography::{
+        BCryptOpenAlgorithmProvider, BCryptImportKeyPair, BCryptSignHash,
+        BCryptDestroyKey, BCryptCloseAlgorithmProvider,
+        BCRYPT_ECDSA_P256_ALGORITHM, BCRYPT_ECCPRIVATE_BLOB,
+        BCRYPT_ALG_HANDLE, BCRYPT_KEY_HANDLE,
+        BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_FLAGS,
+    };
+
+    unsafe {
+        let mut alg = BCRYPT_ALG_HANDLE::default();
+        if BCryptOpenAlgorithmProvider(
+            &mut alg, BCRYPT_ECDSA_P256_ALGORITHM, None,
+            BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS(0),
+        ).is_err() {
+            return Err("BCryptOpenAlgorithmProvider(ECDSA_P256) failed".to_string());
+        }
+
+        let mut key = BCRYPT_KEY_HANDLE::default();
+        let import_result = BCryptImportKeyPair(
+            alg, None, BCRYPT_ECCPRIVATE_BLOB, &mut key, der, 0,
+        );
+        if import_result.is_err() {
+            let _ = BCryptCloseAlgorithmProvider(alg, 0);
+            return Err(format!("BCryptImportKeyPair(PKCS#8) failed: {import_result:?}"));
+        }
+
+        let mut sig_size = 0u32;
+        let _ = BCryptSignHash(key, None, hash, None, &mut sig_size, BCRYPT_FLAGS(0));
+        if sig_size == 0 || sig_size > 1024 {
+            let _ = BCryptDestroyKey(key);
+            let _ = BCryptCloseAlgorithmProvider(alg, 0);
+            return Err(format!("BCryptSignHash size query: {sig_size}"));
+        }
+
+        let mut sig = vec![0u8; sig_size as usize];
+        if BCryptSignHash(key, None, hash, Some(&mut sig), &mut sig_size, BCRYPT_FLAGS(0)).is_err() {
+            let _ = BCryptDestroyKey(key);
+            let _ = BCryptCloseAlgorithmProvider(alg, 0);
+            return Err("BCryptSignHash failed".to_string());
+        }
+        sig.truncate(sig_size as usize);
+        let _ = BCryptDestroyKey(key);
+        let _ = BCryptCloseAlgorithmProvider(alg, 0);
+        Ok(raw_ecdsa_to_der(&sig))
+    }
 }
 
 /// CNG ECCPRIVATEBLOB

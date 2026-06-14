@@ -13,7 +13,7 @@
 	import { invoke } from '@tauri-apps/api/core'
 	import { formatObjectString, hashMessage } from '../utils/function'
 	import { info, error as errorLog, warn } from '@tauri-apps/plugin-log';
-	import { selectCustom } from '../utils/sqlite'
+	import { selectCustom, select, insert, update, deleteData } from '../utils/sqlite'
 	import { useRouter } from 'vue-router'
 	import { openUrl } from '@tauri-apps/plugin-opener';
 
@@ -72,6 +72,109 @@
 		pinEnabled: optionsStore.getOptionValueByKey('pinEnabled') === 'true',
 		passkeyEnabled: optionsStore.getOptionValueByKey('passkeyEnabled') === 'true',
 	})
+
+	// ── 预存 Windows Hello PIN（人脸过后自动填充用）──────────────────
+	const pinStore = reactive({
+		userName: '',
+		hasStored: false,
+		storedTime: '',
+		pin: '',
+		pinConfirm: '',
+		saving: false,
+	})
+
+	// 获取当前 Windows 用户名，再查询是否已存 PIN
+	invoke('get_now_username').then((result: any) => {
+		// get_now_username 返回 CustomResult：{ data: { username } }。
+		// 必须取 data.username 字符串，否则把整个 map 传给 encrypt_pin 会报
+		// "invalid type: map, expected a string"。
+		pinStore.userName = (typeof result === 'string')
+			? result
+			: (result?.data?.username ?? (typeof result?.data === 'string' ? result.data : ''));
+		return refreshPinStored();
+	}).catch((e) => {
+		warn(formatObjectString('获取当前用户名失败：', e));
+	});
+
+	async function refreshPinStored() {
+		if (!pinStore.userName) return;
+		try {
+			const r = await select('pin_store', ['id', 'pin_hash', 'enabled', 'lastTime'], 'user_name = ?', [pinStore.userName]);
+			pinStore.hasStored = r.rows.length > 0;
+			pinStore.storedTime = r.rows.length > 0 ? (r.rows[0].lastTime || '') : '';
+		} catch (e) {
+			// 表可能尚未就绪，忽略
+		}
+	}
+
+	async function savePinStore() {
+		const pin = pinStore.pin.trim();
+		if (!/^\d{4,}$/.test(pin)) {
+			ElMessage.warning('PIN 至少 4 位数字');
+			return;
+		}
+		if (pin !== pinStore.pinConfirm.trim()) {
+			ElMessage.warning('两次输入的 PIN 不一致');
+			return;
+		}
+		if (!pinStore.userName) {
+			ElMessage.warning('未获取到当前 Windows 用户名');
+			return;
+		}
+		pinStore.saving = true;
+		const loadingInstance = ElLoading.service({ fullscreen: true, text: '正在加密存储 PIN…' });
+		try {
+			// 后端 DPAPI(机器级)+SID 加密；返回 { blob_b64, entropy_b64, pin_hash }
+			const enc: any = await invoke('encrypt_pin', { userName: pinStore.userName, pin });
+			const existing = await select('pin_store', ['id'], 'user_name = ?', [pinStore.userName]);
+			if (existing.rows.length > 0) {
+				await update('pin_store', {
+					pin_blob: enc.blob_b64,
+					pin_entropy: enc.entropy_b64,
+					pin_hash: enc.pin_hash,
+					crypto_method: 'dpapi-sid',
+					enabled: 1,
+				}, 'user_name = ?', [pinStore.userName]);
+			} else {
+				await insert('pin_store',
+					['user_name', 'pin_blob', 'pin_entropy', 'pin_hash', 'crypto_method', 'enabled'],
+					[pinStore.userName, enc.blob_b64, enc.entropy_b64, enc.pin_hash, 'dpapi-sid', 1]
+				);
+			}
+			// 存了 PIN 自动启用 Hello PIN 解锁并同步注册表
+			dllConfig.pinEnabled = true;
+			await invoke('write_to_registry', { items: [{ key: 'PIN_ENABLED', value: '1' }] }).catch((e) => {
+				warn(formatObjectString('同步 PIN_ENABLED 注册表失败：', e));
+			});
+			pinStore.pin = '';
+			pinStore.pinConfirm = '';
+			await refreshPinStored();
+			ElMessage.success('PIN 已加密保存');
+		} catch (error) {
+			const info = formatObjectString('保存 PIN 失败：', error);
+			ElMessage.error(info);
+			errorLog(info);
+		} finally {
+			pinStore.saving = false;
+			loadingInstance.close();
+		}
+	}
+
+	function clearPinStore() {
+		ElMessageBox.confirm(
+			'确定删除已存储的 Hello PIN？删除后人脸识别通过将无法自动填充 PIN。',
+			'确认删除',
+			{ confirmButtonText: '确定删除', confirmButtonClass: 'el-button--danger', cancelButtonText: '取消', type: 'warning' }
+		).then(async () => {
+			try {
+				await deleteData('pin_store', 'user_name = ?', [pinStore.userName]);
+				await refreshPinStored();
+				ElMessage.success('已删除存储的 PIN');
+			} catch (error) {
+				ElMessage.error(formatObjectString('删除 PIN 失败：', error));
+			}
+		}).catch(() => {});
+	}
 
 	const refreshCameraList = ()=>{
 		cameraListLoading.value = true;
@@ -824,6 +927,32 @@
 								<el-switch v-model="dllConfig.passkeyEnabled" />
 							</div>
 						</div>
+						<div v-if="dllConfig.pinEnabled" style="padding: 16px 0; border-bottom: 1px solid #f2f6fc;">
+							<div class="row-text" style="margin-bottom: 12px;">
+								<p class="label">预存 Windows Hello PIN（人脸过后自动填充）</p>
+								<p class="sub">
+									当前账户：<b>{{ pinStore.userName || '获取中…' }}</b><br />
+									人脸识别通过后，由提升权限组件用 UIA/SendInput 自动把此 PIN 填入 Windows Hello PIN 框并提交，无需手动输入。<br />
+									PIN 经 DPAPI（机器级 + SID）加密后存于本地 <code>pin_store</code> 表，明文不落盘。
+								</p>
+							</div>
+							<div v-if="pinStore.hasStored" class="option-row" style="border:none; padding:6px 0;">
+								<el-tag type="success">已存储 PIN{{ pinStore.storedTime ? '（' + pinStore.storedTime + '）' : '' }}</el-tag>
+								<el-button type="danger" size="small" plain @click="clearPinStore">删除已存 PIN</el-button>
+							</div>
+							<el-form label-position="top" style="max-width: 360px; margin-top: 8px;">
+								<el-form-item :label="pinStore.hasStored ? '更新 PIN' : '输入 Windows Hello PIN'">
+									<el-input v-model="pinStore.pin" type="password" show-password placeholder="4 位以上数字 PIN" />
+								</el-form-item>
+								<el-form-item label="确认 PIN">
+									<el-input v-model="pinStore.pinConfirm" type="password" show-password placeholder="再次输入 PIN" />
+								</el-form-item>
+								<el-button type="primary" :loading="pinStore.saving" @click="savePinStore">
+									{{ pinStore.hasStored ? '更新并加密保存' : '加密保存 PIN' }}
+								</el-button>
+							</el-form>
+						</div>
+
 						<div class="option-row">
 							<div class="row-text">
 								<p class="label">动画刷新率</p>

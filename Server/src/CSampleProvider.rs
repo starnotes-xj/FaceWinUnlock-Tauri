@@ -161,7 +161,9 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
     /// 取消事件通知
     fn UnAdvise(&self) -> windows_core::Result<()> {
         info!("SampleProvider::UnAdvise - 取消事件通知");
+        info!("SampleProvider::UnAdvise - 获取 inner 锁...");
         let mut inner = self.inner.lock().unwrap();
+        info!("SampleProvider::UnAdvise - inner 锁已获取");
         inner.events = None; // 清除事件接口
         inner.advise_context = 0; // 重置上下文ID
 
@@ -170,10 +172,14 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
         // 因此,在取消事件通知时,我们需要停止并清理管道监听线程
         // 停止并清理管道监听线程
         if let Some(listener) = inner.listener.take() {
+            info!("SampleProvider::UnAdvise - 获取 listener 锁并停止监听...");
             let mut listener = listener.lock().unwrap();
+            info!("SampleProvider::UnAdvise - listener 锁已获取，调用 stop_and_join");
             listener.stop_and_join();
+            info!("SampleProvider::UnAdvise - stop_and_join 返回");
         }
         inner.listener = None;
+        info!("SampleProvider::UnAdvise - 完成");
         Ok(())
     }
 

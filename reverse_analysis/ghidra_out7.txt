@@ -1,0 +1,66 @@
+Module manifest file error on line 2 of file: C:\Users\�Ǽ�\AppData\Roaming\ghidra\ghidra_12.0.4_PUBLIC\Extensions\GhidraMCP\Module.manifest
+	-> Invalid line encountered: GHIDRA_MODULE_NAME=GhidraMCP
+Module manifest file error on line 3 of file: C:\Users\�Ǽ�\AppData\Roaming\ghidra\ghidra_12.0.4_PUBLIC\Extensions\GhidraMCP\Module.manifest
+	-> Invalid line encountered: GHIDRA_MODULE_DESC=An HTTP server plugin for Ghidra
+Module manifest file error on line 2 of file: C:\Users\�Ǽ�\AppData\Roaming\ghidra\ghidra_12.0.4_PUBLIC\Extensions\GhidraMCP\Module.manifest
+	-> Invalid line encountered: GHIDRA_MODULE_NAME=GhidraMCP
+Module manifest file error on line 3 of file: C:\Users\�Ǽ�\AppData\Roaming\ghidra\ghidra_12.0.4_PUBLIC\Extensions\GhidraMCP\Module.manifest
+	-> Invalid line encountered: GHIDRA_MODULE_DESC=An HTTP server plugin for Ghidra
+INFO  Using log config file: jar:file:/D:/Ghidra/Ghidra/Framework/Generic/lib/Generic.jar!/generic.log4j.xml (LoggingInitialization)  
+INFO  Using log file: C:\Users\星记\AppData\Roaming\ghidra\ghidra_12.0.4_PUBLIC\application.log (LoggingInitialization)  
+INFO  Loading user preferences: C:\Users\星记\AppData\Roaming\ghidra\ghidra_12.0.4_PUBLIC\preferences (Preferences)  
+INFO  Searching for classes... (ClassSearcher)  
+INFO  Class search complete (873 ms) (ClassSearcher)  
+INFO  Initializing SSL Context (DefaultSSLContextInitializer)  
+INFO  Initializing Random Number Generator... (SecureRandomFactory)  
+INFO  Random Number Generator initialization complete: SHA1PRNG (SecureRandomFactory)  
+INFO  Trust manager disabled, cacerts have not been set (DefaultTrustManagerFactory)  
+INFO  Headless startup complete (2521 ms) (AnalyzeHeadless)  
+INFO  Class searcher loaded 58 extension points (18 false positives) (ClassSearcher)  
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::staticFieldOffset has been called by org.apache.felix.framework.util.SecureAction (file:/D:/Ghidra/Ghidra/Features/Base/lib/org.apache.felix.framework-7.0.5.jar)
+WARNING: Please consider reporting this to the maintainers of class org.apache.felix.framework.util.SecureAction
+WARNING: sun.misc.Unsafe::staticFieldOffset will be removed in a future release
+INFO  HEADLESS Script Paths:
+    D:\Ghidra\Ghidra\Features\FileFormats\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\GnuDemangler\ghidra_scripts
+    D:\Ghidra\Ghidra\Processors\PIC\ghidra_scripts
+    D:\Ghidra\Ghidra\Processors\JVM\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\VersionTracking\ghidra_scripts
+    D:\Ghidra\Ghidra\Debug\Debugger-rmi-trace\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\BSim\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\PyGhidra\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\SystemEmulation\ghidra_scripts
+    D:\Ghidra\Ghidra\Processors\8051\ghidra_scripts
+    D:\Ghidra\Ghidra\Debug\Debugger\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\WildcardAssembler\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\Jython\ghidra_scripts
+    D:\Ghidra\Ghidra\Processors\Atmel\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\FunctionID\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\MicrosoftCodeAnalyzer\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\PDB\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\Base\ghidra_scripts
+    D:\Ghidra\Ghidra\Processors\DATA\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\SwiftDemangler\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\DecompilerDependent\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\Decompiler\ghidra_scripts
+    D:\Ghidra\Ghidra\Features\BytePatterns\ghidra_scripts (HeadlessAnalyzer)  
+INFO  HEADLESS: execution starts (HeadlessAnalyzer)  
+INFO  Opening existing project: D:\RustProject\FaceWinUnlock-Tauri\reverse_analysis\ghidra_project\NGC_Analysis (HeadlessAnalyzer)  
+INFO  Opening project: D:\RustProject\FaceWinUnlock-Tauri\reverse_analysis\ghidra_project\NGC_Analysis (HeadlessProject)  
+ERROR Abort due to Headless analyzer error: ghidra.framework.store.LockException: Unable to lock project! D:\RustProject\FaceWinUnlock-Tauri\reverse_analysis\ghidra_project\NGC_Analysis (HeadlessAnalyzer) java.io.IOException: ghidra.framework.store.LockException: Unable to lock project! D:\RustProject\FaceWinUnlock-Tauri\reverse_analysis\ghidra_project\NGC_Analysis
+	at ghidra.app.util.headless.HeadlessAnalyzer.openProject(HeadlessAnalyzer.java:1815)
+	at ghidra.app.util.headless.HeadlessAnalyzer.processLocal(HeadlessAnalyzer.java:433)
+	at ghidra.app.util.headless.AnalyzeHeadless.launch(AnalyzeHeadless.java:199)
+	at ghidra.GhidraLauncher.launch(GhidraLauncher.java:81)
+	at ghidra.Ghidra.main(Ghidra.java:54)
+Caused by: ghidra.framework.store.LockException: Unable to lock project! D:\RustProject\FaceWinUnlock-Tauri\reverse_analysis\ghidra_project\NGC_Analysis
+	at ghidra.framework.data.DefaultProjectData.getProjectLock(DefaultProjectData.java:354)
+	at ghidra.framework.data.DefaultProjectData.initLock(DefaultProjectData.java:324)
+	at ghidra.framework.data.DefaultProjectData.init(DefaultProjectData.java:316)
+	at ghidra.framework.data.DefaultProjectData.<init>(DefaultProjectData.java:119)
+	at ghidra.framework.project.DefaultProject.<init>(DefaultProject.java:116)
+	at ghidra.app.util.headless.HeadlessAnalyzer$HeadlessProject.<init>(HeadlessAnalyzer.java:1856)
+	at ghidra.app.util.headless.HeadlessAnalyzer.openProject(HeadlessAnalyzer.java:1809)
+	... 4 more
+ 

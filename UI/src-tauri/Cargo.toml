@@ -25,6 +25,7 @@ windows = { version = "0.59", features = [
     "Win32_Media_MediaFoundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_IO",
@@ -42,6 +43,8 @@ lazy_static = "1"
 uuid = { version = "1", features = ["v4"] }
 encoding_rs = "0.8"
 winreg = "0.52"
+sha2 = "0.10"
+hex = "0.4"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

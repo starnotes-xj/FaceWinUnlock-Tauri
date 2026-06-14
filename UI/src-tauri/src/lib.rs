@@ -21,6 +21,7 @@ use modules::init::{
     check_admin_privileges, check_camera_status, deploy_core_components, uninstall_init,
 };
 use modules::options::write_to_registry;
+use modules::pin_commands::{encrypt_pin, verify_pin_hash_stored, get_user_sid};
 use opencv::{
     core::Ptr,
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
@@ -203,7 +204,11 @@ pub fn run() {
                 run_scheduled_task,
                 check_trigger_via_xml,
                 repair_unlock_scheduled_task,
-                restart_unlock_service
+                restart_unlock_service,
+                // PIN 存储模块
+                encrypt_pin,
+                verify_pin_hash_stored,
+                get_user_sid,
             ]);
     }
     builder
