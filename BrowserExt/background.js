@@ -72,21 +72,35 @@ async function handleWebAuthnGet(options) {
     }
   }
 
-  // Prompt user for Hello PIN
-  const pin = await promptForPin(options.rpId, options.origin);
-  if (!pin) {
-    throw new Error('User cancelled PIN entry');
-  }
-
-  // Forward to signer
-  const resp = await fetch(`http://127.0.0.1:${signerPort}/assertion`, {
+  // 先尝试无 PIN 签名（已捕获密钥优先）
+  let resp = await fetch(`http://127.0.0.1:${signerPort}/assertion`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${signerToken}`
     },
-    body: JSON.stringify({ ...options, pin })
+    body: JSON.stringify({ ...options, pin: '' })
   });
+
+  // 如果无 PIN 失败，提示用户输入 PIN 重试
+  if (!resp.ok) {
+    const errBody = await resp.json().catch(() => ({}));
+    // 只有密钥未找到时才弹 PIN 框
+    if (errBody.error && errBody.error.includes('PIN')) {
+      const pin = await promptForPin(options.rpId, options.origin);
+      if (!pin) {
+        throw new Error('User cancelled PIN entry');
+      }
+      resp = await fetch(`http://127.0.0.1:${signerPort}/assertion`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${signerToken}`
+        },
+        body: JSON.stringify({ ...options, pin })
+      });
+    }
+  }
 
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ error: 'HTTP ' + resp.status }));
