@@ -74,7 +74,7 @@ fn scan_dir(dir: &Path) {
     println!("扫描目录: {}", dir.display());
     if !dir.is_dir() {
         eprintln!("目录不存在: {}", dir.display());
-        eprintln!("请先执行 key_capture_injector 捕获密钥，然后重试。");
+        eprintln!("请先运行 ngc_crack.exe 提取密钥，然后重试。");
         std::process::exit(1);
     }
 
@@ -87,10 +87,12 @@ fn scan_dir(dir: &Path) {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
-                // 匹配捕获的输出文件
-                if fname.starts_with("plaintext_")
-                    && (fname.contains("BCryptImportKeyPair") || fname.contains("ECC"))
-                    && fname.ends_with(".bin")
+                // 匹配 ngc_crack 输出: ngc_*_18_no_entropy.bin, incr_*.bin, decrypted_*.bin
+                if fname.ends_with(".bin")
+                    && (fname.starts_with("ngc_")
+                        || fname.starts_with("incr_")
+                        || fname.starts_with("decrypted_")
+                        || fname.starts_with("ECDSA_"))
                 {
                     found += 1;
                     println!("\n{}", "=".repeat(60));
@@ -105,9 +107,9 @@ fn scan_dir(dir: &Path) {
     }
 
     if found == 0 {
-        println!("\n未找到捕获的 ECDSA 私钥文件。");
-        println!("预期文件名: plaintext_BCryptImportKeyPair_ECC_*.bin");
-        println!("请确认已注入 DLL 并触发过一次 passkey 断言。");
+        println!("\n未找到 ECDSA 私钥文件。");
+        println!("预期文件名: ngc_*_18_no_entropy.bin, incr_*.bin, decrypted_*.bin");
+        println!("请先运行 ngc_crack.exe --sid <SID> <PIN> 提取 NGC 密钥。");
     } else {
         println!("\n{}", "=".repeat(60));
         println!("扫描完成，共 {found} 个候选文件。");
