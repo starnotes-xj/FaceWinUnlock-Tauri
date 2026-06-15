@@ -17,16 +17,19 @@
     const version = ref(localStorage.getItem("version") || 'unknown');
     const { isDark, toggleTheme } = useTheme();
 
-    /** 检查更新（仅比对版本号，不做任何下载或安装） */
+    /** 检查更新（仅比对版本号，不做任何下载或安装；点击通知打开 Release 页面） */
+    let updateUrl = '';
     onMounted(async () => {
         try {
             const info: any = await invoke('check_update');
             if (info?.has_update) {
+                updateUrl = info.release_url || '';
                 ElNotification({
                     title: '发现新版本',
-                    message: `当前 v${info.current_version} → 最新 v${info.latest_version}`,
+                    message: `当前 v${info.current_version} → 最新 v${info.latest_version}（点击前往下载）`,
                     type: 'info',
                     duration: 10000,
+                    onClick: () => { if (updateUrl) window.open(updateUrl, '_blank'); },
                 });
             }
         } catch { /* 静默失败，不影响正常使用 */ }
