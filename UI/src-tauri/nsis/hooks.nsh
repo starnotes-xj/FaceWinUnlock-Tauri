@@ -78,40 +78,76 @@
 !macro NSIS_HOOK_POSTUNINSTALL
   SetRegView 64
 
-  ; 1. 删除凭据提供程序注册（磁贴来源）+ CLSID COM 注册 + 应用设置键 + Passkey 接管开关
+  ; ─── 1. 先删值后删键（DeleteRegKey 会连带所有子键值一起清除，先单独删避免残留）───
+
+  ; 1a. 凭据提供程序 CLSID COM 注册
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}"
   DeleteRegKey HKCR "CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}"
   DeleteRegKey HKLM "Software\Classes\CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}"
-  DeleteRegKey HKLM "Software\facewinunlock-tauri"
+
+  ; 1b. AppCompat 注册（RUNASADMIN）
   DeleteRegValue HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\${MAINBINARYNAME}.exe"
 
-  ; 1b. 清理浏览器扩展注册（Chrome / Edge 外部扩展条目）
+  ; 1c. 浏览器扩展注册（Chrome / Edge 外部扩展 + 策略强制安装）
   DeleteRegKey HKLM "Software\Google\Chrome\Extensions\facewinunlock-passkey-bridge"
   DeleteRegKey HKLM "Software\Microsoft\Edge\Extensions\facewinunlock-passkey-bridge"
   DeleteRegValue HKLM "Software\Policies\Google\Chrome\ExtensionInstallForcelist" "1"
 
-  ; 1c. 删除 Passkey 自接管开关（PASSKEY_TAKEOVER_ENABLED）— 防止卸载后残留
+  ; 1d. 应用设置键（所有值：UNLOCK_SCENE, SHOW_TILE, CONNECT_TO_PIPE, DLL_LOG_PATH,
+  ;     ANIMATION_FRAMES_PATH, UNLOCK_GRACE_PERIOD, RETRY_DELAY, CREDUI_ALLOW_BROKER,
+  ;     CREDUI_BROKER_FALLBACK_TIMEOUT, PASSKEY_TAKEOVER_ENABLED, PIN_ENABLED 等）
+  ;     先逐个 DeleteRegValue 确保不残留，再 DeleteRegKey 清理空键
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "PASSKEY_TAKEOVER_ENABLED"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "PIN_ENABLED"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "UNLOCK_SCENE"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "SHOW_TILE"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "CONNECT_TO_PIPE"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "DLL_LOG_PATH"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "ANIMATION_FRAMES_PATH"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "UNLOCK_GRACE_PERIOD"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "RETRY_DELAY"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_ALLOW_BROKER"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_BROKER_FALLBACK_TIMEOUT"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "ANIMATION_FPS"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "ANIMATION_UI_ENABLED"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_ALLOW_GENERIC"
+  DeleteRegKey HKLM "Software\facewinunlock-tauri"
 
-  ; 2. 删除计划任务（服务自启 + UI 自启）
+  ; 1e. 各用户 HKCU 下的 facewinunlock-tauri 残留（WebView2/EBWebView 路径等）
+  DeleteRegKey HKCU "Software\facewinunlock-tauri"
+
+  ; ─── 2. 计划任务 ─────────────────────────────────────────────────
   nsExec::ExecToStack 'schtasks /Delete /TN "FaceWinUnlockServer" /F'
   Pop $0
   nsExec::ExecToStack 'schtasks /Delete /TN "FaceWinUnlockAutoStart" /F'
   Pop $0
+  ; 增量更新可能残留的一次性任务
+  nsExec::ExecToStack 'schtasks /Delete /TN "FaceWinUnlockNgcCrack" /F'
+  Pop $0
 
-  ; 3. 删除 System32 残留（被占用则安排重启后删）
+  ; ─── 3. System32 DLL 残留 ────────────────────────────────────────
   Delete /REBOOTOK "$SYSDIR\FaceWinUnlock-Tauri.dll"
+  Delete /REBOOTOK "$SYSDIR\FaceWinUnlock-Tauri.dll.new"
   Delete /REBOOTOK "$SYSDIR\FaceWinUnlock-UIA-Helper.exe"
 
-  ; 4. 清理开始菜单磁贴备份注册表（HKCU AppListBackup）
+  ; ─── 4. 开始菜单磁贴备份（HKCU AppListBackup）────────────────────
   IfFileExists "$INSTDIR\nsis\cleanup_tiles.ps1" 0 skip_tile_cleanup
     nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\nsis\cleanup_tiles.ps1"'
     Pop $0
   skip_tile_cleanup:
 
-  ; 5. 删除 WebView2 缓存（%ProgramData%\facewinunlock-tauri）
+  ; ─── 5. 应用数据目录 ─────────────────────────────────────────────
   SetShellVarContext all
   RMDir /r "$APPDATA\facewinunlock-tauri"
+  ; 程序数据目录（WebView2 缓存等）
+  RMDir /r "$PROGRAMDATA\facewinunlock-tauri"
+  ; 安装目录自身（NSIS 默认保留空目录，显式清理）
+  RMDir /r "$INSTDIR\logs"
+  RMDir /r "$INSTDIR\BrowserExt"
+  RMDir /r "$INSTDIR\nsis"
+  RMDir /r "$INSTDIR\resources"
+  Delete "$INSTDIR\*.*"
+  RMDir "$INSTDIR"
 
-  DetailPrint "FaceWinUnlock 卸载完成（已清理凭据提供程序/CLSID/计划任务/System32/设置/磁贴缓存）"
+  DetailPrint "FaceWinUnlock 卸载完成（已清理凭据提供程序/CLSID/注册表/计划任务/System32/磁贴缓存/数据目录）"
 !macroend
