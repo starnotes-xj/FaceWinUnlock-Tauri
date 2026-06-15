@@ -150,7 +150,7 @@
 * [x] 面容解锁分级支持（开机、锁屏、UAC、用户层）（Fork 已实现，首选项→系统集成可配置）
 * [ ] 活体检测优化（仍无法与2.2相比，待优化）
 * [x] 一键卸载脚本（由claude生成）
-* [ ] 检查更新功能（联网的功能暂时不考虑）
+* [x] 检查更新功能（仅比对版本号，详见下方说明）
 * [ ] 识别时的动态反馈（26.02.17完成，样式有待优化）
 * [ ] 放弃OpenCV，减少70M体积并解决中文目录无法使用问题（考虑中……）
 
@@ -249,6 +249,26 @@ $env:PATH        = "D:\Rust\CARGO\bin;" + $env:PATH
 1. 错误的操作可能导致系统无法正常登录。
 2. 建议在虚拟机 (VMware/Hyper-V) 环境中进行调试。
 3. 作者不对因使用本软件导致的任何数据丢失、系统崩溃或安全漏洞承担责任。
+
+## 🔍 检查更新
+
+程序启动时会联网检查 GitHub Release 是否有新版本，**仅比对版本号，不做任何下载或安装**。
+
+| 项目 | 内容 |
+|------|------|
+| 联网地址 | `https://api.github.com/repos/starnotes-xj/FaceWinUnlock-Tauri/releases/latest` |
+| 请求方式 | GET |
+| 请求内容 | 仅标准 HTTP 头（User-Agent），不发送任何用户数据 |
+| 响应处理 | 读取 `tag_name` 与当前版本比对，不同则弹出通知 |
+| 关闭方式 | 通知 10 秒自动消失，不影响任何功能 |
+
+**相关代码文件**（完整链路，可从任意文件开始追溯）：
+
+| 层 | 文件 | 说明 |
+|----|------|------|
+| Rust 后端 | `UI/src-tauri/src/modules/update_check.rs` | `check_update` 命令：GET GitHub API → 比对版本 → 返回 `UpdateInfo` |
+| 命令注册 | `UI/src-tauri/src/lib.rs` | `generate_handler![... check_update]` |
+| 前端调用 | `UI/src/layout/MainLayout.vue` | `onMounted` 时 `invoke('check_update')` → `ElNotification` 提示 |
 
 ## 📄 开源协议
 

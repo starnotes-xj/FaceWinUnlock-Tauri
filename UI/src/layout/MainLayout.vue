@@ -1,5 +1,5 @@
 <script setup lang="ts">
-    import { ref } from 'vue';
+    import { ref, onMounted } from 'vue';
     import { RouterView } from 'vue-router';
     import {
         Avatar,
@@ -10,10 +10,27 @@
         Sunny,
         Moon
     } from '@element-plus/icons-vue'
+    import { ElNotification } from 'element-plus';
+    import { invoke } from '@tauri-apps/api/core';
     import { useTheme } from '../hook/useTheme';
 
     const version = ref(localStorage.getItem("version") || 'unknown');
     const { isDark, toggleTheme } = useTheme();
+
+    /** 检查更新（仅比对版本号，不做任何下载或安装） */
+    onMounted(async () => {
+        try {
+            const info: any = await invoke('check_update');
+            if (info?.has_update) {
+                ElNotification({
+                    title: '发现新版本',
+                    message: `当前 v${info.current_version} → 最新 v${info.latest_version}`,
+                    type: 'info',
+                    duration: 10000,
+                });
+            }
+        } catch { /* 静默失败，不影响正常使用 */ }
+    });
 
     /** 路由切换时重置 el-main 滚动位置，防止从长页面切回短页面后内容不可见 */
     function resetScroll() {

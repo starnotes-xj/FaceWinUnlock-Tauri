@@ -23,6 +23,7 @@ use modules::init::{
 };
 use modules::options::write_to_registry;
 use modules::pin_commands::{encrypt_pin, verify_pin_hash_stored, get_user_sid};
+use modules::update_check::check_update;
 use opencv::{
     core::Ptr,
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
@@ -177,6 +178,7 @@ pub fn run() {
                 deploy_core_components,
                 uninstall_init,
                 extract_passkey_keys,
+                check_update,
                 // 面容模块
                 check_face_from_img,
                 check_face_from_camera,

@@ -289,6 +289,26 @@ This project involves modifying Windows kernel login behavior. When using or dev
 
 ---
 
+## 🔍 Update Check
+
+On startup, the app checks GitHub Release for new versions. **Only compares version numbers — no download or installation.**
+
+| Item | Details |
+|------|---------|
+| URL | `https://api.github.com/repos/starnotes-xj/FaceWinUnlock-Tauri/releases/latest` |
+| Method | GET |
+| Data sent | Only standard HTTP headers (User-Agent), no user data |
+| Response handling | Reads `tag_name`, compares with current version, shows notification if different |
+| How to dismiss | Notification auto-closes after 10 seconds, does not affect any functionality |
+
+**Related source files** (complete chain, traceable from any entry point):
+
+| Layer | File | Description |
+|-------|------|-------------|
+| Rust backend | `UI/src-tauri/src/modules/update_check.rs` | `check_update` command: GET GitHub API → version comparison → returns `UpdateInfo` |
+| Command registration | `UI/src-tauri/src/lib.rs` | `generate_handler![... check_update]` |
+| Frontend | `UI/src/layout/MainLayout.vue` | `onMounted` calls `invoke('check_update')` → `ElNotification` |
+
 ## 📄 License
 
 This project is open source under the [GNU Affero General Public License v3.0](LICENSE).
