@@ -151,6 +151,18 @@ pub struct SharedCredentials {
     pub broker_fallback_to_pin: bool, // credentialuibroker 场景已放弃本 Provider，交还 Windows Hello PIN
 }
 
+impl SharedCredentials {
+    pub fn reset_for_new_usage(&mut self) {
+        self.username.clear();
+        self.password.clear();
+        self.domain.clear();
+        self.domain.push('.');
+        self.is_ready = false;
+        self.is_unlocked = false;
+        self.broker_fallback_to_pin = false;
+    }
+}
+
 /// 类工厂实现，用于创建凭据提供程序实例
 /// COM规范要求通过类工厂来实例化组件
 #[implement(IClassFactory)]
@@ -327,4 +339,30 @@ pub unsafe extern "system" fn DllMain(
         _ => {}
     }
     BOOL::from(true)
+}
+
+#[cfg(test)]
+mod shared_credentials_tests {
+    use super::SharedCredentials;
+
+    #[test]
+    fn reset_for_new_usage_clears_previous_broker_session() {
+        let mut credentials = SharedCredentials {
+            username: "stale-user".to_string(),
+            password: "stale-password".to_string(),
+            domain: "STALE".to_string(),
+            is_ready: true,
+            is_unlocked: true,
+            broker_fallback_to_pin: true,
+        };
+
+        credentials.reset_for_new_usage();
+
+        assert!(credentials.username.is_empty());
+        assert!(credentials.password.is_empty());
+        assert_eq!(credentials.domain, ".");
+        assert!(!credentials.is_ready);
+        assert!(!credentials.is_unlocked);
+        assert!(!credentials.broker_fallback_to_pin);
+    }
 }

@@ -141,6 +141,22 @@ fn trigger_broker_pin_fallback(
     }
 }
 
+fn close_pipe_if_owned(owner: &AtomicIsize, pipe: HANDLE) {
+    if owner
+        .compare_exchange(
+            pipe.0 as isize,
+            INVALID_HANDLE_VALUE.0 as isize,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok()
+    {
+        unsafe {
+            let _ = CloseHandle(pipe);
+        }
+    }
+}
+
 // 0.3.3 的核心经验：锁屏桌面运行在 winlogon 中，Credential Provider DLL
 // 直接安装低级鼠标/键盘 hook 才能稳定拿到锁屏输入事件。
 static MOUSE_HOOK_RAW: AtomicIsize = AtomicIsize::new(0);
@@ -156,9 +172,11 @@ static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 const INPUT_SOURCE_MOUSE: u8 = 1;
 const INPUT_SOURCE_KEYBOARD: u8 = 2;
 
-/// 全局标记：broker CredUI 场景（credentialuibroker.exe）已永久回退 PIN。
+/// 当前 broker CredUI 会话已回退 PIN。
 ///
-/// 一旦置为 true，当前进程中所有 CPipeListener 实例的面容识别将被彻底抑制：
+/// 一旦置为 true，当前会话中的 CPipeListener 会停止识别。下一次
+/// SetUsageScenario 会显式 reset，避免 credentialuibroker.exe 进程缓存把状态
+/// 泄漏到下一次查看密码 / passkey 弹窗。
 /// - 客户端线程停止发送 "run"，disarm 钩子后退出
 /// - 新实例的钩子不会被 arm
 ///
@@ -172,9 +190,6 @@ static BROKER_PIN_FALLBACK_GLOBAL: AtomicBool = AtomicBool::new(false);
 /// 由 trigger_broker_pin_fallback（路径 A：超时）和
 /// CSampleCredential::ReportResult（路径 B：凭据被拒绝）调用。
 ///
-/// **关键**：额外增加 DLL 引用计数以阻止 Windows 在弹窗切换时卸载 DLL。
-/// DLL 一旦被卸载重载，所有 static 变量（包括 BROKER_PIN_FALLBACK_GLOBAL）
-/// 都会被重置，导致 fallback 标记丢失、面容识别重新激活。
 pub fn mark_broker_pin_fallback() {
     // swap(true) 返回旧值。旧值为 true 说明已设置过，跳过。
     if BROKER_PIN_FALLBACK_GLOBAL.swap(true, Ordering::SeqCst) {
@@ -184,6 +199,15 @@ pub fn mark_broker_pin_fallback() {
     crate::dll_add_ref();
     INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
     INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+pub fn reset_broker_pin_fallback() {
+    if BROKER_PIN_FALLBACK_GLOBAL.swap(false, Ordering::SeqCst) {
+        info!("CPipeListener - 新 broker 会话已清除上一次 PIN fallback 状态");
+    }
+    INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
+    INPUT_RUN_REQUESTED.store(false, Ordering::SeqCst);
+    INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
 }
 
 unsafe extern "system" fn mouse_hook_fn(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -313,9 +337,6 @@ pub struct CPipeListener {
     /// CREDUI/broker 场景不发——既符合文档约定（锁屏可能仍需 Unlock EXE），也避免在
     /// CredentialUIBroker.exe 的 UI 线程 teardown 路径上执行阻塞管道连接而拖慢/冻结关闭。
     is_primary_scenario: bool,
-    /// creds 线程已退出标志（drop-guard 置位，覆盖 break/return/panic 所有退出路径）。
-    /// stop_and_join 据此判断 creds 线程是否已结束、可否安全 join——否则分离，绝不冻宿主 UI 线程。
-    creds_finished: Arc<AtomicBool>,
 }
 
 impl CPipeListener {
@@ -335,8 +356,6 @@ impl CPipeListener {
         let stop_flag      = Arc::new(AtomicBool::new(false));
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
-        // creds 线程退出标志，供 stop_and_join 判断可否安全 join（否则分离，绝不冻宿主 UI 线程）
-        let creds_finished = Arc::new(AtomicBool::new(false));
         let use_input_hooks = true;
         // 所有场景（登录/解锁/CREDUI）统一由鼠标/键盘输入 Hook 触发 "run"，不自动开始识别。
         // 不启用 auto_run 的原因：① 锁屏后人未走开即被自动解锁，削弱锁屏安全意义（且
@@ -433,8 +452,13 @@ impl CPipeListener {
                     }
 
                     loop {
+                        let session_fallback = shared_creds_for_client
+                            .lock()
+                            .map(|creds| creds.broker_fallback_to_pin)
+                            .unwrap_or(true);
                         if stop_flag.load(Ordering::SeqCst)
                             || BROKER_PIN_FALLBACK_GLOBAL.load(Ordering::SeqCst)
+                            || session_fallback
                         {
                             if use_input_hooks {
                                 INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
@@ -442,9 +466,10 @@ impl CPipeListener {
                                 INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
                             }
                             unsafe { let _ = CloseHandle(pipe); }
-                            info!("面容识别已停止（stop={}, broker_fallback={}）",
+                            info!("面容识别已停止（stop={}, broker_fallback={}, session_fallback={}）",
                                 stop_flag.load(Ordering::SeqCst),
-                                BROKER_PIN_FALLBACK_GLOBAL.load(Ordering::SeqCst));
+                                BROKER_PIN_FALLBACK_GLOBAL.load(Ordering::SeqCst),
+                                session_fallback);
                             return;
                         }
                         if is_unlocked_for_client.load(Ordering::SeqCst) {
@@ -553,18 +578,10 @@ impl CPipeListener {
             let is_unlocked    = is_unlocked.clone();
             let stop_flag      = stop_flag.clone();
             let creds_pipe_raw = creds_pipe_raw.clone();
-            let creds_finished = creds_finished.clone();
             let send_events    = SendableEvents(events, advise_context);
             let anim_slot      = animation_slot.clone();
             thread::spawn(move || {
                 let _dll_ref = DllRefGuard; // 退出时 dll_release，分离安全
-                // 退出守卫：任何路径（break/return/panic）退出都置 finished，
-                // 供 stop_and_join 判断 creds 线程已结束（用于关句柄循环的提前退出）。
-                struct FinishGuard(Arc<AtomicBool>);
-                impl Drop for FinishGuard {
-                    fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); }
-                }
-                let _finish_guard = FinishGuard(creds_finished);
 
                 info!("CPipeListener::start - 进入凭据Client线程");
 
@@ -594,24 +611,19 @@ impl CPipeListener {
                     // store 后立即复查 stop：避免 stop_and_join 的句柄关闭恰好发生在本 store
                     // 之前、漏掉本句柄，导致下面 ReadFile 永久阻塞、冻死宿主 UI 线程
                     //（passkey 取消时 CredentialUIBroker.exe 卡死的竞态根因）。
-                    // 用 compare_exchange 取回所有权——成功才由本线程关闭，避免与 stop_and_join double-close。
                     if stop_flag.load(Ordering::SeqCst) {
-                        if creds_pipe_raw
-                            .compare_exchange(pipe.0 as isize, INVALID_HANDLE_VALUE.0 as isize,
-                                              Ordering::SeqCst, Ordering::SeqCst)
-                            .is_ok()
-                        {
-                            unsafe { let _ = CloseHandle(pipe); }
-                        }
+                        close_pipe_if_owned(&creds_pipe_raw, pipe);
                         break;
                     }
 
                     // 阻塞等待 Unlock EXE 推送凭据
-                    match pipe_read_raw(pipe) {
-                        Ok(data) if !data.is_empty() => {
-                            // 先清除句柄存储
-                            creds_pipe_raw.store(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
+                    let read_result = pipe_read_raw(pipe);
+                    // 只有仍持有原子句柄所有权的一方负责 CloseHandle。若 stop/fallback
+                    // 已 swap 并关闭句柄，这里 CAS 失败，避免关闭已复用的 Windows HANDLE。
+                    close_pipe_if_owned(&creds_pipe_raw, pipe);
 
+                    match read_result {
+                        Ok(data) if !data.is_empty() => {
                             // ── 检测 inject_pin 命令（KSP 增强版：DLL 端 SendInput）──
                             let data_str = String::from_utf8_lossy(&data);
                             if data_str.starts_with("inject_pin:") {
@@ -681,17 +693,13 @@ impl CPipeListener {
                         }
                         Ok(_) => {
                             // 空数据或 stop_and_join 关闭句柄导致的返回，忽略
-                            creds_pipe_raw.store(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
                         }
                         Err(e) => {
-                            creds_pipe_raw.store(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
                             if !stop_flag.load(Ordering::SeqCst) {
                                 warn!("凭据线程：读取失败（Unlock EXE 断开？）: {:?}", e);
                             }
                         }
                     }
-
-                    unsafe { let _ = CloseHandle(pipe); }
 
                     // 已解锁则不再重连
                     if is_unlocked.load(Ordering::SeqCst) { break; }
@@ -709,7 +717,6 @@ impl CPipeListener {
             creds_pipe_raw,
             use_input_hooks,
             is_primary_scenario,
-            creds_finished,
         }))
     }
 
@@ -725,18 +732,15 @@ impl CPipeListener {
             self.use_input_hooks = false;
         }
 
-        // 反复关闭 creds 线程持有的管道句柄打断其 ReadFile，让它尽快看到 stop 退出、
-        // 释放 DLL 引用。必须循环而非单次 swap：creds 线程可能在我们首次关闭之后才 store
-        // 新句柄（断开后立即重连的竞态），单次会漏掉。短暂有界(≤500ms)，不等待、不 join。
-        let close_deadline = Instant::now() + Duration::from_millis(500);
-        loop {
-            let raw = self.creds_pipe_raw.swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
-            if raw != INVALID_HANDLE_VALUE.0 as isize {
-                unsafe { let _ = CloseHandle(HANDLE(raw as *mut _)); }
+        // 单次 swap 足够：若 creds 线程尚未发布句柄，它会在 store 后立刻复查 stop
+        // 并自行关闭；若已发布，则由这里取得唯一关闭所有权并打断 ReadFile。
+        let raw = self
+            .creds_pipe_raw
+            .swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
+        if raw != INVALID_HANDLE_VALUE.0 as isize {
+            unsafe {
+                let _ = CloseHandle(HANDLE(raw as *mut _));
             }
-            if self.creds_finished.load(Ordering::SeqCst) { break; }
-            if Instant::now() >= close_deadline { break; }
-            thread::sleep(Duration::from_millis(20));
         }
 
         // 关键：绝不在宿主 UI 线程 join 后台线程——drop JoinHandle 即分离。

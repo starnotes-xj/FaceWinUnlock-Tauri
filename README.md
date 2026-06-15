@@ -150,7 +150,7 @@
 * [x] 面容解锁分级支持（开机、锁屏、UAC、用户层）（Fork 已实现，首选项→系统集成可配置）
 * [ ] 活体检测优化（仍无法与2.2相比，待优化）
 * [x] 一键卸载脚本（由claude生成）
-* [x] 检查更新功能（仅比对版本号，详见下方说明）
+* [x] 检查更新与增量下载（详见下方说明）
 * [ ] 识别时的动态反馈（26.02.17完成，样式有待优化）
 * [ ] 放弃OpenCV，减少70M体积并解决中文目录无法使用问题（考虑中……）
 
@@ -250,25 +250,38 @@ $env:PATH        = "D:\Rust\CARGO\bin;" + $env:PATH
 2. 建议在虚拟机 (VMware/Hyper-V) 环境中进行调试。
 3. 作者不对因使用本软件导致的任何数据丢失、系统崩溃或安全漏洞承担责任。
 
+## 🔐 Passkey 自接管（实验性）
+
+FaceWinUnlock 可通过浏览器扩展拦截 WebAuthn 请求，并使用已提取的 Windows Hello FIDO2 密钥签名：
+
+1. 在“首选项 → 系统集成”启用“Passkey 自接管”，完成 NGC 密钥提取。
+2. 打开 `chrome://extensions` 或 `edge://extensions`，启用开发者模式，以“加载已解压的扩展程序”方式选择仓库中的 `BrowserExt` 目录。
+3. 保持 `FaceWinUnlock-Server.exe` 运行；本地签名器监听 `127.0.0.1:19531`。
+4. 未预存 PIN 且本地没有匹配密钥时，会弹出扩展自有 PIN 窗口。首次签名成功后，解密密钥会缓存在本机，后续无需再次输入 PIN。
+
+PIN 窗口不注入网站 DOM，也不会持久化 PIN。该功能仍属实验性，请确保账户保留其他恢复登录方式。
+
 ## 🔍 检查更新
 
-程序启动时会联网检查 GitHub Release 是否有新版本，**仅比对版本号，不做任何下载或安装**。
+程序启动时会联网检查 GitHub Release。若新版包含 `update_manifest.json`，客户端会按 SHA256 比对本地运行时文件，只下载发生变化的文件，完成大小与哈希校验后暂存，并在应用退出时替换。旧版 Release 没有 manifest 时仍回退为“点击通知打开 Release 页面”。
 
 | 项目 | 内容 |
 |------|------|
 | 联网地址 | `https://api.github.com/repos/starnotes-xj/FaceWinUnlock-Tauri/releases/latest` |
 | 请求方式 | GET |
 | 请求内容 | 仅标准 HTTP 头（User-Agent），不发送任何用户数据 |
-| 响应处理 | 读取 `tag_name` 与当前版本比对，不同则弹出通知 |
-| 关闭方式 | 通知 10 秒自动消失，不影响任何功能 |
+| 下载内容 | 官方 Release 的 `update_manifest.json` 与其中列出的变化文件 |
+| 完整性校验 | 文件大小和 SHA256 必须同时匹配，才会进入更新暂存目录 |
+| 应用方式 | 退出程序时替换运行时文件；仍被占用的文件沿用 `.new` 延迟替换恢复路径 |
 
 **相关代码文件**（完整链路，可从任意文件开始追溯）：
 
 | 层 | 文件 | 说明 |
 |----|------|------|
-| Rust 后端 | `UI/src-tauri/src/modules/update_check.rs` | `check_update` 命令：GET GitHub API → 比对版本 → 返回 `UpdateInfo` |
-| 命令注册 | `UI/src-tauri/src/lib.rs` | `generate_handler![... check_update]` |
-| 前端调用 | `UI/src/layout/MainLayout.vue` | `onMounted` 时 `invoke('check_update')` → `ElNotification` 提示 |
+| 版本检查 | `UI/src-tauri/src/modules/update_check.rs` | `check_update`：GET GitHub API → 比对版本 |
+| 增量下载 | `UI/src-tauri/src/modules/update_download.rs` | 下载 manifest、计算差异、下载并校验变化文件 |
+| 文件落盘 | `UI/src-tauri/src/utils/api.rs` | `close_app` 时应用 `update_temp` 中的已校验文件 |
+| 前端调用 | `UI/src/layout/MainLayout.vue` | 检查新版 → 展示差异 → 下载 → 提示退出应用 |
 
 ## 📄 开源协议
 

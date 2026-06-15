@@ -43,10 +43,17 @@
   ; 让安装后的主程序默认按管理员权限启动。主 EXE 也会嵌入 requireAdministrator manifest，
   ; 这里再写 AppCompat RUNASADMIN 作为快捷方式/外壳启动兜底。
   WriteRegStr HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\${MAINBINARYNAME}.exe" "RUNASADMIN"
-  ; Passkey 浏览器扩展 — 写入注册表让 Chrome/Edge 自动发现本地扩展
-  ; Chrome External Extensions: https://developer.chrome.com/docs/extensions/how-to/distribute/install-extensions
-  WriteRegStr HKLM "Software\Google\Chrome\Extensions\facewinunlock-passkey-bridge" "update_url" "file:///$INSTDIR\BrowserExt\update.xml"
-  WriteRegStr HKLM "Software\Microsoft\Edge\Extensions\facewinunlock-passkey-bridge" "update_url" "file:///$INSTDIR\BrowserExt\update.xml"
+  ; Passkey 浏览器扩展当前仅部署解压资源。若未来同时打包 CRX + update.xml，
+  ; 再启用外部扩展注册；现在跳过失效注册，避免浏览器反复读取不存在的更新源。
+  IfFileExists "$INSTDIR\BrowserExt\facewinunlock-passkey.crx" 0 skip_browserext_registry
+  IfFileExists "$INSTDIR\BrowserExt\update.xml" 0 skip_browserext_registry
+    WriteRegStr HKLM "Software\Google\Chrome\Extensions\facewinunlock-passkey-bridge" "update_url" "file:///$INSTDIR\BrowserExt\update.xml"
+    WriteRegStr HKLM "Software\Microsoft\Edge\Extensions\facewinunlock-passkey-bridge" "update_url" "file:///$INSTDIR\BrowserExt\update.xml"
+    DetailPrint "已注册浏览器扩展更新源"
+    Goto done_browserext_registry
+  skip_browserext_registry:
+    DetailPrint "未检测到打包好的 BrowserExt CRX，跳过自动注册；请在 chrome://extensions 手动加载 $INSTDIR\\BrowserExt"
+  done_browserext_registry:
 
   WriteRegStr HKLM "Software\facewinunlock-tauri" "DLL_LOG_PATH" "$INSTDIR\logs"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "ANIMATION_FRAMES_PATH" "$INSTDIR\resources\animation_frames.bin"

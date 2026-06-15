@@ -59,6 +59,26 @@ impl SampleProvider {
             }),
         }
     }
+
+    fn reset_session_state(inner: &mut ProviderInner) {
+        if let Some(listener) = inner.listener.take() {
+            listener.lock().unwrap().stop_and_join();
+        }
+        inner.credential = None;
+        inner.events = None;
+        inner.advise_context = 0;
+        inner.shared_creds.lock().unwrap().reset_for_new_usage();
+        crate::CPipeListener::reset_broker_pin_fallback();
+    }
+
+    fn reset_broker_session_state(inner: &mut ProviderInner) {
+        if let Some(listener) = inner.listener.take() {
+            listener.lock().unwrap().stop_and_join();
+        }
+        inner.credential = None;
+        inner.shared_creds.lock().unwrap().reset_for_new_usage();
+        crate::CPipeListener::reset_broker_pin_fallback();
+    }
 }
 
 /// 实现Drop trait，在对象销毁时减少引用计数
@@ -133,6 +153,16 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
     fn Advise(&self, pcpe: windows_core::Ref<ICredentialProviderEvents>, upadvisecontext: usize) -> windows_core::Result<()> {
         info!("SampleProvider::Advise - 注册事件通知，上下文ID: {}", upadvisecontext);
         let mut inner = self.inner.lock().unwrap();
+        let is_broker = inner.usage_scenario.0 == 4
+            && crate::current_process_exe_name() == "credentialuibroker.exe";
+
+        if is_broker {
+            // credentialuibroker.exe 可能复用同一 Provider 实例而不重新走
+            // SetUsageScenario。每次 Advise 都视为新的 broker 会话边界，再清一次
+            // 缓存状态，防止第二次查看密码沿用上次 fallback / credential 对象。
+            SampleProvider::reset_broker_session_state(&mut inner);
+        }
+
         inner.events = pcpe.clone(); // 保存事件接口
         inner.advise_context = upadvisecontext; // 保存上下文ID
 
@@ -141,8 +171,19 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             if let Some(events) = &inner.events {
                 // 主场景（登录/解锁）：允许 stop_and_join 时通知 Unlock EXE 释放摄像头 (#117)
                 let is_primary = inner.usage_scenario.0 == 1 || inner.usage_scenario.0 == 2;
-                let is_broker = inner.usage_scenario.0 == 4
-                    && crate::current_process_exe_name() == "credentialuibroker.exe";
+                if is_broker {
+                    let broker_scenario = crate::broker_detect::detect_broker_scenario();
+                    info!(
+                        "SampleProvider::Advise - broker 场景检测结果: {:?}",
+                        broker_scenario
+                    );
+                    if broker_scenario.should_skip_face() {
+                        inner.shared_creds.lock().unwrap().broker_fallback_to_pin = true;
+                        crate::CPipeListener::mark_broker_pin_fallback();
+                        info!("SampleProvider::Advise - broker 场景直退 Windows PIN，不启动人脸监听");
+                        return Ok(());
+                    }
+                }
                 let slot = inner.animation_slot.clone();
                 inner.listener = Some(CPipeListener::start(
                     events.clone(),

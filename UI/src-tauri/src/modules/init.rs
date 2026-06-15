@@ -448,12 +448,17 @@ pub fn extract_passkey_keys(pin: Option<String>) -> Result<CustomResult, CustomR
     // 8. 生成 passkey_keys.json
     if found_keys {
         match generate_passkey_keys_json(out_dir) {
-            Ok(json_path) => {
-                log::info!("passkey_keys.json 已生成: {}", json_path.display());
-                Ok(CustomResult::success(
-                    Some(format!("密钥提取成功！配置文件: {}", json_path.display()).into()),
-                    None,
-                ))
+            Ok(mapping) => {
+                log::info!("passkey_keys.json 已生成: {}", mapping.path.display());
+                let message = if mapping.needs_manual_mapping {
+                    format!(
+                        "私钥已提取并通过 key_verify 校验，但自动凭据映射不可用。请按 passkey_keys.json 内说明填写 credential_id 和 rp_id：{}",
+                        mapping.path.display()
+                    )
+                } else {
+                    format!("密钥提取成功！配置文件: {}", mapping.path.display())
+                };
+                Ok(CustomResult::success(Some(message), None))
             }
             Err(e) => Err(CustomResult::error(
                 Some(format!("密钥提取成功，但生成配置文件失败: {e}")), None,
@@ -476,32 +481,76 @@ fn get_current_sid() -> Result<String, String> {
 
 /// 从 ngc_crack 输出的映射文件生成 passkey_keys.json
 /// ngc_crack 现在会在 OUT_DIR 写入 passkey_keys.json（从 7.dat CBOR 解析的真实凭据 ID）
-fn generate_passkey_keys_json(out_dir: &str) -> Result<PathBuf, String> {
+struct GeneratedPasskeyMapping {
+    path: PathBuf,
+    needs_manual_mapping: bool,
+}
+
+fn generate_passkey_keys_json(out_dir: &str) -> Result<GeneratedPasskeyMapping, String> {
     // 优先使用 ngc_crack 生成的映射文件
     let mapping_file = Path::new(out_dir).join("passkey_keys.json");
     if mapping_file.exists() {
-        let mapping = fs::read_to_string(&mapping_file)
-            .map_err(|e| format!("读取映射文件: {e}"))?;
-        // 验证是有效 JSON
-        let _: serde_json::Value = serde_json::from_str(&mapping)
-            .map_err(|e| format!("映射文件 JSON 无效: {e}"))?;
-        let json_path = ROOT_DIR.join("passkey_keys.json");
-        fs::write(&json_path, mapping.as_bytes())
-            .map_err(|e| format!("写入: {e}"))?;
-        return Ok(json_path);
+        match fs::read_to_string(&mapping_file)
+            .ok()
+            .and_then(|mapping| {
+                let parsed: serde_json::Value = serde_json::from_str(&mapping).ok()?;
+                is_usable_passkey_mapping(&parsed).then_some(mapping)
+            }) {
+            Some(mapping) => {
+                let json_path = ROOT_DIR.join("passkey_keys.json");
+                fs::write(&json_path, mapping.as_bytes())
+                    .map_err(|e| format!("写入: {e}"))?;
+                return Ok(GeneratedPasskeyMapping {
+                    path: json_path,
+                    needs_manual_mapping: false,
+                });
+            }
+            None => {
+                log::warn!(
+                    "ngc_crack 生成的 passkey_keys.json 无效或缺少凭据字段，改用 key_verify 回退"
+                );
+            }
+        }
     }
 
-    // 回退：手动扫描 .bin 文件
+    // 回退：扫描候选 .bin，并用 key_verify 的 --cose 模式确认私钥能推导出 P-256 公钥。
     let mut entries: Vec<serde_json::Value> = Vec::new();
+    let verifier = ROOT_DIR.join("key_verify.exe");
+    if !verifier.is_file() {
+        return Err(format!(
+            "自动凭据映射不可用，且缺少校验工具 {}。请重新安装或重新运行 ngc_crack。",
+            verifier.display()
+        ));
+    }
+
     if let Ok(dir) = fs::read_dir(out_dir) {
         for entry in dir.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
             if fname.ends_with("_18_no_entropy.bin") && entry.path().metadata().map(|m| m.len() == 32).unwrap_or(false) {
+                let key_path = entry.path();
+                let verifier_arg = verifier.to_string_lossy().to_string();
+                let key_arg = key_path.to_string_lossy().to_string();
+                let output = match run_hidden(&verifier_arg, &["--cose", &key_arg]) {
+                    Ok(output) if output.status.success() => output,
+                    _ => {
+                        log::warn!("key_verify 拒绝候选私钥: {}", key_path.display());
+                        continue;
+                    }
+                };
+                let cose_public_key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if cose_public_key.is_empty() {
+                    log::warn!("key_verify 未输出公钥，跳过: {}", key_path.display());
+                    continue;
+                }
+
                 entries.push(serde_json::json!({
                     "credential_id": "",
                     "rp_id": "",
-                    "key_file": entry.path().to_string_lossy().to_string(),
-                    "_comment": "请编辑填写实际的 credential_id 和 rp_id"
+                    "key_file": key_path.to_string_lossy().to_string(),
+                    "_public_key_cose": cose_public_key,
+                    "_comment": "自动映射丢失，但该私钥已通过 key_verify 校验。请填写实际 credential_id 和 rp_id。",
+                    "_comment2": "webauthn.io：打开 DevTools → Application → WebAuthn，查看 credential ID 并用 _public_key_cose 比对公钥。",
+                    "_comment3": "其他网站：在账户的 Passkey/安全密钥管理页或认证调试日志中查找 credential ID；rp_id 通常是登录域名。"
                 }));
             }
         }
@@ -514,5 +563,22 @@ fn generate_passkey_keys_json(out_dir: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("序列化: {e}"))?;
     fs::write(&json_path, json_str.as_bytes())
         .map_err(|e| format!("写入: {e}"))?;
-    Ok(json_path)
+    Ok(GeneratedPasskeyMapping {
+        path: json_path,
+        needs_manual_mapping: true,
+    })
+}
+
+fn is_usable_passkey_mapping(mapping: &serde_json::Value) -> bool {
+    mapping.as_array().is_some_and(|entries| {
+        !entries.is_empty()
+            && entries.iter().all(|entry| {
+                ["credential_id", "rp_id", "key_file"].iter().all(|key| {
+                    entry
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+                })
+            })
+    })
 }

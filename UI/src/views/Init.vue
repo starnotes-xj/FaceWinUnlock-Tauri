@@ -6,6 +6,7 @@
     import { useOptionsStore } from "../stores/options";
     import AccountAuthForm from '../components/AccountAuthForm.vue';
     import {handleLocalAccount, formatObjectString} from '../utils/function'
+    import { select, insert, update } from '../utils/sqlite'
     import { info, error as errorLog, warn } from '@tauri-apps/plugin-log';
 
     const checks = reactive({
@@ -32,6 +33,45 @@
     const extractMsg = ref('');
     const extractOk = ref(false);
 
+    function extractCurrentWindowsUserName(result) {
+        if (typeof result === 'string') {
+            return result.trim();
+        }
+        const data = result?.data;
+        if (typeof data === 'string') {
+            return data.trim();
+        }
+        if (typeof data?.username === 'string') {
+            return data.username.trim();
+        }
+        return '';
+    }
+
+    async function saveExtractedPinToStore(pin) {
+        const currentUser = extractCurrentWindowsUserName(await invoke('get_now_username')) || authForm.username.trim();
+        if (!currentUser) {
+            throw new Error('未获取到当前 Windows 用户名');
+        }
+
+        const enc = await invoke('encrypt_pin', { userName: currentUser, pin });
+        const existing = await select('pin_store', ['id'], 'user_name = ?', [currentUser]);
+        if (existing.rows.length > 0) {
+            await update('pin_store', {
+                pin_blob: enc.blob_b64,
+                pin_entropy: enc.entropy_b64,
+                pin_hash: enc.pin_hash,
+                crypto_method: 'dpapi-sid',
+                enabled: 1,
+            }, 'user_name = ?', [currentUser]);
+        } else {
+            await insert(
+                'pin_store',
+                ['user_name', 'pin_blob', 'pin_entropy', 'pin_hash', 'crypto_method', 'enabled'],
+                [currentUser, enc.blob_b64, enc.entropy_b64, enc.pin_hash, 'dpapi-sid', 1]
+            );
+        }
+    }
+
     async function extractPasskeyKeys() {
         if (!extractPin.value || extractPin.value.length < 4) {
             extractMsg.value = '请输入 Windows Hello PIN（至少4位）'
@@ -45,15 +85,17 @@
             extractMsg.value = result.msg || '完成'
             extractOk.value = result.code === 200
             if (extractOk.value) {
-                // 自动启用 Passkey + 同步注册表 + 顺便把 PIN 也存了
+                // 自动启用 Passkey + 同步注册表 + 把 PIN 写入 pin_store
                 optionsStore.saveOptions({ passkeyEnabled: 'true', pinEnabled: 'true' })
                 invoke('write_to_registry', { items: [{ key: 'PASSKEY_TAKEOVER_ENABLED', value: '1' }, { key: 'PIN_ENABLED', value: '1' }] }).catch(() => {})
-                // 同时保存 PIN 到 pin_store — 传空用户名让后端自动获取
-                invoke('encrypt_pin', { userName: '', pin: extractPin.value }).then(() => {
+                try {
+                    await saveExtractedPinToStore(extractPin.value)
+                    extractPin.value = ''
                     ElMessage.success('Passkey 密钥已提取，PIN 已保存！')
-                }).catch(() => {
+                } catch (pinError) {
+                    warn(formatObjectString('初始化阶段保存 PIN 失败：', pinError))
                     ElMessage.success('Passkey 密钥已提取（PIN 保存失败，请在设置页手动存储）')
-                })
+                }
             } else {
                 ElMessage.warning(result.msg || '提取失败')
             }
