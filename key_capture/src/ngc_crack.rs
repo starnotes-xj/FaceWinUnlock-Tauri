@@ -141,6 +141,9 @@ fn scan_and_crack(sid: &str, pin: &str) {
         println!("\n====== CRACKING CONTAINER: {} ======", container.file_name().unwrap().to_string_lossy());
         crack_container(container, pin);
     }
+
+    // 生成正确的密钥映射（从 7.dat CBOR 解析 credential_id + rp_id）
+    generate_key_mapping(&containers);
 }
 
 fn crack_container(container: &Path, pin: &str) {
@@ -408,6 +411,97 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>, String> 
     if pad == 0 || pad > 16 || pad > buf.len() { return Err("bad padding".into()); }
     buf.truncate(buf.len() - pad);
     Ok(buf)
+}
+
+/// 从 7.dat CBOR 解析 credential_id 和 rp_id
+fn parse_7dat_credential(seven_dat: &[u8]) -> Option<(String, String)> {
+    // 7.dat 是 CBOR map(3): {1:2, 2:map{"bid":rp_id, "dname":..}, 3:map{"bid":cred_id, "dname":..}}
+    // 简单解析：找 "bid" 字符串后跟着的 UTF-8 字符串值
+    let mut rp_id = String::new();
+    let mut cred_id = String::new();
+    let mut i = 0;
+    // 编码: 62 69 64 = text(2) "bid" → 后跟 text(N) value
+    while i + 3 < seven_dat.len() {
+        if seven_dat[i] == 0x62 && seven_dat[i+1] == 0x69 && seven_dat[i+2] == 0x64 {
+            // found "bid", next byte is text(N) where N = next byte value
+            i += 3;
+            if i < seven_dat.len() {
+                let len = seven_dat[i] as usize;
+                i += 1;
+                if i + len <= seven_dat.len() {
+                    let val = String::from_utf8_lossy(&seven_dat[i..i+len]).to_string();
+                    if rp_id.is_empty() {
+                        rp_id = val;
+                    } else {
+                        cred_id = val;
+                    }
+                    i += len;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    if cred_id.is_empty() && rp_id.is_empty() { None }
+    else if cred_id.is_empty() { Some((rp_id.clone(), rp_id)) }
+    else { Some((cred_id, rp_id)) }
+}
+
+/// 扫描输出目录的 .bin 文件，匹配 NGC 容器 7.dat，生成 passkey_keys.json
+fn generate_key_mapping(containers: &[PathBuf]) {
+    let out_dir = Path::new(OUT_DIR);
+    if !out_dir.is_dir() { return; }
+
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+
+    for entry in fs::read_dir(out_dir).unwrap().flatten() {
+        let fname = entry.file_name().to_string_lossy().to_string();
+        if !fname.starts_with("ngc_") || !fname.ends_with("_18_no_entropy.bin") {
+            continue;
+        }
+        // ngc_{hash}_18_no_entropy.bin → 提取 hash
+        let hash = fname.strip_prefix("ngc_").and_then(|s| s.strip_suffix("_18_no_entropy.bin")).unwrap_or("");
+        let key_file = entry.path();
+
+        // 在 NGC 容器中搜索对应的 7.dat
+        let mut rp_id = String::new();
+        let mut cred_id = hash.to_string();
+        for c in containers {
+            if let Ok(dirs) = fs::read_dir(c) {
+                for d in dirs.flatten() {
+                    let dpath = d.path();
+                    if !dpath.is_dir() { continue; }
+                    let sub = dpath.join(hash).join("7.dat");
+                    if sub.exists() {
+                        if let Ok(data) = fs::read(&sub) {
+                            if let Some((cid, rp)) = parse_7dat_credential(&data) {
+                                cred_id = cid;
+                                rp_id = rp;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        entries.push(serde_json::json!({
+            "credential_id": cred_id,
+            "rp_id": rp_id,
+            "key_file": key_file.to_string_lossy().to_string(),
+        }));
+    }
+
+    if !entries.is_empty() {
+        let mapping_path = out_dir.join("passkey_keys.json");
+        let json = serde_json::to_string_pretty(&entries).unwrap_or_default();
+        let _ = fs::write(&mapping_path, &json);
+        println!("\n✅ 密钥映射已生成: {} ({} 个凭据)", mapping_path.display(), entries.len());
+        for e in &entries {
+            println!("  {} @ {}",
+                e.get("credential_id").and_then(|v| v.as_str()).unwrap_or("?"),
+                e.get("rp_id").and_then(|v| v.as_str()).unwrap_or("?"));
+        }
+    }
 }
 
 fn pbkdf2_sha256(pass: &[u8], salt: &[u8], rounds: u32, len: usize) -> Vec<u8> {

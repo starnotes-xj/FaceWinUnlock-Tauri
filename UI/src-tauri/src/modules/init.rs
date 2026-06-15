@@ -474,40 +474,45 @@ fn get_current_sid() -> Result<String, String> {
     crate::modules::pin_commands::get_user_sid(username)
 }
 
-/// 扫描 ngc_crack 输出目录，生成 passkey_keys.json
+/// 从 ngc_crack 输出的映射文件生成 passkey_keys.json
+/// ngc_crack 现在会在 OUT_DIR 写入 passkey_keys.json（从 7.dat CBOR 解析的真实凭据 ID）
 fn generate_passkey_keys_json(out_dir: &str) -> Result<PathBuf, String> {
-    let mut entries: Vec<serde_json::Value> = Vec::new();
+    // 优先使用 ngc_crack 生成的映射文件
+    let mapping_file = Path::new(out_dir).join("passkey_keys.json");
+    if mapping_file.exists() {
+        let mapping = fs::read_to_string(&mapping_file)
+            .map_err(|e| format!("读取映射文件: {e}"))?;
+        // 验证是有效 JSON
+        let _: serde_json::Value = serde_json::from_str(&mapping)
+            .map_err(|e| format!("映射文件 JSON 无效: {e}"))?;
+        let json_path = ROOT_DIR.join("passkey_keys.json");
+        fs::write(&json_path, mapping.as_bytes())
+            .map_err(|e| format!("写入: {e}"))?;
+        return Ok(json_path);
+    }
 
-    // 扫描每个 32 字节的密钥文件
+    // 回退：手动扫描 .bin 文件
+    let mut entries: Vec<serde_json::Value> = Vec::new();
     if let Ok(dir) = fs::read_dir(out_dir) {
         for entry in dir.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
-            if fname.ends_with("_18_no_entropy.bin") {
-                let fpath = entry.path();
-                if fpath.metadata().map(|m| m.len() == 32).unwrap_or(false) {
-                    let parts: Vec<&str> = fname.split('_').collect();
-                    let key_hash = parts.first().unwrap_or(&"unknown").to_string();
-
-                    entries.push(serde_json::json!({
-                        "credential_id": key_hash,
-                        "rp_id": "",
-                        "key_file": fpath.to_string_lossy().to_string(),
-                        "_comment": "将 rp_id 改为实际的 relying party（如 google.com, webauthn.io），credential_id 去 webauthn.io 或 Chrome DevTools 查看"
-                    }));
-                }
+            if fname.ends_with("_18_no_entropy.bin") && entry.path().metadata().map(|m| m.len() == 32).unwrap_or(false) {
+                entries.push(serde_json::json!({
+                    "credential_id": "",
+                    "rp_id": "",
+                    "key_file": entry.path().to_string_lossy().to_string(),
+                    "_comment": "请编辑填写实际的 credential_id 和 rp_id"
+                }));
             }
         }
     }
-
     if entries.is_empty() {
-        return Err("未找到有效的 32 字节密钥文件".into());
+        return Err("未找到有效的密钥文件".into());
     }
-
     let json_path = ROOT_DIR.join("passkey_keys.json");
     let json_str = serde_json::to_string_pretty(&entries)
-        .map_err(|e| format!("序列化 JSON: {e}"))?;
+        .map_err(|e| format!("序列化: {e}"))?;
     fs::write(&json_path, json_str.as_bytes())
-        .map_err(|e| format!("写入文件: {e}"))?;
-
+        .map_err(|e| format!("写入: {e}"))?;
     Ok(json_path)
 }
