@@ -3,25 +3,9 @@ name = "key_capture"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "key_capture"
-crate-type = ["cdylib"]
-
-[[bin]]
-name = "key_capture_injector"
-path = "src/injector.rs"
-
 [[bin]]
 name = "key_verify"
 path = "src/key_verify.rs"
-
-[[bin]]
-name = "key_scanner"
-path = "src/key_scanner.rs"
-
-[[bin]]
-name = "mem_scanner"
-path = "src/mem_scanner.rs"
 
 [[bin]]
 name = "ngc_decrypt"
@@ -37,15 +21,7 @@ windows = { version = "0.59", features = [
     "Win32_Security",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_IO",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
-    "Win32_System_ProcessStatus",
-    "Win32_System_SystemServices",
-    "Win32_System_Threading",
-    "Win32_System_WindowsProgramming",
     "Win32_System_Registry",
 ] }
 windows-core = "0.59"
