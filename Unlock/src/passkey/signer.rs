@@ -233,9 +233,17 @@ fn ecdsa_sign(key_blob: &[u8], hash: &[u8]) -> Result<Vec<u8>, String> {
 
 /// Raw 32-byte ECDSA P256 private key d
 fn raw_ecdsa_sign(d: &[u8], hash: &[u8]) -> Result<Vec<u8>, String> {
-    // 从 raw 32-byte 私钥构建完整的 BCRYPT_ECCPRIVATE_BLOB (104 bytes)
-    let blob = raw_d_to_ecc_private_blob(d)?;
-    cng_ecc_sign(&blob, hash)
+    // p256 crate 原生签名（BCryptImportKeyPair 在 25H2/windows-rs 0.59 有兼容问题）
+    use p256::SecretKey;
+    use p256::ecdsa::signature::Signer;
+    use p256::ecdsa::SigningKey;
+
+    let sk = SecretKey::from_bytes(d.into())
+        .map_err(|e| format!("invalid P256 private key: {e}"))?;
+    let signing_key: SigningKey = sk.into();
+    use p256::ecdsa::Signature;
+    let sig: Signature = signing_key.sign(hash);
+    Ok(sig.to_der().as_bytes().to_vec())
 }
 
 /// 将 raw 32-byte P256 私钥转换为 BCRYPT_ECCPRIVATE_BLOB
