@@ -15,7 +15,31 @@
     import { useTheme } from '../hook/useTheme';
 
     const version = ref(localStorage.getItem("version") || 'unknown');
+    const checkingUpdate = ref(false);
     const { isDark, toggleTheme } = useTheme();
+
+    async function manualCheckUpdate() {
+        checkingUpdate.value = true;
+        try {
+            const info: any = await invoke('check_update');
+            if (info?.has_update) {
+                const updateUrl = info.release_url || '';
+                ElNotification({
+                    title: '发现新版本',
+                    message: `当前 v${info.current_version} → 最新 v${info.latest_version}（点击前往下载）`,
+                    type: 'info',
+                    duration: 0,
+                    onClick: () => { if (updateUrl) window.open(updateUrl, '_blank'); },
+                });
+            } else {
+                ElMessage.success(`已是最新版本 v${info?.current_version || version.value}`);
+            }
+        } catch (e) {
+            ElMessage.error('检查更新失败: ' + (e?.toString() || '网络错误'));
+        } finally {
+            checkingUpdate.value = false;
+        }
+    }
 
     /** 检查更新 → 拉取差异清单 → 确认 → 下载到临时目录 → 退出软件时落盘生效；
         旧版本 Release 无 manifest 时退回可点击通知（打开 Release 页面手动下载） */
@@ -135,6 +159,9 @@
                     <span class="version-label">版本</span>
                     <span class="version-number">v {{ version }}</span>
                 </div>
+                <el-button size="small" text :loading="checkingUpdate" @click="manualCheckUpdate" class="check-update-btn">
+                    {{ checkingUpdate ? '检查中…' : '检查更新' }}
+                </el-button>
                 <el-tag size="small" type="success" effect="plain">系统服务已就绪</el-tag>
             </div>
         </el-aside>

@@ -55,6 +55,9 @@
     DetailPrint "未检测到打包好的 BrowserExt CRX，跳过自动注册；请在 chrome://extensions 手动加载 $INSTDIR\\BrowserExt"
   done_browserext_registry:
 
+  WriteRegStr HKLM "Software\facewinunlock-tauri" "UNLOCK_SCENE" "1,2,4"
+  WriteRegStr HKLM "Software\facewinunlock-tauri" "SHOW_TILE" "1"
+  WriteRegStr HKLM "Software\facewinunlock-tauri" "CONNECT_TO_PIPE" "1"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "DLL_LOG_PATH" "$INSTDIR\logs"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "ANIMATION_FRAMES_PATH" "$INSTDIR\resources\animation_frames.bin"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "UNLOCK_GRACE_PERIOD" "0.0"
