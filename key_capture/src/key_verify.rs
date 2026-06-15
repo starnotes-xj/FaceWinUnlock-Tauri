@@ -1,7 +1,8 @@
-//! 公钥校验工具 — C 方案 §7 go/no-go 闸门
+//! 公钥校验工具 — ngc_crack 提取结果的 go/no-go 闸门
 //!
-//! 读取 key_capture 捕获的 BCRYPT_ECCPRIVATE_BLOB，
-//! 从私钥 d 推导公钥 Q=d·G，输出多种编码供与 RP 存储公钥比对。
+//! 读取 ngc_crack / ngc_decrypt 提取的 ECDSA_P256 私钥（32B 裸 d 或
+//! 104B BCRYPT_ECCPRIVATE_BLOB），从私钥 d 推导公钥 Q=d·G，
+//! 输出多种编码供与 RP 存储公钥比对。
 //!
 //! 用法:
 //!   key_verify.exe                                    # 扫描默认捕获目录
@@ -87,11 +88,11 @@ fn scan_dir(dir: &Path) {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
-                // 匹配 ngc_crack 输出: ngc_*_18_no_entropy.bin, incr_*.bin, decrypted_*.bin
+                // 匹配 ngc_crack / ngc_decrypt / key_store 输出:
+                // ngc_*.bin、ngc_key_*.bin、ECDSA_KEY_offset_*.bin、incr_*.bin
                 if fname.ends_with(".bin")
                     && (fname.starts_with("ngc_")
                         || fname.starts_with("incr_")
-                        || fname.starts_with("decrypted_")
                         || fname.starts_with("ECDSA_"))
                 {
                     found += 1;
@@ -108,7 +109,7 @@ fn scan_dir(dir: &Path) {
 
     if found == 0 {
         println!("\n未找到 ECDSA 私钥文件。");
-        println!("预期文件名: ngc_*_18_no_entropy.bin, incr_*.bin, decrypted_*.bin");
+        println!("预期文件名: ngc_*.bin, ngc_key_*.bin, ECDSA_KEY_offset_*.bin, incr_*.bin");
         println!("请先运行 ngc_crack.exe --sid <SID> <PIN> 提取 NGC 密钥。");
     } else {
         println!("\n{}", "=".repeat(60));
