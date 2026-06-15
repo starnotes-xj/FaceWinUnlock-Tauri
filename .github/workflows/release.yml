@@ -333,7 +333,6 @@ jobs:
           $exe = "target\release\FaceWinUnlock-Server.exe"
           $ngc_crack = "target\release\ngc_crack.exe"
           $key_verify = "target\release\key_verify.exe"
-          $injector = "target\release\key_capture_injector.exe"
           if (-not (Test-Path $dll)) { throw "Missing: $dll" }
           if (-not (Test-Path $exe)) { throw "Missing: $exe" }
           if (-not (Test-Path $ngc_crack)) { throw "Missing: $ngc_crack" }
@@ -342,7 +341,6 @@ jobs:
           Write-Host "Unlock EXE: $((Get-Item $exe).Length) bytes"
           Write-Host "ngc_crack: $((Get-Item $ngc_crack).Length) bytes"
           Write-Host "key_verify: $((Get-Item $key_verify).Length) bytes"
-          Write-Host "injector:  $((Get-Item $injector).Length) bytes"
 
       # ---- Tauri UI build ----
       - name: Cache npm dependencies
@@ -425,13 +423,12 @@ jobs:
           prerelease: ${{ steps.release_meta.outputs.is_prerelease }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          fail_on_unmatched_files: true
           files: |
             target/release/FaceWinUnlock_Tauri.dll
             target/release/FaceWinUnlock-Server.exe
             target/release/ngc_crack.exe
             target/release/key_verify.exe
-            target/release/key_capture_injector.exe
-            target/release/key_capture.dll
             target/release/passkey_keys.json
             target/release/FaceWinUnlock-NPU-Runtime.zip
             target/release/bundle/nsis/*.exe

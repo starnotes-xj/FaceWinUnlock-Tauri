@@ -86,6 +86,8 @@
 	const extractLoading = ref(false)
 	const extractMsg = ref('')
 	const extractOk = ref(false)
+	// 如果初始化时已提取密钥，passkeyEnabled 会被 Init.vue 自动设为 true
+	const hasExtractedKeys = ref(optionsStore.getOptionValueByKey('passkeyEnabled') === 'true')
 
 	async function extractPasskeyKeys() {
 		if (!pinStore.hasStored) {
@@ -965,7 +967,13 @@
 										需先在上方<b>预存 PIN</b>。提取约需 1 分钟。
 									</p>
 								</div>
-								<div style="display:flex; align-items:center; gap:10px;">
+								<div v-if="hasExtractedKeys || extractOk" style="display:flex; align-items:center; gap:10px;">
+									<el-tag type="success" size="small">{{ extractOk ? '提取成功！' : '密钥已就绪（初始化时已提取）' }}</el-tag>
+									<el-button type="primary" size="small" plain :loading="extractLoading" :disabled="!pinStore.hasStored" @click="extractPasskeyKeys">
+										{{ extractLoading ? '提取中…' : '重新提取' }}
+									</el-button>
+								</div>
+								<div v-else style="display:flex; align-items:center; gap:10px;">
 									<el-button type="primary" size="small" :loading="extractLoading" :disabled="!pinStore.hasStored" @click="extractPasskeyKeys">
 										{{ extractLoading ? '提取中…' : '提取 Passkey 密钥' }}
 									</el-button>

@@ -45,7 +45,10 @@
             extractMsg.value = result.msg || '完成'
             extractOk.value = result.code === 200
             if (extractOk.value) {
-                ElMessage.success(result.msg || 'Passkey 密钥提取成功！')
+                // 自动启用 Passkey 自接管 + 同步注册表
+                optionsStore.saveOptions({ passkeyEnabled: 'true' })
+                invoke('write_to_registry', { items: [{ key: 'PASSKEY_TAKEOVER_ENABLED', value: '1' }] }).catch(() => {})
+                ElMessage.success('Passkey 密钥已提取并自动启用自接管！')
             } else {
                 ElMessage.warning(result.msg || '提取失败')
             }
