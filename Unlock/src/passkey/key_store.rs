@@ -1,7 +1,7 @@
-//! 已捕获 ECDSA 私钥的密钥存储
+//! 已提取 ECDSA 私钥的密钥存储
 //!
-//! 读取 `{exe_dir}/passkey_keys.json` 映射文件，加载 key_capture 模块
-//! 捕获的 32-byte ECDSA_P256 私钥 d（原始标量），直接用于签名，
+//! 读取 `{exe_dir}/passkey_keys.json` 映射文件，加载由 ngc_crack（NGC 离线
+//! DPAPI 提取）产出的 32-byte ECDSA_P256 私钥 d（原始标量），直接用于签名，
 //! 跳过 NGC PIN 解密流程。
 //!
 //! 映射文件格式:
