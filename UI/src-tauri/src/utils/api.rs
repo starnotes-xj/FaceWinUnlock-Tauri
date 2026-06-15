@@ -615,14 +615,26 @@ pub fn close_app(app_handle: AppHandle) -> Result<CustomResult, CustomResult> {
     Ok(CustomResult::success(None, None))
 }
 
-// 退出前落盘增量更新：将 update_temp\* 复制到安装目录。
-// 文件已在下载时校验过 SHA256，这里只负责替换。被占用的目标（如运行中的核心服务持有
-// FaceWinUnlock-Server.exe）复制失败时退回写出 X.new，由下次启动的 apply_pending_updates 改名替换。
+// 退出前落盘增量更新：将 update_temp\* 复制到安装目录。文件已在下载时校验过 SHA256。
+//
+// 核心服务 exe（FaceWinUnlock-Server.exe）正被运行中的服务占用、无法直接覆盖：若本次更新
+// 包含它且服务在运行，先发 "exit" 优雅停掉整个服务树（worker 干净退出码 0 → supervisor 检测到
+// success 后停止，见 Unlock/src/main.rs::run_service_supervisor），释放文件锁，替换后再通过
+// 计划任务把新版本拉起。其余文件（ngc_crack/key_verify）按需运行、通常未占用，直接覆盖即可。
+// 极端情况下仍被占用则退回 X.new，由下次启动的 apply_pending_updates 替换。
 fn apply_downloaded_update() {
     let update_dir = ROOT_DIR.join("update_temp");
     if !update_dir.exists() {
         return;
     }
+
+    // 本次更新是否要替换正在运行的核心服务 exe？是则先停服务释放文件锁。
+    let server_running =
+        update_dir.join("FaceWinUnlock-Server.exe").exists() && check_process_running().is_ok();
+    if server_running {
+        stop_unlock_service();
+    }
+
     let entries = match std::fs::read_dir(&update_dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -638,11 +650,38 @@ fn apply_downloaded_update() {
         };
         let dst = ROOT_DIR.join(&name);
         if std::fs::copy(&src, &dst).is_err() {
-            // 目标被占用：写出 X.new，下次启动时由 apply_pending_updates 替换
+            // 仍被占用（极少见）：写出 X.new，下次启动时由 apply_pending_updates 替换
             let _ = std::fs::copy(&src, ROOT_DIR.join(format!("{name}.new")));
         }
     }
     let _ = std::fs::remove_dir_all(&update_dir);
+
+    // 服务已被我们停掉 → 通过计划任务重新拉起新版本（任务自带 1 分钟 TimeTrigger 兜底重启）。
+    if server_running {
+        let _ = Command::new("schtasks")
+            .args(&["/Run", "/TN", "FaceWinUnlockServer"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
+}
+
+// 发送 "exit" 优雅停止 Unlock 服务，并轮询等待其完全退出以释放 exe 文件锁（最多 ~5s）。
+// 机制：worker 收到 "exit" 后 face_recognition_loop 返回、worker 返回退出码 0，
+// supervisor 检测到 status.success() 即停止整个进程树（Unlock/src/main.rs）。
+fn stop_unlock_service() {
+    // 复用 delete_process_running 的管道，向 Unlock 服务发送 "exit"
+    if let Ok(client) = Client::new(r"\\.\pipe\MansonWindowsUnlockRustUnlock") {
+        let _ = crate::utils::pipe::write(client.handle, String::from("exit"));
+    }
+    // 轮询直到服务不再应答（worker 管道已关 = check_process_running 失败），最多 5s
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(250));
+        if check_process_running().is_err() {
+            break;
+        }
+    }
+    // 额外等一拍，确保 supervisor 退出、文件句柄完全释放
+    thread::sleep(Duration::from_millis(500));
 }
 // 用指定 backend/target 构建全部三个 OpenCV 模型；任一失败即返回错误。
 // 不写入全局状态，便于在失败时安全回退到其它后端后再统一赋值。
