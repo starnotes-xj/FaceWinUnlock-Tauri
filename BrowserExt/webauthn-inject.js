@@ -68,8 +68,8 @@
 
     // Forward to background script for PIN dialog and signing
     return new Promise((resolve, reject) => {
+      // 同扩展内通信，无需指定 EXTENSION_ID
       chrome.runtime.sendMessage(
-        EXTENSION_ID,
         { type: 'WEBAUTHN_GET', options: serialized },
         function (response) {
           if (chrome.runtime.lastError) {

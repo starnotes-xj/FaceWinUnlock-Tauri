@@ -49,7 +49,7 @@ initSignerConnection();
 setInterval(initSignerConnection, 30000);
 
 // ── Message handler ─────────────────────────────────────────────────
-chrome.runtime.onMessageExternal.addListener(
+chrome.runtime.onMessage.addListener(
   function (request, sender, sendResponse) {
     if (request.type !== 'WEBAUTHN_GET') {
       sendResponse({ error: 'Unknown request type' });
