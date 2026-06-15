@@ -82,6 +82,16 @@ fn find_current_user_sid(username: &str) -> Result<String, String> {
     use windows::Win32::Security::{LookupAccountNameW, SID_NAME_USE, PSID};
     use windows_core::PCWSTR;
 
+    // 用户名空 → 从 OS 获取当前用户名
+    let username = if username.is_empty() {
+        std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default()
+    } else {
+        username.to_string()
+    };
+    if username.is_empty() {
+        return Err("无法获取当前用户名".into());
+    }
+
     let name_wide: Vec<u16> = username.encode_utf16().chain(Some(0)).collect();
 
     unsafe {
