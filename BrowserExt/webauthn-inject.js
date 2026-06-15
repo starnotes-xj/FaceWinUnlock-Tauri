@@ -80,30 +80,52 @@
           }
 
           if (!response || response.error) {
+            // 需要 PIN → 在页面上下文弹框（service worker 无权弹）
+            if (response?.error === 'PIN_REQUIRED') {
+              const pin = prompt(
+                (new URL(window.location.origin)).hostname + ' 需要 passkey 认证\n\n请输入 Windows Hello PIN:',
+                ''
+              );
+              if (pin) {
+                // 重试带 PIN 的请求
+                chrome.runtime.sendMessage(
+                  { type: 'WEBAUTHN_GET_PIN', options: serialized, pin: pin },
+                  function (retryResponse) {
+                    if (chrome.runtime.lastError || !retryResponse || retryResponse.error) {
+                      const err = new Error(retryResponse?.error || 'Passkey assertion failed');
+                      err.name = 'NotAllowedError';
+                      return reject(err);
+                    }
+                    resolve(buildAssertion(retryResponse));
+                  }
+                );
+                return;
+              }
+            }
             const err = new Error(response?.error || 'Passkey assertion failed');
             err.name = 'NotAllowedError';
             return reject(err);
           }
 
-          // Construct the standard WebAuthn response object
-          const assertion = {
-            id: response.id,
-            rawId: fromBase64url(response.rawId),
-            response: {
-              authenticatorData: fromBase64url(response.authenticatorData),
-              clientDataJSON: fromBase64url(response.clientDataJSON),
-              signature: fromBase64url(response.signature),
-              userHandle: response.userHandle
-                ? fromBase64url(response.userHandle)
-                : null
-            },
-            type: 'public-key',
-            authenticatorAttachment: 'platform'
-          };
-
-          resolve(assertion);
+          resolve(buildAssertion(response));
         }
       );
     });
   };
+
+  // ── helper ──
+  function buildAssertion(response) {
+    return {
+      id: response.id,
+      rawId: fromBase64url(response.rawId),
+      response: {
+        authenticatorData: fromBase64url(response.authenticatorData),
+        clientDataJSON: fromBase64url(response.clientDataJSON),
+        signature: fromBase64url(response.signature),
+        userHandle: response.userHandle ? fromBase64url(response.userHandle) : null
+      },
+      type: 'public-key',
+      authenticatorAttachment: 'platform'
+    };
+  }
 })();
