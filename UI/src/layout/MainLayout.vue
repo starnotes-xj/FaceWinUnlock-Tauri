@@ -10,20 +10,26 @@
         Sunny,
         Moon
     } from '@element-plus/icons-vue'
-    import { ElNotification } from 'element-plus';
+    import { ElNotification, ElMessageBox, ElLoading, ElMessage } from 'element-plus';
     import { invoke } from '@tauri-apps/api/core';
     import { useTheme } from '../hook/useTheme';
 
     const version = ref(localStorage.getItem("version") || 'unknown');
     const { isDark, toggleTheme } = useTheme();
 
-    /** 检查更新（仅比对版本号，不做任何下载或安装；点击通知打开 Release 页面） */
-    let updateUrl = '';
+    /** 检查更新 → 拉取差异清单 → 确认 → 下载到临时目录 → 退出软件时落盘生效；
+        旧版本 Release 无 manifest 时退回可点击通知（打开 Release 页面手动下载） */
     onMounted(async () => {
         try {
             const info: any = await invoke('check_update');
-            if (info?.has_update) {
-                updateUrl = info.release_url || '';
+            if (!info?.has_update) return;
+
+            // 拉取差异清单；旧版本 Release 无 manifest 时退回可点击的纯提示
+            let diff: any;
+            try {
+                diff = await invoke('fetch_update_diff');
+            } catch {
+                const updateUrl = info.release_url || '';
                 ElNotification({
                     title: '发现新版本',
                     message: `当前 v${info.current_version} → 最新 v${info.latest_version}（点击前往下载）`,
@@ -31,6 +37,39 @@
                     duration: 10000,
                     onClick: () => { if (updateUrl) window.open(updateUrl, '_blank'); },
                 });
+                return;
+            }
+
+            // 版本号变化但本地文件已是最新（罕见）→ 无需更新
+            if (!diff?.files_to_update?.length) return;
+
+            try {
+                await ElMessageBox.confirm(
+                    `发现新版本 v${diff.version}，需下载 ${diff.files_to_update.length} 个文件（约 ${diff.total_size_mb.toFixed(1)} MB），是否立即更新？`,
+                    '发现新版本',
+                    { confirmButtonText: '立即更新', cancelButtonText: '稍后', type: 'info' }
+                );
+            } catch {
+                return; // 用户取消
+            }
+
+            const loading = ElLoading.service({ fullscreen: true, text: '正在下载更新...' });
+            try {
+                await invoke('apply_update');
+                loading.close();
+                try {
+                    await ElMessageBox.confirm(
+                        '更新已下载，退出软件后自动应用。是否立即退出以完成更新？',
+                        '更新完成',
+                        { confirmButtonText: '立即退出', cancelButtonText: '稍后', type: 'success' }
+                    );
+                    await invoke('close_app'); // 退出时 update_temp → 安装目录落盘替换
+                } catch {
+                    ElMessage.info('更新已下载，下次退出软件时自动应用');
+                }
+            } catch (e) {
+                loading.close();
+                ElMessage.error('更新失败：' + e);
             }
         } catch { /* 静默失败，不影响正常使用 */ }
     });

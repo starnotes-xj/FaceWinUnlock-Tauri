@@ -24,6 +24,7 @@ use modules::init::{
 use modules::options::write_to_registry;
 use modules::pin_commands::{encrypt_pin, verify_pin_hash_stored, get_user_sid};
 use modules::update_check::check_update;
+use modules::update_download::{apply_update, fetch_update_diff};
 use opencv::{
     core::Ptr,
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
@@ -84,6 +85,25 @@ lazy_static::lazy_static! {
     };
 }
 
+/// 应用上次退出时因文件占用而延迟的增量更新（`X.new` → `X`），best-effort。
+/// 由 `close_app` 在替换被占用文件时写出 `X.new`；此处在启动早期尝试改名替换。
+/// 目标仍被占用（如运行中的核心服务持有 `FaceWinUnlock-Server.exe`）时静默跳过，下次启动再试。
+fn apply_pending_updates() {
+    let entries = match std::fs::read_dir(*ROOT_DIR) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("new") {
+            // FaceWinUnlock-Server.exe.new → FaceWinUnlock-Server.exe
+            let target = path.with_extension("");
+            // Windows 下 fs::rename 会替换已存在目标；目标被占用则失败，跳过留待下次。
+            let _ = std::fs::rename(&path, &target);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 获取软件安装目录，用于将日志放到软件安装目录下
@@ -127,6 +147,8 @@ pub fn run() {
                     .build(),
             )
             .setup(|app| {
+                // 启动早期应用上次延迟的增量更新（X.new → X），需在任何文件被使用前执行
+                apply_pending_updates();
                 let _ = create_system_tray(app.app_handle());
                 let window = app.get_webview_window("main").unwrap();
                 #[cfg(debug_assertions)] // 仅在调试(debug)版本中包含此代码
@@ -179,6 +201,8 @@ pub fn run() {
                 uninstall_init,
                 extract_passkey_keys,
                 check_update,
+                fetch_update_diff,
+                apply_update,
                 // 面容模块
                 check_face_from_img,
                 check_face_from_camera,

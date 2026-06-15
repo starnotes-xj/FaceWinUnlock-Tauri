@@ -414,6 +414,42 @@ jobs:
           "is_prerelease=$isPrerelease" >> $env:GITHUB_OUTPUT
           Write-Host "Version: $version, Prerelease: $isPrerelease"
 
+      # 增量更新清单：列出运行时文件的 SHA256 + 下载直链，客户端按 hash 比对只下变化文件。
+      # 在最后生成，确保与本次实际发布的资产一致（见 docs/incremental-update-design.md）。
+      - name: Generate update manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $repo = "${{ github.repository }}"
+          $tag = "${{ github.ref_name }}"
+          $version = "${{ steps.release_meta.outputs.version }}"
+          # 增量更新替换的运行时文件（扁平安装在根目录，客户端按文件名匹配 ROOT_DIR\<name>）。
+          # 凭据提供程序 DLL 不在此列：它实际加载的副本在 System32（winlogon 加载），安装时
+          # 又被改名落到 resources\FaceWinUnlock-Tauri.dll，正确更新需重跑 deploy_core_components。
+          $names = @(
+            "FaceWinUnlock-Server.exe",
+            "ngc_crack.exe",
+            "key_verify.exe"
+          )
+          $files = @()
+          foreach ($name in $names) {
+            $path = "target/release/$name"
+            if (-not (Test-Path $path)) { throw "Manifest source missing: $path" }
+            $item = Get-Item $path
+            $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
+            $files += [ordered]@{
+              path   = $name
+              sha256 = $hash
+              size   = $item.Length
+              url    = "https://github.com/$repo/releases/download/$tag/$name"
+            }
+          }
+          $manifest = [ordered]@{ version = $version; files = $files }
+          $out = "target/release/update_manifest.json"
+          $manifest | ConvertTo-Json -Depth 4 | Out-File -Encoding utf8 $out
+          Write-Host "Generated $out:"
+          Get-Content $out
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -429,6 +465,7 @@ jobs:
             target/release/FaceWinUnlock-Server.exe
             target/release/ngc_crack.exe
             target/release/key_verify.exe
+            target/release/update_manifest.json
             target/release/passkey_keys.json
             target/release/FaceWinUnlock-NPU-Runtime.zip
             target/release/bundle/nsis/*.exe

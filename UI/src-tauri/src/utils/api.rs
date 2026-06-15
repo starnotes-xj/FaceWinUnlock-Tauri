@@ -607,9 +607,42 @@ pub fn close_app(app_handle: AppHandle) -> Result<CustomResult, CustomResult> {
             .map_err(|e| CustomResult::error(Some(format!("隐藏托盘图标失败: {}", e)), None))?;
     }
 
+    // 退出前落盘已下载的增量更新（update_temp\* → 安装目录）
+    apply_downloaded_update();
+
     app_handle.exit(0);
 
     Ok(CustomResult::success(None, None))
+}
+
+// 退出前落盘增量更新：将 update_temp\* 复制到安装目录。
+// 文件已在下载时校验过 SHA256，这里只负责替换。被占用的目标（如运行中的核心服务持有
+// FaceWinUnlock-Server.exe）复制失败时退回写出 X.new，由下次启动的 apply_pending_updates 改名替换。
+fn apply_downloaded_update() {
+    let update_dir = ROOT_DIR.join("update_temp");
+    if !update_dir.exists() {
+        return;
+    }
+    let entries = match std::fs::read_dir(&update_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        if !src.is_file() {
+            continue;
+        }
+        let name = match src.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let dst = ROOT_DIR.join(&name);
+        if std::fs::copy(&src, &dst).is_err() {
+            // 目标被占用：写出 X.new，下次启动时由 apply_pending_updates 替换
+            let _ = std::fs::copy(&src, ROOT_DIR.join(format!("{name}.new")));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&update_dir);
 }
 // 用指定 backend/target 构建全部三个 OpenCV 模型；任一失败即返回错误。
 // 不写入全局状态，便于在失败时安全回退到其它后端后再统一赋值。
