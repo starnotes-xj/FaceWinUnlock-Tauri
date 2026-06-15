@@ -1317,6 +1317,7 @@ dependencies = [
  "hex",
  "lazy_static",
  "opencv",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

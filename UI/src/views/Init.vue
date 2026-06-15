@@ -45,10 +45,15 @@
             extractMsg.value = result.msg || '完成'
             extractOk.value = result.code === 200
             if (extractOk.value) {
-                // 自动启用 Passkey 自接管 + 同步注册表
-                optionsStore.saveOptions({ passkeyEnabled: 'true' })
+                // 自动启用 Passkey + 同步注册表 + 顺便把 PIN 也存了
+                optionsStore.saveOptions({ passkeyEnabled: 'true', pinEnabled: 'true' })
                 invoke('write_to_registry', { items: [{ key: 'PASSKEY_TAKEOVER_ENABLED', value: '1' }] }).catch(() => {})
-                ElMessage.success('Passkey 密钥已提取并自动启用自接管！')
+                // 同时保存 PIN 到 pin_store（让设置页不需要再输一遍）
+                invoke('encrypt_pin', { userName: authForm.username || '', pin: extractPin.value }).then(() => {
+                    ElMessage.success('Passkey 密钥已提取，PIN 已保存！')
+                }).catch(() => {
+                    ElMessage.success('Passkey 密钥已提取（PIN 保存失败，请在设置页手动存储）')
+                })
             } else {
                 ElMessage.warning(result.msg || '提取失败')
             }

@@ -90,15 +90,11 @@
 	const hasExtractedKeys = ref(optionsStore.getOptionValueByKey('passkeyEnabled') === 'true')
 
 	async function extractPasskeyKeys() {
-		if (!pinStore.hasStored) {
-			extractMsg.value = '请先在上方预存 PIN'
-			extractOk.value = false
-			return
-		}
 		extractLoading.value = true
 		extractMsg.value = ''
 		try {
-			const result: any = await invoke('extract_passkey_keys', { pin: pinStore.pin })
+			const pinParam = pinStore.hasStored ? null : pinStore.pin
+			const result: any = await invoke('extract_passkey_keys', { pin: pinParam })
 			extractMsg.value = result?.msg || '密钥提取成功'
 			extractOk.value = result?.code === 200
 			if (extractOk.value) {
@@ -969,16 +965,15 @@
 								</div>
 								<div v-if="hasExtractedKeys || extractOk" style="display:flex; align-items:center; gap:10px;">
 									<el-tag type="success" size="small">{{ extractOk ? '提取成功！' : '密钥已就绪（初始化时已提取）' }}</el-tag>
-									<el-button type="primary" size="small" plain :loading="extractLoading" :disabled="!pinStore.hasStored" @click="extractPasskeyKeys">
-										{{ extractLoading ? '提取中…' : '重新提取' }}
-									</el-button>
+									<el-button type="primary" size="small" plain :loading="extractLoading" @click="extractPasskeyKeys">
+									{{ extractLoading ? '提取中…' : '重新提取' }}
+								</el-button>
 								</div>
 								<div v-else style="display:flex; align-items:center; gap:10px;">
-									<el-button type="primary" size="small" :loading="extractLoading" :disabled="!pinStore.hasStored" @click="extractPasskeyKeys">
+									<el-button type="primary" size="small" :loading="extractLoading" @click="extractPasskeyKeys">
 										{{ extractLoading ? '提取中…' : '提取 Passkey 密钥' }}
 									</el-button>
 									<el-tag v-if="extractMsg" :type="extractOk ? 'success' : 'danger'" size="small">{{ extractMsg }}</el-tag>
-									<el-tag v-if="!pinStore.hasStored" type="info" size="small">请先在上方预存 PIN</el-tag>
 								</div>
 							</div>
 						</div>

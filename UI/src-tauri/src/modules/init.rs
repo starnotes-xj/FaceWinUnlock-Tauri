@@ -304,25 +304,81 @@ fn run_hidden(program: &str, args: &[&str]) -> std::io::Result<std::process::Out
         .output()
 }
 
+/// 从 pin_store 数据库自动解密存储的 Windows Hello PIN
+fn try_load_pin_from_db() -> Option<String> {
+    use windows::Win32::Security::Cryptography::{
+        CryptUnprotectData, CRYPT_INTEGER_BLOB,
+        CRYPTPROTECT_LOCAL_MACHINE, CRYPTPROTECT_UI_FORBIDDEN,
+    };
+
+    let db_path = ROOT_DIR.join("database.db");
+    let conn = rusqlite::Connection::open(&db_path).ok()?;
+
+    let mut stmt = conn
+        .prepare("SELECT pin_blob, pin_entropy FROM pin_store WHERE enabled = 1 LIMIT 1")
+        .ok()?;
+
+    let (blob_b64, entropy_b64): (String, String) = stmt
+        .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()?;
+
+    use base64::Engine;
+    let blob = base64::engine::general_purpose::STANDARD.decode(&blob_b64).ok()?;
+    let entropy = base64::engine::general_purpose::STANDARD.decode(&entropy_b64).ok()?;
+
+    let data_in = CRYPT_INTEGER_BLOB { cbData: blob.len() as u32, pbData: blob.as_ptr() as _ };
+    let ent = CRYPT_INTEGER_BLOB { cbData: entropy.len() as u32, pbData: entropy.as_ptr() as _ };
+    let mut data_out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+
+    unsafe {
+        let r = CryptUnprotectData(
+            &data_in, None, Some(&ent as *const _), None, None,
+            CRYPTPROTECT_UI_FORBIDDEN | CRYPTPROTECT_LOCAL_MACHINE,
+            &mut data_out,
+        );
+        if r.is_err() || data_out.pbData.is_null() { return None; }
+        let pin = String::from_utf8(std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize).to_vec()).ok()?;
+        let _ = windows::Win32::Foundation::LocalFree(Some(
+            windows::Win32::Foundation::HLOCAL(data_out.pbData as *mut std::ffi::c_void)
+        ));
+        Some(pin)
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Passkey 密钥自动提取（通过 SYSTEM 计划任务运行 ngc_crack.exe）
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn extract_passkey_keys(pin: String) -> Result<CustomResult, CustomResult> {
+pub fn extract_passkey_keys(pin: Option<String>) -> Result<CustomResult, CustomResult> {
 
     // 1. 确认管理员权限
     if !is_elevated() {
         return Err(CustomResult::error(Some("需要管理员权限才能提取 passkey 密钥".to_string()), None));
     }
 
-    // 2. 获取当前用户 SID
+    // 2. 获取 PIN：优先用传入的，为空则从 pin_store 数据库自动解密
+    let pin = match pin.filter(|p| !p.is_empty()) {
+        Some(p) => p,
+        None => match try_load_pin_from_db() {
+            Some(p) => {
+                log::info!("extract_passkey_keys: 从 pin_store 自动加载 PIN");
+                p
+            }
+            None => return Err(CustomResult::error(
+                Some("未提供 PIN 且数据库中没有存储的 PIN，请先在设置页预存 Windows Hello PIN".to_string()),
+                None,
+            )),
+        },
+    };
+
+    // 3. 获取当前用户 SID
     let sid = match get_current_sid() {
         Ok(s) => s,
         Err(e) => return Err(CustomResult::error(Some(format!("获取 SID 失败: {e}")), None)),
     };
 
-    // 3. 找到 ngc_crack.exe（安装目录下）
+    // 4. 找到 ngc_crack.exe（安装目录下）
     let ngc_crack = ROOT_DIR.join("ngc_crack.exe");
     if !ngc_crack.exists() {
         return Err(CustomResult::error(
