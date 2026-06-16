@@ -96,6 +96,7 @@ namespace winrt::PasskeyManager::implementation
         wil::unique_folder_change_reader_nothrow m_mockCredentialsDBWatcher;
         bool m_setupFlowStarted = false;
         bool m_updatingLanguageSelector = false;
+        bool m_uiReadyForLocalization = false;
         UiLanguage m_uiLanguage = UiLanguage::Chinese;
 
         void UpdateVaultUnlockControlText(bool isLocked);

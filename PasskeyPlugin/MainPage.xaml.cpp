@@ -256,10 +256,20 @@ namespace winrt::PasskeyManager::implementation
         m_credentialListViewModel = winrt::make<PasskeyManager::implementation::CredentialListViewModel>();
         DataContext(m_credentialListViewModel);
         m_uiLanguage = LoadPreferredLanguage();
-        SetLanguageSelection(m_uiLanguage);
-        ApplyLocalizedTexts();
 
         auto weakThis = get_weak();
+        // 本地化必须等命名 XAML 元素就绪（Loaded 之后）再应用：构造期可视化树尚未建立，
+        // languageSelector()/各 TextBlock() 返回空，直接访问会触发访问违例(0xC0000005)，
+        // 导致管理器一启动就崩溃。LoadPreferredLanguage 只读设置、不碰 UI，可留在构造期。
+        Loaded([weakThis](winrt::Windows::Foundation::IInspectable const&,
+                          winrt::Microsoft::UI::Xaml::RoutedEventArgs const&) {
+            if (auto self{ weakThis.get() })
+            {
+                self->m_uiReadyForLocalization = true;
+                self->SetLanguageSelection(self->m_uiLanguage);
+                self->ApplyLocalizedTexts();
+            }
+        });
         m_registryWatcher = wil::make_registry_watcher(
             HKEY_CURRENT_USER,
             c_pluginRegistryPath,
@@ -327,6 +337,11 @@ namespace winrt::PasskeyManager::implementation
 
     void MainPage::SetLanguageSelection(UiLanguage language)
     {
+        if (!m_uiReadyForLocalization)
+        {
+            return;
+        }
+
         m_updatingLanguageSelector = true;
         languageSelector().SelectedIndex(language == UiLanguage::English ? 1 : 0);
         m_updatingLanguageSelector = false;
@@ -339,6 +354,11 @@ namespace winrt::PasskeyManager::implementation
 
     void MainPage::ApplyLocalizedTexts()
     {
+        if (!m_uiReadyForLocalization)
+        {
+            return;
+        }
+
         headerTitleTextBlock().Text(LocalizedText(L"FaceWinUnlock 通行密钥", L"FaceWinUnlock Passkey"));
         languageLabelTextBlock().Text(LocalizedText(L"语言", L"Language"));
         pluginSectionTitle().Text(LocalizedText(L"插件", L"Plugin"));
@@ -922,7 +942,7 @@ namespace winrt::PasskeyManager::implementation
 
     winrt::IAsyncAction MainPage::languageSelector_SelectionChanged(IInspectable const&, winrt::Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const&)
     {
-        if (m_updatingLanguageSelector)
+        if (m_updatingLanguageSelector || !m_uiReadyForLocalization)
         {
             co_return;
         }
