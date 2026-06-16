@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -80,16 +81,93 @@ fn query_package(package_name: &str) -> Result<Option<Value>, String> {
         .map_err(|e| format!("解析插件状态失败: {e}"))
 }
 
+fn query_msix_version(package_path: &Path) -> Result<Option<String>, String> {
+    if !package_path.exists() {
+        return Ok(None);
+    }
+
+    let script = format!(
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem; \
+         $zip = [System.IO.Compression.ZipFile]::OpenRead({}); \
+         try {{ \
+           $entry = $zip.GetEntry('AppxManifest.xml'); \
+           if ($null -eq $entry) {{ throw 'AppxManifest.xml not found' }}; \
+           $stream = $entry.Open(); \
+           try {{ \
+             $reader = [System.IO.StreamReader]::new($stream); \
+             try {{ \
+               [xml]$manifest = $reader.ReadToEnd(); \
+               $manifest.Package.Identity.Version \
+             }} finally {{ $reader.Dispose() }} \
+           }} finally {{ $stream.Dispose() }} \
+         }} finally {{ $zip.Dispose() }}",
+        powershell_literal(package_path)
+    );
+    let output = run_powershell(&script).map_err(|e| format!("读取插件 MSIX 版本失败: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "读取插件 MSIX 版本失败: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(version))
+    }
+}
+
+fn package_version(package: &Value) -> Option<&str> {
+    package["version"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+}
+
+fn compare_versions(left: &str, right: &str) -> Ordering {
+    let left = left.trim().trim_start_matches('v').trim_start_matches('V');
+    let right = right.trim().trim_start_matches('v').trim_start_matches('V');
+    let mut left_parts = left
+        .split(['.', '-'])
+        .map(|part| part.parse::<u64>().unwrap_or(0));
+    let mut right_parts = right
+        .split(['.', '-'])
+        .map(|part| part.parse::<u64>().unwrap_or(0));
+
+    for _ in 0..4 {
+        let l = left_parts.next().unwrap_or(0);
+        let r = right_parts.next().unwrap_or(0);
+        match l.cmp(&r) {
+            Ordering::Equal => {}
+            order => return order,
+        }
+    }
+
+    Ordering::Equal
+}
+
 fn status_value() -> Result<Value, String> {
     let formal = query_package(FORMAL_PACKAGE_NAME)?;
     let sample = query_package(SAMPLE_PACKAGE_NAME)?;
+    let msix_path = artifact_path("FaceWinUnlock-Passkey.msix");
+    let bundled_version = query_msix_version(&msix_path).ok().flatten();
+    let update_available = match (
+        formal.as_ref().and_then(package_version),
+        bundled_version.as_deref(),
+    ) {
+        (Some(installed), Some(bundled)) => compare_versions(installed, bundled).is_lt(),
+        _ => false,
+    };
     Ok(json!({
         "installed": formal.is_some(),
         "sample_installed": sample.is_some(),
         "package": formal,
         "sample_package": sample,
-        "msix_available": artifact_path("FaceWinUnlock-Passkey.msix").exists(),
+        "msix_available": msix_path.exists(),
         "certificate_available": artifact_path("FaceWinUnlock-Passkey.cer").exists(),
+        "bundled_version": bundled_version,
+        "update_available": update_available,
     }))
 }
 
@@ -111,9 +189,12 @@ pub fn install_passkey_plugin(replace_sample: bool) -> Result<CustomResult, Cust
         ));
     }
 
+    let formal =
+        query_package(FORMAL_PACKAGE_NAME).map_err(|e| CustomResult::error(Some(e), None))?;
     let sample =
         query_package(SAMPLE_PACKAGE_NAME).map_err(|e| CustomResult::error(Some(e), None))?;
-    if sample.is_some() && !replace_sample {
+    let should_remove_sample = replace_sample && sample.is_some();
+    if formal.is_none() && sample.is_some() && !replace_sample {
         return Err(CustomResult::error(
             Some(
                 "检测到 Contoso 测试插件。替换它会删除测试插件本地保存的通行密钥，必须确认后再迁移。"
@@ -123,12 +204,46 @@ pub fn install_passkey_plugin(replace_sample: bool) -> Result<CustomResult, Cust
         ));
     }
 
-    let replace_script = if replace_sample {
+    let bundled_version =
+        query_msix_version(&package_path).map_err(|e| CustomResult::error(Some(e), None))?;
+    let needs_install = match (formal.as_ref(), bundled_version.as_deref()) {
+        (None, _) => true,
+        (Some(package), Some(bundled)) => package_version(package)
+            .map(|installed| compare_versions(installed, bundled).is_ne())
+            .unwrap_or(true),
+        (Some(_), None) => true,
+    };
+    if let (Some(package), Some(bundled)) = (formal.as_ref(), bundled_version.as_deref()) {
+        if let Some(installed) = package_version(package) {
+            if compare_versions(installed, bundled).is_ge() && !should_remove_sample {
+                let status = status_value().map_err(|e| CustomResult::error(Some(e), None))?;
+                return Ok(CustomResult::success(
+                    Some("FaceWinUnlock Passkey 已是当前版本，已跳过重新安装，正在打开注册与启用流程".to_string()),
+                    Some(status),
+                ));
+            }
+        }
+    }
+
+    let replace_script = if should_remove_sample {
         format!(
             "Get-AppxPackage -Name '{SAMPLE_PACKAGE_NAME}' | Remove-AppxPackage -ErrorAction Stop;"
         )
     } else {
         String::new()
+    };
+    let install_script = if !needs_install {
+        String::new()
+    } else if formal.is_some() {
+        format!(
+            "Add-AppxPackage -Update -Path {} -ForceApplicationShutdown -ForceUpdateFromAnyVersion -ErrorAction Stop;",
+            powershell_literal(&package_path),
+        )
+    } else {
+        format!(
+            "Add-AppxPackage -Path {} -ForceApplicationShutdown -ForceUpdateFromAnyVersion -ErrorAction Stop;",
+            powershell_literal(&package_path),
+        )
     };
     let script = format!(
         "$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); \
@@ -140,11 +255,10 @@ pub fn install_passkey_plugin(replace_sample: bool) -> Result<CustomResult, Cust
          }}; \
          Get-Process -Name 'PasskeyManager' -ErrorAction SilentlyContinue | Stop-Process -Force; \
          {replace_script} \
-         Add-AppxPackage -Path {} -ForceApplicationShutdown -ForceUpdateFromAnyVersion -ErrorAction Stop;",
+         {install_script}",
         powershell_literal(&certificate_path),
         powershell_literal(&certificate_path),
         powershell_literal(&certificate_path),
-        powershell_literal(&package_path),
     );
     let output = run_powershell(&script)
         .map_err(|e| CustomResult::error(Some(format!("启动插件安装失败: {e}")), None))?;
@@ -160,7 +274,14 @@ pub fn install_passkey_plugin(replace_sample: bool) -> Result<CustomResult, Cust
 
     let status = status_value().map_err(|e| CustomResult::error(Some(e), None))?;
     Ok(CustomResult::success(
-        Some("FaceWinUnlock Passkey 已安装，正在打开注册与启用流程".to_string()),
+        Some(
+            if needs_install {
+                "FaceWinUnlock Passkey 已安装，正在打开注册与启用流程"
+            } else {
+                "Contoso 测试插件已清理，FaceWinUnlock Passkey 保持当前版本，正在打开注册与启用流程"
+            }
+            .to_string(),
+        ),
         Some(status),
     ))
 }

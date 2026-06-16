@@ -60,7 +60,7 @@
                     <InlineUIContainer>
                         <Border Padding="4">
                             <TextBlock 
-                                Text="Select a passkey to sign in to"/>
+                                Text="选择一个通行密钥登录"/>
                         </Border>
                     </InlineUIContainer>
                     <InlineUIContainer>
@@ -123,7 +123,7 @@
                                     <TextBlock 
                                         Foreground="{ThemeResource SystemFillColorSuccess}"
                                         FontSize="14"
-                                        Text="Success" />
+                                        Text="成功" />
                                 </Border>
                                 <Border
                                     Grid.RowSpan="2"
@@ -138,7 +138,7 @@
                                     <TextBlock 
                                         Foreground="{ThemeResource SystemFillColorCriticalBrush}"
                                         FontSize="14" 
-                                        Text="Failed" />
+                                        Text="失败" />
                                 </Border>
                             </Grid>
                         </DataTemplate>
@@ -150,7 +150,7 @@
                 Grid.Row="2"
                 HorizontalAlignment="Stretch"
                 Click="Create_Assertion"
-                Content="Sign in"
+                Content="登录"
                 Style="{StaticResource AccentButtonStyle}" />
             <Button
                 x:Name="cancelButton"
@@ -158,7 +158,7 @@
                 Grid.Column="1"
                 HorizontalAlignment="Stretch"
                 Click="Cancel_Plugin_Action"
-                Content="Cancel" />
+                Content="取消" />
         </Grid>
     </Grid>
 </Page>

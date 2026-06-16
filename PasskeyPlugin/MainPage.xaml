@@ -33,17 +33,42 @@
             <RowDefinition Height="48" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
-        <StackPanel Orientation="Horizontal">
-            <Image
-                Width="16"
-                Height="16"
-                Margin="16,0,8,0"
-                Source="ms-appx:///Assets/icon.ico" />
+        <Grid ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Orientation="Horizontal">
+                <Image
+                    Width="16"
+                    Height="16"
+                    Margin="16,0,8,0"
+                    Source="ms-appx:///Assets/icon.ico" />
+                <TextBlock
+                    x:Name="headerTitleTextBlock"
+                    VerticalAlignment="Center"
+                    Style="{StaticResource CaptionTextBlockStyle}"
+                    Text="FaceWinUnlock 通行密钥" />
+            </StackPanel>
             <TextBlock
+                x:Name="languageLabelTextBlock"
+                Grid.Column="1"
                 VerticalAlignment="Center"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                 Style="{StaticResource CaptionTextBlockStyle}"
-                Text="FaceWinUnlock Passkey" />
-        </StackPanel>
+                Text="语言" />
+            <ComboBox
+                x:Name="languageSelector"
+                Grid.Column="2"
+                Width="104"
+                Margin="0,8,16,8"
+                SelectedIndex="0"
+                SelectionChanged="languageSelector_SelectionChanged">
+                <ComboBoxItem Content="中文" />
+                <ComboBoxItem Content="English" />
+            </ComboBox>
+        </Grid>
         <Grid
             Grid.Row="1"
             Padding="16,24,16,16"
@@ -64,7 +89,7 @@
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="Plugin" />
+            <TextBlock x:Name="pluginSectionTitle" Style="{StaticResource BodyStrongTextBlockStyle}" Text="插件" />
             <Grid
                 Grid.Row="1"
                 Grid.ColumnSpan="2"
@@ -75,7 +100,7 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <TextBlock x:Name="pluginStateTextBlock" VerticalAlignment="Center">
-                    <Run Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="State:" />
+                    <Run x:Name="pluginStateLabelRun" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="状态：" />
                     <Run
                         x:Name="pluginStateRun"
                         Foreground="{ThemeResource SystemFillColorCautionBrush}"
@@ -88,47 +113,49 @@
                     <Button
                         x:Name="registerPluginButton"
                         Click="registerPluginButton_Click"
-                        Content="Register"
+                        Content="注册"
                         Style="{StaticResource AccentButtonStyle}" />
                     <Button
                         x:Name="updatePluginButton"
                         Click="updatePluginButton_Click"
-                        Content="Update"
+                        Content="更新"
                         Style="{StaticResource AccentButtonStyle}" />
                     <Button
                         x:Name="activatePluginButton"
                         Click="activatePluginButton_Click"
-                        Content="Enable"
+                        Content="启用"
                         Style="{StaticResource AccentButtonStyle}" />
                     <Button
                         x:Name="unregisterPluginButton"
                         Click="unregisterPluginButton_Click"
-                        Content="Remove" />
+                        Content="移除" />
                 </StackPanel>
             </Grid>
 
 
             <TextBlock
+                x:Name="statsSectionTitle"
                 Grid.Row="2"
                 Margin="0,16,0,0"
                 Style="{StaticResource BodyStrongTextBlockStyle}"
-                Text="Stats" />
+                Text="统计" />
             <Grid Grid.Row="3" Style="{StaticResource CardStyle}">
                 <InfoBarPanel>
                     <TextBlock x:Name="credentialStateTextBlock1">
-                        <Run Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Local DB:" />
-                        <Run x:Name="credsStatsRun1" Text="Not available" />
-                        <LineBreak /><Run Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Windows Cache Stats:" />
-                        <Run x:Name="credsStatsRun2" Text="Not available" />
+                        <Run x:Name="localDbLabelRun" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="本地库：" />
+                        <Run x:Name="credsStatsRun1" Text="未加载" />
+                        <LineBreak /><Run x:Name="windowsCacheLabelRun" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Windows 缓存：" />
+                        <Run x:Name="credsStatsRun2" Text="未加载" />
                     </TextBlock>
                 </InfoBarPanel>
             </Grid>
             <TextBlock
+                x:Name="configurationSectionTitle"
                 Grid.Row="2"
                 Grid.Column="1"
                 Margin="0,16,0,0"
                 Style="{StaticResource BodyStrongTextBlockStyle}"
-                Text="Configuration" />
+                Text="配置" />
             <Grid
                 Grid.Row="3"
                 Grid.Column="1"
@@ -140,16 +167,16 @@
                     Spacing="8">
                     <ToggleSplitButton
                         x:Name="VaultUnlockControl"
-                        Content="Vault Unlocked"
+                        Content="密码库已解锁"
                         IsCheckedChanged="VaultUnlockControl_IsCheckedChanged">
                         <ToggleSplitButton.Flyout>
                             <Flyout Placement="Bottom">
                                 <ToggleSwitch
                                     x:Name="vaultLockSwitch"
-                                    Header="Unlock Method"
+                                    Header="解锁方式"
                                     IsOn="False"
-                                    OffContent="Consent"
-                                    OnContent="Passkey"
+                                    OffContent="确认"
+                                    OnContent="通行密钥"
                                     Toggled="vaultLockSwitch_Toggled">
                                     <ToggleSwitch.HeaderTemplate>
                                         <DataTemplate>
@@ -166,10 +193,10 @@
                     </ToggleSplitButton>
                     <ToggleSwitch
                         x:Name="silentOperationSwitch"
-                        Header="Minimize UI"
+                        Header="最小化界面"
                         IsOn="False"
-                        OffContent="Show"
-                        OnContent="Hide"
+                        OffContent="显示"
+                        OnContent="隐藏"
                         Toggled="silentOperationSwitch_Toggled">
                         <ToggleSwitch.HeaderTemplate>
                             <DataTemplate>
@@ -186,10 +213,11 @@
 
 
             <TextBlock
+                x:Name="credentialsSectionTitle"
                 Grid.Row="4"
                 Margin="0,16,0,0"
                 Style="{StaticResource BodyStrongTextBlockStyle}"
-                Text="Credentials" />
+                Text="凭据" />
             <StackPanel
                 Grid.Row="5"
                 Orientation="Horizontal"
@@ -197,34 +225,46 @@
                 <Button
                     x:Name="refreshButton"
                     Click="refreshButton_Click"
-                    Content="Refresh"
+                    Content="刷新"
                     Style="{StaticResource AccentButtonStyle}" />
-                <DropDownButton Content="Add">
+                <DropDownButton x:Name="addCredentialsButton" Content="添加">
                     <DropDownButton.Flyout>
                         <MenuFlyout Placement="Bottom">
-                            <MenuFlyoutItem Click="addAllPluginCredentials_Click" Text="All Passkeys to Cache" />
+                            <MenuFlyoutItem
+                                x:Name="addAllPluginCredentialsMenuItem"
+                                Click="addAllPluginCredentials_Click"
+                                Text="全部通行密钥写入缓存" />
                             <MenuFlyoutItem
                                 x:Name="selectedAddButton"
                                 Click="addSelectedCredentials_Click"
                                 IsEnabled="False"
-                                Text="Selected Passkeys to Cache" />
+                                Text="所选通行密钥写入缓存" />
                         </MenuFlyout>
                     </DropDownButton.Flyout>
                 </DropDownButton>
-                <DropDownButton Content="Delete">
+                <DropDownButton x:Name="deleteCredentialsButton" Content="删除">
                     <DropDownButton.Flyout>
                         <MenuFlyout Placement="Bottom">
-                            <MenuFlyoutItem Click="deleteAllPluginCredentials_Click" Text="All Passkeys from Cache" />
+                            <MenuFlyoutItem
+                                x:Name="deleteAllPluginCredentialsMenuItem"
+                                Click="deleteAllPluginCredentials_Click"
+                                Text="清空缓存中的全部通行密钥" />
                             <MenuFlyoutItem
                                 x:Name="deleteSelectedCacheButton"
                                 Click="deleteSelectedPluginCredentials_Click"
-                                Text="Selected Passkeys from Cache" />
+                                Text="删除缓存中的所选通行密钥" />
                             <MenuFlyoutItem
                                 x:Name="deleteSelectedLocalButton"
                                 Click="deleteSelectedPluginCredentialsEverywhere_Click"
-                                Text="Selected Passkeys everywhere" />
-                            <MenuFlyoutItem Click="deleteAllLocalCredentials_Click" Text="All Passkeys from Local" />
-                            <MenuFlyoutItem Click="deleteAllCredentials_Click" Text="All Passkeys everywhere" />
+                                Text="删除所选通行密钥（全部位置）" />
+                            <MenuFlyoutItem
+                                x:Name="deleteAllLocalCredentialsMenuItem"
+                                Click="deleteAllLocalCredentials_Click"
+                                Text="清空本地库中的全部通行密钥" />
+                            <MenuFlyoutItem
+                                x:Name="deleteAllCredentialsMenuItem"
+                                Click="deleteAllCredentials_Click"
+                                Text="清空全部位置的通行密钥" />
                         </MenuFlyout>
                     </DropDownButton.Flyout>
                 </DropDownButton>
@@ -275,7 +315,7 @@
                                     BorderThickness="1"
                                     CornerRadius="{StaticResource ControlCornerRadius}"
                                     Visibility="{x:Bind CredentialOptions, Converter={StaticResource BitwiseFlagToVisibilityConverter}, ConverterParameter=AutofillCapable}">
-                                    <TextBlock FontSize="12" Text="Autofill" />
+                                    <TextBlock FontSize="12" Text="自动填充 / Autofill" />
                                 </Border>
                                 <Border
                                     Grid.RowSpan="2"
@@ -290,7 +330,7 @@
                                     <TextBlock
                                         FontSize="12"
                                         Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                                        Text="Stale" />
+                                        Text="过期 / Stale" />
                                 </Border>
                             </Grid>
                         </DataTemplate>
@@ -299,11 +339,12 @@
             </Grid>
 
             <TextBlock
+                x:Name="logsSectionTitle"
                 Grid.Row="4"
                 Grid.Column="1"
                 Margin="0,16,0,0"
                 Style="{StaticResource BodyStrongTextBlockStyle}"
-                Text="Logs" />
+                Text="日志" />
             <Grid
                 Grid.Row="6"
                 Grid.Column="1"
@@ -324,7 +365,7 @@
                 <Button
                     x:Name="clearLogsButton"
                     Click="clearLogsButton_Click"
-                    Content="Clear" />
+                    Content="清空" />
             </StackPanel>
         </Grid>
     </Grid>

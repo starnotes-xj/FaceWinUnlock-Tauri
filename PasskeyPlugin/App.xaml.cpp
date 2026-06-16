@@ -412,7 +412,7 @@ winrt::fire_and_forget App::SimulateUnLockVault()
     auto vaultUnlockMethod = PluginCredentialManager::getInstance().GetVaultUnlockMethod();
     if (vaultUnlockMethod == VaultUnlockMethod::Consent)
     {
-        consentResult = co_await mainWindow->RequestConsent(L"Unlock FaceWinUnlock Passkey Vault");
+        consentResult = co_await mainWindow->RequestConsent(L"解锁 FaceWinUnlock 通行密钥密码库");
     }
     else if (vaultUnlockMethod == VaultUnlockMethod::Passkey)
     {

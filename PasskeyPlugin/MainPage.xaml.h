@@ -44,6 +44,7 @@ namespace winrt::PasskeyManager::implementation
         winrt::IAsyncAction activatePluginButton_Click(IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         winrt::IAsyncAction VaultUnlockControl_IsCheckedChanged(winrt::Microsoft::UI::Xaml::Controls::ToggleSplitButton const& sender, winrt::Microsoft::UI::Xaml::Controls::ToggleSplitButtonIsCheckedChangedEventArgs const& args);
         winrt::IAsyncAction TestPasskeyVaultUnlock_Click(IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
+        winrt::IAsyncAction languageSelector_SelectionChanged(IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const& args);
 
         winrt::fire_and_forget UpdateCredentialList();
         winrt::fire_and_forget RunFirstRunSetup();
@@ -58,10 +59,10 @@ namespace winrt::PasskeyManager::implementation
             textContent().Inlines().InsertAt(0, statusTextBlock);
         }
         void LogSuccess(const winrt::hstring& input) {
-            UpdatePasskeyOperationStatusText(winrt::hstring{ L"SUCCESS: " + input + L"\U00002705"});
+            UpdatePasskeyOperationStatusText(winrt::hstring{ LocalizedText(L"成功：", L"SUCCESS: ") + input + L"\U00002705"});
         }
         void LogFailure(const winrt::hstring& input, HRESULT hr) {
-            std::wstring result = L"FAILED: " + std::wstring(input.c_str()) + L": " + winrt::to_hstring(static_cast<int>(hr)).c_str() + L"\U0000274C";
+            std::wstring result = std::wstring(LocalizedText(L"失败：", L"FAILED: ").c_str()) + std::wstring(input.c_str()) + L": " + winrt::to_hstring(static_cast<int>(hr)).c_str() + L"\U0000274C";
             UpdatePasskeyOperationStatusText(winrt::hstring{ result });
         }
         void LogInProgress(const winrt::hstring& input) {
@@ -70,10 +71,10 @@ namespace winrt::PasskeyManager::implementation
         void LogWarning(const winrt::hstring& input, HRESULT hr = S_OK) {
             if (hr == S_OK)
             {
-                UpdatePasskeyOperationStatusText(winrt::hstring{ L"WARNING: " + input + L"\U000026A0"});
+                UpdatePasskeyOperationStatusText(winrt::hstring{ LocalizedText(L"警告：", L"WARNING: ") + input + L"\U000026A0"});
                 return;
             }
-            std::wstring result = L"WARNING: " + std::wstring(input.c_str()) + L": " + winrt::to_hstring(static_cast<int>(hr)).c_str() + L"\U000026A0";
+            std::wstring result = std::wstring(LocalizedText(L"警告：", L"WARNING: ").c_str()) + std::wstring(input.c_str()) + L": " + winrt::to_hstring(static_cast<int>(hr)).c_str() + L"\U000026A0";
             UpdatePasskeyOperationStatusText(winrt::hstring{ result });
         }
         void UpdatePluginStateTextBlock(AUTHENTICATOR_STATE state);
@@ -83,13 +84,26 @@ namespace winrt::PasskeyManager::implementation
         winrt::IAsyncAction vaultLockSwitch_Toggled(IInspectable const& sender, Microsoft::UI::Xaml::RoutedEventArgs const& e);
         winrt::IAsyncAction silentOperationSwitch_Toggled(IInspectable const& sender, Microsoft::UI::Xaml::RoutedEventArgs const& e);
     private:
+        enum class UiLanguage
+        {
+            Chinese,
+            English,
+        };
+
         PasskeyManager::CredentialListViewModel m_credentialListViewModel{ nullptr };
         winrt::IMap<winrt::IBuffer, IInspectable> m_selectedCredentialsSet = winrt::single_threaded_map<winrt::IBuffer, IInspectable>();
         wil::unique_registry_watcher m_registryWatcher;
         wil::unique_folder_change_reader_nothrow m_mockCredentialsDBWatcher;
         bool m_setupFlowStarted = false;
+        bool m_updatingLanguageSelector = false;
+        UiLanguage m_uiLanguage = UiLanguage::Chinese;
 
         void UpdateVaultUnlockControlText(bool isLocked);
+        void ApplyLocalizedTexts();
+        winrt::hstring LocalizedText(wchar_t const* chinese, wchar_t const* english) const;
+        UiLanguage LoadPreferredLanguage() const;
+        void SavePreferredLanguage() const;
+        void SetLanguageSelection(UiLanguage language);
     };
 }
 

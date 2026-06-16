@@ -28,6 +28,9 @@ namespace {
 
     constexpr wchar_t c_setupArgument[] = L"-FaceWinUnlockSetup";
     constexpr wchar_t c_setupRequestFileName[] = L"FaceWinUnlockSetupRequested.flag";
+    constexpr wchar_t c_uiLanguageSettingKey[] = L"UILanguage";
+    constexpr wchar_t c_uiLanguageZhCn[] = L"zh-CN";
+    constexpr wchar_t c_uiLanguageEnUs[] = L"en-US";
 
     bool HasSetupArgument(winrt::hstring const& launchArgs)
     {
@@ -132,7 +135,7 @@ namespace winrt::PasskeyManager::implementation
         silentOperationSwitch().IsOn(silentOperation);
         if (FAILED(hr))
         {
-            pluginStateRun().Text(L"Not Registered");
+            pluginStateRun().Text(LocalizedText(L"未注册", L"Not Registered"));
             auto resources = Application::Current().Resources();
             auto neutralBrush = resources.Lookup(winrt::box_value(L"SystemFillColorNeutralBrush")).as<winrt::Microsoft::UI::Xaml::Media::SolidColorBrush>();
             pluginStateRun().Foreground(neutralBrush);
@@ -172,12 +175,12 @@ namespace winrt::PasskeyManager::implementation
             toggleSwitch.IsOn(!toggleSwitchState);
             if (self)
             {
-                self->LogFailure(L"Failed to change 'Vault Unlock Control'", hr);
+                self->LogFailure(self->LocalizedText(L"切换密码库解锁方式失败", L"Failed to change vault unlock control"), hr);
             }
         }
         else if (self)
         {
-            self->LogSuccess(L"Changed 'Vault Unlock Control Method'");
+            self->LogSuccess(self->LocalizedText(L"密码库解锁方式已更新", L"Vault unlock method updated"));
         }
 
         if (unlockMethod == VaultUnlockMethod::Passkey)
@@ -194,11 +197,11 @@ namespace winrt::PasskeyManager::implementation
                 {
                     if (hr == NTE_EXISTS)
                     {
-                        self->LogSuccess(L"Vault Unlock passkey already exists");
+                        self->LogSuccess(self->LocalizedText(L"密码库解锁通行密钥已存在", L"Vault unlock passkey already exists"));
                     }
                     else
                     {
-                        self->LogSuccess(L"Created passkey for Vault Unlock");
+                        self->LogSuccess(self->LocalizedText(L"已创建密码库解锁通行密钥", L"Created passkey for vault unlock"));
                     }
                 }
             }
@@ -209,16 +212,18 @@ namespace winrt::PasskeyManager::implementation
                 {
                     if (hr == NTE_USER_CANCELLED || hr == HRESULT_FROM_WIN32(ERROR_CANCELLED))
                     {
-                        self->LogWarning(L"Passkey registration cancelled", hr);
+                        self->LogWarning(self->LocalizedText(L"通行密钥注册已取消", L"Passkey registration cancelled"), hr);
                     }
                     else
                     {
-                        self->LogFailure(L"Failed to register passkey", hr);
+                        self->LogFailure(self->LocalizedText(L"注册通行密钥失败", L"Failed to register passkey"), hr);
                     }
 
                     if (hr == NTE_NOT_SUPPORTED)
                     {
-                        self->LogWarning(L"The selected authenticator likely does not support PRF. The passkey was created, but FaceWinUnlock could not register it. Delete it before retrying.");
+                        self->LogWarning(self->LocalizedText(
+                            L"当前认证器可能不支持 PRF。通行密钥已创建，但 FaceWinUnlock 无法完成注册，请先删除后再重试。",
+                            L"The selected authenticator likely does not support PRF. The passkey was created, but FaceWinUnlock could not register it. Delete it before retrying."));
                     }
                 }
             }
@@ -240,7 +245,7 @@ namespace winrt::PasskeyManager::implementation
             co_await wil::resume_foreground(DispatcherQueue());
             if (auto self{ weakThis.get() })
             {
-                self->LogFailure(L"Failed to change 'Silent Operation'", hr);
+                self->LogFailure(self->LocalizedText(L"切换静默模式失败", L"Failed to change silent operation"), hr);
             }
         }
         co_return;
@@ -250,6 +255,9 @@ namespace winrt::PasskeyManager::implementation
     {
         m_credentialListViewModel = winrt::make<PasskeyManager::implementation::CredentialListViewModel>();
         DataContext(m_credentialListViewModel);
+        m_uiLanguage = LoadPreferredLanguage();
+        SetLanguageSelection(m_uiLanguage);
+        ApplyLocalizedTexts();
 
         auto weakThis = get_weak();
         m_registryWatcher = wil::make_registry_watcher(
@@ -295,6 +303,82 @@ namespace winrt::PasskeyManager::implementation
         }
     }
 
+    MainPage::UiLanguage MainPage::LoadPreferredLanguage() const
+    {
+        auto values = winrt::Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+        if (auto storedValue = values.TryLookup(c_uiLanguageSettingKey))
+        {
+            auto language = winrt::unbox_value_or<winrt::hstring>(storedValue, c_uiLanguageZhCn);
+            if (language == c_uiLanguageEnUs)
+            {
+                return UiLanguage::English;
+            }
+        }
+        return UiLanguage::Chinese;
+    }
+
+    void MainPage::SavePreferredLanguage() const
+    {
+        auto values = winrt::Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+        values.Insert(
+            c_uiLanguageSettingKey,
+            winrt::box_value(m_uiLanguage == UiLanguage::English ? c_uiLanguageEnUs : c_uiLanguageZhCn));
+    }
+
+    void MainPage::SetLanguageSelection(UiLanguage language)
+    {
+        m_updatingLanguageSelector = true;
+        languageSelector().SelectedIndex(language == UiLanguage::English ? 1 : 0);
+        m_updatingLanguageSelector = false;
+    }
+
+    winrt::hstring MainPage::LocalizedText(wchar_t const* chinese, wchar_t const* english) const
+    {
+        return m_uiLanguage == UiLanguage::English ? winrt::hstring{ english } : winrt::hstring{ chinese };
+    }
+
+    void MainPage::ApplyLocalizedTexts()
+    {
+        headerTitleTextBlock().Text(LocalizedText(L"FaceWinUnlock 通行密钥", L"FaceWinUnlock Passkey"));
+        languageLabelTextBlock().Text(LocalizedText(L"语言", L"Language"));
+        pluginSectionTitle().Text(LocalizedText(L"插件", L"Plugin"));
+        pluginStateLabelRun().Text(LocalizedText(L"状态：", L"State: "));
+        registerPluginButton().Content(winrt::box_value(LocalizedText(L"注册", L"Register")));
+        updatePluginButton().Content(winrt::box_value(LocalizedText(L"更新", L"Update")));
+        activatePluginButton().Content(winrt::box_value(LocalizedText(L"启用", L"Enable")));
+        unregisterPluginButton().Content(winrt::box_value(LocalizedText(L"移除", L"Remove")));
+
+        statsSectionTitle().Text(LocalizedText(L"统计", L"Stats"));
+        localDbLabelRun().Text(LocalizedText(L"本地库：", L"Local DB: "));
+        windowsCacheLabelRun().Text(LocalizedText(L"Windows 缓存：", L"Windows Cache: "));
+        credsStatsRun1().Text(LocalizedText(L"未加载", L"Not available"));
+        credsStatsRun2().Text(LocalizedText(L"未加载", L"Not available"));
+
+        configurationSectionTitle().Text(LocalizedText(L"配置", L"Configuration"));
+        UpdateVaultUnlockControlText(VaultUnlockControl().IsChecked());
+        vaultLockSwitch().Header(winrt::box_value(LocalizedText(L"解锁方式", L"Unlock method")));
+        vaultLockSwitch().OffContent(winrt::box_value(LocalizedText(L"确认", L"Consent")));
+        vaultLockSwitch().OnContent(winrt::box_value(LocalizedText(L"通行密钥", L"Passkey")));
+        silentOperationSwitch().Header(winrt::box_value(LocalizedText(L"最小化界面", L"Minimize UI")));
+        silentOperationSwitch().OffContent(winrt::box_value(LocalizedText(L"显示", L"Show")));
+        silentOperationSwitch().OnContent(winrt::box_value(LocalizedText(L"隐藏", L"Hide")));
+
+        credentialsSectionTitle().Text(LocalizedText(L"凭据", L"Credentials"));
+        refreshButton().Content(winrt::box_value(LocalizedText(L"刷新", L"Refresh")));
+        addCredentialsButton().Content(winrt::box_value(LocalizedText(L"添加", L"Add")));
+        addAllPluginCredentialsMenuItem().Text(LocalizedText(L"全部通行密钥写入缓存", L"All passkeys to cache"));
+        selectedAddButton().Text(LocalizedText(L"所选通行密钥写入缓存", L"Selected passkeys to cache"));
+        deleteCredentialsButton().Content(winrt::box_value(LocalizedText(L"删除", L"Delete")));
+        deleteAllPluginCredentialsMenuItem().Text(LocalizedText(L"清空缓存中的全部通行密钥", L"All passkeys from cache"));
+        deleteSelectedCacheButton().Text(LocalizedText(L"删除缓存中的所选通行密钥", L"Selected passkeys from cache"));
+        deleteSelectedLocalButton().Text(LocalizedText(L"删除所选通行密钥（全部位置）", L"Selected passkeys everywhere"));
+        deleteAllLocalCredentialsMenuItem().Text(LocalizedText(L"清空本地库中的全部通行密钥", L"All passkeys from local"));
+        deleteAllCredentialsMenuItem().Text(LocalizedText(L"清空全部位置的通行密钥", L"All passkeys everywhere"));
+
+        logsSectionTitle().Text(LocalizedText(L"日志", L"Logs"));
+        clearLogsButton().Content(winrt::box_value(LocalizedText(L"清空", L"Clear")));
+    }
+
     winrt::IAsyncAction MainPage::refreshButton_Click(IInspectable const&, RoutedEventArgs const&)
     {
         UpdatePluginEnableState();
@@ -322,22 +406,24 @@ namespace winrt::PasskeyManager::implementation
 
         if (pluginCredentialManager.IsLocalCredentialMetadataLoaded())
         {
-            std::wstring countOfLocalCreds = std::to_wstring(pluginCredentialManager.GetLocalCredentialCount()) + L" passkeys in Local DB";
+            std::wstring countOfLocalCreds = std::to_wstring(pluginCredentialManager.GetLocalCredentialCount())
+                + std::wstring(self->LocalizedText(L" 个通行密钥在本地库", L" passkeys in Local DB").c_str());
             self->credsStatsRun1().Text(countOfLocalCreds);
         }
         else
         {
-            self->credsStatsRun1().Text(L"Local DB not loaded");
+            self->credsStatsRun1().Text(self->LocalizedText(L"未加载", L"Not loaded"));
         }
 
         if (pluginCredentialManager.IsCachedCredentialsMetadataLoaded())
         {
-            std::wstring countOfPluginCreds = std::to_wstring(pluginCredentialManager.GetCachedCredentialCount()) + L" passkeys in system Cache";
+            std::wstring countOfPluginCreds = std::to_wstring(pluginCredentialManager.GetCachedCredentialCount())
+                + std::wstring(self->LocalizedText(L" 个通行密钥在系统缓存", L" passkeys in system cache").c_str());
             self->credsStatsRun2().Text(countOfPluginCreds);
         }
         else
         {
-            self->credsStatsRun2().Text(L"Windows Cache Data not loaded");
+            self->credsStatsRun2().Text(self->LocalizedText(L"未加载", L"Not loaded"));
         }
 
         self->m_credentialListViewModel.credentials().Clear();
@@ -367,7 +453,7 @@ namespace winrt::PasskeyManager::implementation
         auto weakThis = get_weak();
         auto dispatcherQueue = DispatcherQueue();
 
-        LogInProgress(L"Preparing FaceWinUnlock Passkey setup...");
+        LogInProgress(LocalizedText(L"正在准备 FaceWinUnlock 通行密钥设置...", L"Preparing FaceWinUnlock Passkey setup..."));
 
         bool wasRegistered = false;
         HRESULT operationHr = S_OK;
@@ -407,37 +493,43 @@ namespace winrt::PasskeyManager::implementation
         if (FAILED(operationHr))
         {
             self->LogFailure(
-                wasRegistered ? L"WebAuthNPluginUpdateAuthenticatorDetails" : L"WebAuthNPluginAddAuthenticator",
+                wasRegistered
+                    ? self->LocalizedText(L"更新插件详情失败", L"Failed to update plugin details")
+                    : self->LocalizedText(L"注册插件失败", L"Failed to register plugin"),
                 operationHr);
             co_return;
         }
 
-        self->LogSuccess(wasRegistered ? L"Plugin details updated" : L"Plugin registered");
+        self->LogSuccess(wasRegistered
+            ? self->LocalizedText(L"插件详情已更新", L"Plugin details updated")
+            : self->LocalizedText(L"插件已注册", L"Plugin registered"));
 
         if (FAILED(stateHr))
         {
-            self->LogWarning(L"Plugin state refresh failed after setup", stateHr);
+            self->LogWarning(self->LocalizedText(L"设置后刷新插件状态失败", L"Plugin state refresh failed after setup"), stateHr);
             co_return;
         }
 
         if (pluginState == AuthenticatorState_Enabled)
         {
-            self->LogSuccess(L"Plugin is already enabled");
+            self->LogSuccess(self->LocalizedText(L"插件已启用", L"Plugin is already enabled"));
             co_return;
         }
 
-        self->LogInProgress(L"Opening Windows passkey settings. Enable FaceWinUnlock Passkey there...");
+        self->LogInProgress(self->LocalizedText(
+            L"正在打开 Windows 通行密钥设置，请在那里启用 FaceWinUnlock 通行密钥...",
+            L"Opening Windows passkey settings. Enable FaceWinUnlock Passkey there..."));
         auto uri = Windows::Foundation::Uri(L"ms-settings:passkeys-advancedoptions");
         bool launched = co_await Windows::System::Launcher::LaunchUriAsync(uri);
         if (!launched)
         {
-            self->LogWarning(L"Could not open Windows passkey settings");
+            self->LogWarning(self->LocalizedText(L"无法打开 Windows 通行密钥设置", L"Could not open Windows passkey settings"));
         }
     }
 
     winrt::IAsyncAction MainPage::unregisterPluginButton_Click(IInspectable const&, RoutedEventArgs const&)
     {
-        LogInProgress(L"Unregistering plugin...");
+        LogInProgress(LocalizedText(L"正在移除插件...", L"Unregistering plugin..."));
         auto weakThis = get_weak();
 
         if (m_cookie.has_value())
@@ -459,15 +551,15 @@ namespace winrt::PasskeyManager::implementation
         self->UpdatePluginEnableState();
         if (FAILED(hr))
         {
-            self->LogFailure(L"Failed to Unregister plugin: ", hr);
+            self->LogFailure(self->LocalizedText(L"移除插件失败", L"Failed to unregister plugin"), hr);
             co_return;
         }
-        self->LogSuccess(L"Plugin unregistered");
+        self->LogSuccess(self->LocalizedText(L"插件已移除", L"Plugin unregistered"));
     }
 
     winrt::IAsyncAction MainPage::registerPluginButton_Click(IInspectable const&, RoutedEventArgs const&)
     {
-        LogInProgress(L"Registering plugin...");
+        LogInProgress(LocalizedText(L"正在注册插件...", L"Registering plugin..."));
         auto weakThis = get_weak();
         co_await winrt::resume_background();
         HRESULT hr = PluginRegistrationManager::getInstance().RegisterPlugin();
@@ -483,17 +575,17 @@ namespace winrt::PasskeyManager::implementation
 
         if (FAILED(hr))
         {
-            self->LogFailure(L"WebAuthNPluginAddAuthenticator", hr);
+            self->LogFailure(self->LocalizedText(L"注册插件失败", L"Failed to register plugin"), hr);
             co_return;
         }
-        self->LogSuccess(L"Plugin registered");
+        self->LogSuccess(self->LocalizedText(L"插件已注册", L"Plugin registered"));
 
         m_cookie = RegisterWebAuthNStatusChangeCallback(static_cast<void*>(this));
     }
 
     winrt::IAsyncAction MainPage::updatePluginButton_Click(IInspectable const&, RoutedEventArgs const&)
     {
-        LogInProgress(L"Updating plugin...");
+        LogInProgress(LocalizedText(L"正在更新插件...", L"Updating plugin..."));
         auto weakThis = get_weak();
         co_await winrt::resume_background();
         HRESULT hr = PluginRegistrationManager::getInstance().UpdatePlugin();
@@ -510,15 +602,15 @@ namespace winrt::PasskeyManager::implementation
 
         if (FAILED(hr))
         {
-            self->LogFailure(L"WebAuthNPluginUpdateAuthenticatorDetails", hr);
+            self->LogFailure(self->LocalizedText(L"更新插件失败", L"Failed to update plugin"), hr);
             co_return;
         }
-        self->LogSuccess(L"Plugin updated");
+        self->LogSuccess(self->LocalizedText(L"插件已更新", L"Plugin updated"));
     }
 
     winrt::IAsyncAction MainPage::addAllPluginCredentials_Click(IInspectable const&, RoutedEventArgs const&)
     {
-        LogInProgress(L"Adding All credentials to windows...");
+        LogInProgress(LocalizedText(L"正在把全部通行密钥写入 Windows 缓存...", L"Adding all credentials to Windows..."));
 
         auto weakThis = get_weak();
         co_await winrt::resume_background();
@@ -535,22 +627,22 @@ namespace winrt::PasskeyManager::implementation
         self->UpdateCredentialList();
         if (FAILED(hr))
         {
-            self->LogFailure(L"Failed to add credential to system cache: ", hr);
+            self->LogFailure(self->LocalizedText(L"写入系统缓存失败", L"Failed to add credentials to system cache"), hr);
             co_return;
         }
-        self->LogSuccess(L"Credentials synced");
+        self->LogSuccess(self->LocalizedText(L"凭据已同步", L"Credentials synced"));
         co_return;
     }
 
     winrt::IAsyncAction MainPage::addSelectedCredentials_Click(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&)
     {
-        LogInProgress(L"Adding selected passkey metadata to system cache...");
+        LogInProgress(LocalizedText(L"正在把所选通行密钥写入系统缓存...", L"Adding selected passkey metadata to system cache..."));
 
         std::vector<std::vector<UINT8>> credentialIdList;
         auto selectedItems = credentialListView().SelectedItems();
         if (selectedItems.Size() == 0)
         {
-            LogWarning(L"No credentials selected", E_NOT_SET);
+            LogWarning(LocalizedText(L"未选择任何凭据", L"No credentials selected"), E_NOT_SET);
             co_return;
         }
 
@@ -563,7 +655,9 @@ namespace winrt::PasskeyManager::implementation
             credentialIdList.push_back(credentialIdToAdd);
         }
 
-        hstring statusText = L"Adding " + winrt::to_hstring(credentialIdList.size()) + L" selected credentials...";
+        hstring statusText = m_uiLanguage == UiLanguage::English
+            ? (L"Adding " + winrt::to_hstring(credentialIdList.size()) + L" selected credentials...")
+            : (L"正在写入 " + winrt::to_hstring(credentialIdList.size()) + L" 个所选凭据...");
         UpdatePasskeyOperationStatusText(statusText);
 
         auto weakThis = get_weak();
@@ -581,16 +675,16 @@ namespace winrt::PasskeyManager::implementation
         self->UpdateCredentialList();
         if (FAILED(hr))
         {
-            self->LogFailure(L"Failed to add credentials to system cache", hr);
+            self->LogFailure(self->LocalizedText(L"写入系统缓存失败", L"Failed to add credentials to system cache"), hr);
             co_return;
         }
-        self->LogSuccess(L"Selected credentials are added to system cache");
+        self->LogSuccess(self->LocalizedText(L"所选凭据已写入系统缓存", L"Selected credentials are added to system cache"));
         co_return;
     }
 
     winrt::IAsyncAction MainPage::deleteAllPluginCredentials_Click(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&)
     {
-        LogInProgress(L"Deleting all credentials stored on this device...");
+        LogInProgress(LocalizedText(L"正在删除系统缓存中的全部凭据...", L"Deleting all credentials stored on this device..."));
 
         auto weakThis = get_weak();
         co_await winrt::resume_background();
@@ -607,23 +701,23 @@ namespace winrt::PasskeyManager::implementation
         self->UpdateCredentialList();
         if (FAILED(hr))
         {
-            self->LogFailure(L"Failed to delete credential from system cache", hr);
+            self->LogFailure(self->LocalizedText(L"删除系统缓存凭据失败", L"Failed to delete credentials from system cache"), hr);
             co_return;
         }
-        self->LogSuccess(L"All credentials deleted from system cache");
+        self->LogSuccess(self->LocalizedText(L"系统缓存中的全部凭据已删除", L"All credentials deleted from system cache"));
         co_return;
     }
 
     winrt::IAsyncAction MainPage::deleteSelectedPluginCredentials_Click(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&)
     {
-        LogInProgress(L"Deleting selected credentials...");
+        LogInProgress(LocalizedText(L"正在删除所选凭据...", L"Deleting selected credentials..."));
 
         // find the list of creds with checkbox checked
         std::vector<std::vector<UINT8>> credentialIdList;
         auto selectedItems = credentialListView().SelectedItems();
         if (selectedItems.Size() == 0)
         {
-            LogWarning(L"No credentials selected", E_NOT_SET);
+            LogWarning(LocalizedText(L"未选择任何凭据", L"No credentials selected"), E_NOT_SET);
             co_return;
         }
 
@@ -637,7 +731,9 @@ namespace winrt::PasskeyManager::implementation
         }
 
         // update the status block with count of selected creds
-        hstring statusText = L"Deleting " + winrt::to_hstring(credentialIdList.size()) + L" selected credentials...";
+        hstring statusText = m_uiLanguage == UiLanguage::English
+            ? (L"Deleting " + winrt::to_hstring(credentialIdList.size()) + L" selected credentials...")
+            : (L"正在删除 " + winrt::to_hstring(credentialIdList.size()) + L" 个所选凭据...");
         UpdatePasskeyOperationStatusText(statusText);
 
         auto weakThis = get_weak();
@@ -655,23 +751,23 @@ namespace winrt::PasskeyManager::implementation
         self->UpdateCredentialList();
         if (FAILED(hr))
         {
-            self->LogFailure(L"Failed to delete credentials from system cache", hr);
+            self->LogFailure(self->LocalizedText(L"删除系统缓存凭据失败", L"Failed to delete credentials from system cache"), hr);
             co_return;
         }
-        self->LogSuccess(L"Selected credentials deleted from system cache");
+        self->LogSuccess(self->LocalizedText(L"已删除系统缓存中的所选凭据", L"Selected credentials deleted from system cache"));
         co_return;
     }
 
     winrt::IAsyncAction MainPage::deleteSelectedPluginCredentialsEverywhere_Click(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&)
     {
-        LogInProgress(L"Deleting selected credentials everywhere...");
+        LogInProgress(LocalizedText(L"正在删除全部位置中的所选凭据...", L"Deleting selected credentials everywhere..."));
 
         // find the list of creds with checkbox checked
         std::vector<std::vector<UINT8>> credentialIdList;
         auto selectedItems = credentialListView().SelectedItems();
         if (selectedItems.Size() == 0)
         {
-            LogWarning(L"No credentials selected", E_NOT_SET);
+            LogWarning(LocalizedText(L"未选择任何凭据", L"No credentials selected"), E_NOT_SET);
             co_return;
         }
 
@@ -685,7 +781,9 @@ namespace winrt::PasskeyManager::implementation
         }
 
         // update the status block with count of selected creds
-        hstring statusText = winrt::to_hstring(credentialIdList.size()) + L" credentials selected...";
+        hstring statusText = m_uiLanguage == UiLanguage::English
+            ? (winrt::to_hstring(credentialIdList.size()) + L" credentials selected...")
+            : (L"已选择 " + winrt::to_hstring(credentialIdList.size()) + L" 个凭据...");
         UpdatePasskeyOperationStatusText(statusText);
 
         auto weakThis = get_weak();
@@ -703,10 +801,10 @@ namespace winrt::PasskeyManager::implementation
         self->UpdateCredentialList();
         if (FAILED(hr))
         {
-            self->LogFailure(L"Failed to delete credentials", hr);
+            self->LogFailure(self->LocalizedText(L"删除凭据失败", L"Failed to delete credentials"), hr);
             co_return;
         }
-        self->LogSuccess(L"Selected credentials deleted everywhere");
+        self->LogSuccess(self->LocalizedText(L"已删除全部位置中的所选凭据", L"Selected credentials deleted everywhere"));
         co_return;
     }
 
@@ -718,7 +816,7 @@ namespace winrt::PasskeyManager::implementation
 
     winrt::IAsyncAction MainPage::deleteAllLocalCredentials_Click(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&)
     {
-        LogInProgress(L"Deleting all local credentials...");
+        LogInProgress(LocalizedText(L"正在删除本地库中的全部凭据...", L"Deleting all local credentials..."));
 
         auto weakThis = get_weak();
         co_await winrt::resume_background();
@@ -736,16 +834,16 @@ namespace winrt::PasskeyManager::implementation
         self->UpdateCredentialList();
         if (resetResult)
         {
-            self->LogFailure(L"Failed to delete all local credentials", E_FAIL);
+            self->LogFailure(self->LocalizedText(L"删除本地库全部凭据失败", L"Failed to delete all local credentials"), E_FAIL);
             co_return;
         }
-        self->LogSuccess(L"All local credentials deleted");
+        self->LogSuccess(self->LocalizedText(L"本地库中的全部凭据已删除", L"All local credentials deleted"));
         co_return;
     }
 
     winrt::IAsyncAction MainPage::deleteAllCredentials_Click(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&)
     {
-        LogInProgress(L"Deleting all credentials stored on this device and cache...");
+        LogInProgress(LocalizedText(L"正在删除全部位置中的所有凭据...", L"Deleting all credentials stored on this device and cache..."));
         auto weakThis = get_weak();
         co_await winrt::resume_background();
         auto& credManager = PluginCredentialManager::getInstance();
@@ -762,10 +860,10 @@ namespace winrt::PasskeyManager::implementation
         self->UpdateCredentialList();
         if (FAILED(hr) || !resetResult)
         {
-            self->LogFailure(L"Failed to delete all credentials", hr);
+            self->LogFailure(self->LocalizedText(L"删除全部凭据失败", L"Failed to delete all credentials"), hr);
             co_return;
         }
-        self->LogSuccess(L"All credentials deleted");
+        self->LogSuccess(self->LocalizedText(L"全部凭据已删除", L"All credentials deleted"));
     }
 
     void MainPage::UpdatePluginStateTextBlock(AUTHENTICATOR_STATE state)
@@ -778,15 +876,15 @@ namespace winrt::PasskeyManager::implementation
         switch (state)
         {
         case AuthenticatorState_Enabled:
-            pluginStateRun().Text(L"Enabled");
+            pluginStateRun().Text(LocalizedText(L"已启用", L"Enabled"));
             pluginStateRun().Foreground(successBrush);
             break;
         case AuthenticatorState_Disabled:
-            pluginStateRun().Text(L"Disabled");
+            pluginStateRun().Text(LocalizedText(L"未启用", L"Disabled"));
             pluginStateRun().Foreground(criticalBrush);
             break;
         default:
-            pluginStateRun().Text(L"Unknown");
+            pluginStateRun().Text(LocalizedText(L"未知", L"Unknown"));
             pluginStateRun().Foreground(cautionBrush);
             break;
         }
@@ -814,12 +912,27 @@ namespace winrt::PasskeyManager::implementation
     {
         if (isLocked)
         {
-            VaultUnlockControl().Content(box_value(L"Vault Locked"));
+            VaultUnlockControl().Content(box_value(LocalizedText(L"密码库已锁定", L"Vault locked")));
         }
         else
         {
-            VaultUnlockControl().Content(box_value(L"Vault Unlocked"));
+            VaultUnlockControl().Content(box_value(LocalizedText(L"密码库已解锁", L"Vault unlocked")));
         }
+    }
+
+    winrt::IAsyncAction MainPage::languageSelector_SelectionChanged(IInspectable const&, winrt::Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const&)
+    {
+        if (m_updatingLanguageSelector)
+        {
+            co_return;
+        }
+
+        m_uiLanguage = languageSelector().SelectedIndex() == 1 ? UiLanguage::English : UiLanguage::Chinese;
+        SavePreferredLanguage();
+        ApplyLocalizedTexts();
+        UpdatePluginEnableState();
+        UpdateCredentialList();
+        co_return;
     }
 
     winrt::IAsyncAction MainPage::VaultUnlockControl_IsCheckedChanged(winrt::Microsoft::UI::Xaml::Controls::ToggleSplitButton const& sender, winrt::Microsoft::UI::Xaml::Controls::ToggleSplitButtonIsCheckedChangedEventArgs const& args)
@@ -831,7 +944,7 @@ namespace winrt::PasskeyManager::implementation
 
         if (FAILED(hr))
         {
-            LogFailure(L"Failed to change 'Simulate Vault Unlock'", hr);
+            LogFailure(LocalizedText(L"切换密码库锁定状态失败", L"Failed to change simulated vault unlock"), hr);
         }
 
         UpdateVaultUnlockControlText(toggleSplitState);
