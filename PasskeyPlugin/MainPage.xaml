@@ -33,7 +33,9 @@
             <RowDefinition Height="48" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
-        <Grid ColumnSpacing="12">
+        <Grid
+            Padding="0,0,160,0"
+            ColumnSpacing="12">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
@@ -62,7 +64,7 @@
                 x:Name="languageSelector"
                 Grid.Column="2"
                 Width="104"
-                Margin="0,8,16,8"
+                Margin="0,8,0,8"
                 SelectedIndex="0"
                 SelectionChanged="languageSelector_SelectionChanged">
                 <ComboBoxItem Content="中文" />
