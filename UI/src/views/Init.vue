@@ -1,12 +1,11 @@
 <script setup>
-    import { ref, onMounted, reactive, toRaw } from 'vue';
+    import { ref, onMounted, reactive } from 'vue';
     import { useRouter } from 'vue-router';
     import { ElMessage, ElMessageBox } from 'element-plus';
     import { invoke } from '@tauri-apps/api/core';
     import { useOptionsStore } from "../stores/options";
     import AccountAuthForm from '../components/AccountAuthForm.vue';
     import {handleLocalAccount, formatObjectString} from '../utils/function'
-    import { select, insert, update } from '../utils/sqlite'
     import { info, error as errorLog, warn } from '@tauri-apps/plugin-log';
 
     const checks = reactive({
@@ -27,84 +26,63 @@
     const optionsStore = useOptionsStore();
     const riskDialogVisible = ref(false);
 
-    // ── Passkey 提取 ──────────────────────────────────────────────
-    const extractPin = ref('');
-    const extractLoading = ref(false);
-    const extractMsg = ref('');
-    const extractOk = ref(false);
+    const passkeyPlugin = reactive({
+        loading: false,
+        installed: false,
+        sampleInstalled: false,
+        version: '',
+        available: false,
+    });
 
-    function extractCurrentWindowsUserName(result) {
-        if (typeof result === 'string') {
-            return result.trim();
-        }
-        const data = result?.data;
-        if (typeof data === 'string') {
-            return data.trim();
-        }
-        if (typeof data?.username === 'string') {
-            return data.username.trim();
-        }
-        return '';
-    }
-
-    async function saveExtractedPinToStore(pin) {
-        const currentUser = extractCurrentWindowsUserName(await invoke('get_now_username')) || authForm.username.trim();
-        if (!currentUser) {
-            throw new Error('未获取到当前 Windows 用户名');
-        }
-
-        const enc = await invoke('encrypt_pin', { userName: currentUser, pin });
-        const existing = await select('pin_store', ['id'], 'user_name = ?', [currentUser]);
-        if (existing.rows.length > 0) {
-            await update('pin_store', {
-                pin_blob: enc.blob_b64,
-                pin_entropy: enc.entropy_b64,
-                pin_hash: enc.pin_hash,
-                crypto_method: 'dpapi-sid',
-                enabled: 1,
-            }, 'user_name = ?', [currentUser]);
-        } else {
-            await insert(
-                'pin_store',
-                ['user_name', 'pin_blob', 'pin_entropy', 'pin_hash', 'crypto_method', 'enabled'],
-                [currentUser, enc.blob_b64, enc.entropy_b64, enc.pin_hash, 'dpapi-sid', 1]
-            );
-        }
-    }
-
-    async function extractPasskeyKeys() {
-        if (!extractPin.value || extractPin.value.length < 4) {
-            extractMsg.value = '请输入 Windows Hello PIN（至少4位）'
-            extractOk.value = false
-            return
-        }
-        extractLoading.value = true
-        extractMsg.value = ''
+    async function refreshPasskeyPluginStatus() {
+        passkeyPlugin.loading = true;
         try {
-            const result = await invoke('extract_passkey_keys', { pin: extractPin.value })
-            extractMsg.value = result.msg || '完成'
-            extractOk.value = result.code === 200
-            if (extractOk.value) {
-                // 自动启用 Passkey + 同步注册表 + 把 PIN 写入 pin_store
-                optionsStore.saveOptions({ passkeyEnabled: 'true', pinEnabled: 'true' })
-                invoke('write_to_registry', { items: [{ key: 'PASSKEY_TAKEOVER_ENABLED', value: '1' }, { key: 'PIN_ENABLED', value: '1' }] }).catch(() => {})
-                try {
-                    await saveExtractedPinToStore(extractPin.value)
-                    extractPin.value = ''
-                    ElMessage.success('Passkey 密钥已提取，PIN 已保存！')
-                } catch (pinError) {
-                    warn(formatObjectString('初始化阶段保存 PIN 失败：', pinError))
-                    ElMessage.success('Passkey 密钥已提取（PIN 保存失败，请在设置页手动存储）')
-                }
-            } else {
-                ElMessage.warning(result.msg || '提取失败')
-            }
-        } catch (e) {
-            extractMsg.value = String(e)
-            extractOk.value = false
-            ElMessage.error('提取失败: ' + String(e))
+            const result = await invoke('get_passkey_plugin_status');
+            const status = result?.data || {};
+            passkeyPlugin.installed = Boolean(status.installed);
+            passkeyPlugin.sampleInstalled = Boolean(status.sample_installed);
+            passkeyPlugin.version = status.package?.version || status.sample_package?.version || '';
+            passkeyPlugin.available = Boolean(status.msix_available && status.certificate_available);
+        } catch (error) {
+            warn(formatObjectString('查询 Passkey 插件状态失败：', error));
         } finally {
-            extractLoading.value = false
+            passkeyPlugin.loading = false;
+        }
+    }
+
+    async function installPasskeyPlugin() {
+        let replaceSample = false;
+        if (passkeyPlugin.sampleInstalled && !passkeyPlugin.installed) {
+            try {
+                await ElMessageBox.confirm(
+                    '当前安装的是 Contoso 测试插件。替换后，该测试插件本地保存的通行密钥会被删除，网站端旧凭据也需要重新注册。确定迁移到正式插件吗？',
+                    '迁移 Passkey 插件',
+                    { type: 'warning', confirmButtonText: '确认迁移', cancelButtonText: '保留测试插件' }
+                );
+                replaceSample = true;
+            } catch {
+                return;
+            }
+        }
+
+        passkeyPlugin.loading = true;
+        try {
+            const result = await invoke('install_passkey_plugin', { replaceSample });
+            ElMessage.success(result?.msg || 'Passkey 插件已安装');
+            await refreshPasskeyPluginStatus();
+            await invoke('open_passkey_plugin_manager');
+        } catch (error) {
+            ElMessage.error(formatObjectString('安装 Passkey 插件失败：', error));
+        } finally {
+            passkeyPlugin.loading = false;
+        }
+    }
+
+    async function openPasskeyPluginManager() {
+        try {
+            await invoke('open_passkey_plugin_manager');
+        } catch (error) {
+            ElMessage.error(formatObjectString('打开 Passkey 插件管理器失败：', error));
         }
     }
 
@@ -168,6 +146,7 @@
 
     onMounted(() => {
         performCheck();
+        refreshPasskeyPluginStatus();
     });
 
     // 部署
@@ -294,7 +273,7 @@
             <el-steps :active="activeStep" finish-status="success" align-center>
                 <el-step title="环境检测" />
                 <el-step title="系统部署" />
-                <el-step title="Passkey 提取" />
+                <el-step title="Passkey 插件" />
                 <el-step title="账户验证" />
             </el-steps>
 
@@ -399,34 +378,49 @@
 
                 <div v-if="activeStep === 2">
                     <div class="deploy-box">
-                        <h3>提取 Passkey 密钥</h3>
-                        <p>从 Windows Hello NGC 容器中提取已注册的 FIDO2 私钥，</p>
-                        <p>用于人脸识别后绕过 PIN 直接签名 passkey 断言。</p>
-                        <div style="max-width: 360px; margin: 20px auto; text-align: left;">
-                            <el-input
-                                v-model="extractPin"
-                                type="password"
-                                placeholder="输入 Windows Hello PIN"
-                                show-password
-                                :disabled="extractLoading"
-                                style="margin-bottom: 12px;"
+                        <h3>启用官方 Passkey Provider</h3>
+                        <p>插件创建并持有自己的不可导出密钥，人脸识别只负责用户验证。</p>
+                        <p>不会提取 Windows Hello 私钥，也不需要保存或自动填写 PIN。</p>
+                        <div style="max-width: 520px; margin: 20px auto;">
+                            <el-alert
+                                v-if="passkeyPlugin.installed"
+                                type="success"
+                                :title="`正式插件已安装${passkeyPlugin.version ? `（${passkeyPlugin.version}）` : ''}`"
+                                description="请在插件管理器中注册并启用 Provider，然后用该插件重新注册网站通行密钥。"
+                                show-icon
+                                :closable="false"
                             />
-                            <el-button
-                                type="primary"
-                                :loading="extractLoading"
-                                :disabled="!extractPin || extractPin.length < 4"
-                                @click="extractPasskeyKeys"
-                                style="width: 100%;"
-                            >{{ extractLoading ? '提取中…' : '开始提取' }}</el-button>
-                            <p v-if="extractMsg" :style="{color: extractOk ? '#67C23A' : '#F56C6C', marginTop: '10px', textAlign: 'center'}">
-                                {{ extractMsg }}
-                            </p>
-                            <p style="margin-top:16px; color:#909399; font-size:13px;">
-                                提取的私钥文件保存在 <code>C:\FaceWinUnlock\captured_keys\</code>，<br/>
-                                配置文件写入安装目录 <code>passkey_keys.json</code>。
-                            </p>
+                            <el-alert
+                                v-else-if="passkeyPlugin.sampleInstalled"
+                                type="warning"
+                                title="检测到 Contoso 测试插件"
+                                description="测试链路可继续使用；迁移到正式插件会删除测试插件本地凭据，网站端需重新注册。"
+                                show-icon
+                                :closable="false"
+                            />
+                            <el-alert
+                                v-else
+                                type="info"
+                                title="尚未安装 Passkey 插件"
+                                description="安装后仍需在 Windows 的插件管理器中完成一次注册和启用。"
+                                show-icon
+                                :closable="false"
+                            />
+                            <div style="display:flex; justify-content:center; gap:10px; margin-top:16px;">
+                                <el-button
+                                    type="primary"
+                                    :loading="passkeyPlugin.loading"
+                                    :disabled="!passkeyPlugin.available"
+                                    @click="installPasskeyPlugin"
+                                >{{ passkeyPlugin.installed ? '更新正式插件' : '安装正式插件' }}</el-button>
+                                <el-button
+                                    v-if="passkeyPlugin.installed || passkeyPlugin.sampleInstalled"
+                                    @click="openPasskeyPluginManager"
+                                >打开插件管理器</el-button>
+                                <el-button :loading="passkeyPlugin.loading" @click="refreshPasskeyPluginStatus">刷新状态</el-button>
+                            </div>
                         </div>
-                        <el-button type="primary" @click="handleNextStep">跳过 / 下一步</el-button>
+                        <el-button type="primary" @click="handleNextStep">下一步</el-button>
                     </div>
                 </div>
 

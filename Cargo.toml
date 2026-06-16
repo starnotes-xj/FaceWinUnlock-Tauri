@@ -3,6 +3,8 @@ members = [
     "Server",
     "UI/src-tauri",
     "Unlock",
-    "key_capture",
 ]
+# key_capture 是已停用的旧实验工具（Approach B 的密钥捕获/验证），不再随产品编译。
+# 目录保留以备查阅；如需运行可单独 `cargo run --manifest-path key_capture/Cargo.toml`。
+exclude = ["key_capture"]
 resolver = "2"

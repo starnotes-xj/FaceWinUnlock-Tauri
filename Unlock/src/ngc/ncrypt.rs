@@ -29,6 +29,263 @@ pub struct NcryptSignResult {
     pub log: Vec<String>,
 }
 
+/// Sign a WebAuthn assertion digest with the real non-exportable FIDO key.
+///
+/// Passport KSP key names contain SHA-256(rpId), so the relying party selects
+/// the key without relying on the incorrect 7.dat credential-id mapping.
+pub fn sign_fido_assertion_hash(
+    rp_id: &str,
+    pin: &str,
+    digest: &[u8],
+) -> Result<(Vec<u8>, String), String> {
+    use sha2::{Digest, Sha256};
+    use windows::Win32::Security::Cryptography::{
+        BCRYPT_PKCS1_PADDING_INFO, CERT_KEY_SPEC, NCryptEnumKeys, NCryptFreeBuffer,
+        NCryptFreeObject, NCryptOpenKey, NCryptOpenStorageProvider, NCryptSetProperty,
+        NCryptKeyName, NCRYPT_FLAGS, NCRYPT_HANDLE, NCRYPT_KEY_HANDLE,
+        NCRYPT_PAD_PKCS1_FLAG, NCRYPT_PROV_HANDLE, NCRYPT_SILENT_FLAG,
+    };
+    use windows_core::PCWSTR;
+
+    if digest.len() != 32 {
+        return Err(format!(
+            "WebAuthn digest must be 32 bytes, got {}",
+            digest.len()
+        ));
+    }
+
+    let provider_name: Vec<u16> = "Microsoft Passport Key Storage Provider"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut provider = NCRYPT_PROV_HANDLE::default();
+    unsafe {
+        NCryptOpenStorageProvider(
+            &mut provider,
+            PCWSTR::from_raw(provider_name.as_ptr()),
+            0,
+        )
+        .map_err(|e| format!("NCryptOpenStorageProvider: {e}"))?;
+    }
+
+    let rp_hash = hex::encode(Sha256::digest(rp_id.as_bytes()));
+    let mut selected_key: Option<String> = None;
+    let mut enum_state: *mut core::ffi::c_void = std::ptr::null_mut();
+    loop {
+        let mut key_name_ptr: *mut NCryptKeyName = std::ptr::null_mut();
+        let result = unsafe {
+            NCryptEnumKeys(
+                provider,
+                PCWSTR::null(),
+                &mut key_name_ptr,
+                &mut enum_state,
+                NCRYPT_FLAGS(0),
+            )
+        };
+        match result {
+            Ok(()) => {
+                if key_name_ptr.is_null() {
+                    break;
+                }
+                unsafe {
+                    let name = (*key_name_ptr).pszName.to_string().unwrap_or_default();
+                    let _ = NCryptFreeBuffer(key_name_ptr as *mut core::ffi::c_void);
+                    if name.contains("FIDO_AUTHENTICATOR")
+                        && name.to_ascii_lowercase().contains(&rp_hash)
+                    {
+                        selected_key = Some(name);
+                        break;
+                    }
+                }
+            }
+            Err(e) if (e.code().0 as u32) == 0x8009_002A => break,
+            Err(e) => {
+                unsafe {
+                    if !enum_state.is_null() {
+                        let _ = NCryptFreeBuffer(enum_state);
+                    }
+                    let _ = NCryptFreeObject(NCRYPT_HANDLE(provider.0));
+                }
+                return Err(format!("NCryptEnumKeys: {e}"));
+            }
+        }
+    }
+    unsafe {
+        if !enum_state.is_null() {
+            let _ = NCryptFreeBuffer(enum_state);
+        }
+    }
+
+    let key_name = match selected_key {
+        Some(name) => name,
+        None => {
+            unsafe {
+                let _ = NCryptFreeObject(NCRYPT_HANDLE(provider.0));
+            }
+            return Err(format!("no Passport KSP FIDO key for rpId {rp_id}"));
+        }
+    };
+
+    let key_name_wide: Vec<u16> = key_name.encode_utf16().chain(Some(0)).collect();
+    let pin_utf16: Vec<u8> = pin
+        .encode_utf16()
+        .chain(Some(0))
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let pin_utf16_without_null: Vec<u8> =
+        pin.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let strategies = [
+        ("SmartCardPin", pin_utf16.as_slice()),
+        ("SmartcardPin", pin_utf16.as_slice()),
+        ("PIN", pin_utf16.as_slice()),
+        ("SmartCardPin", pin_utf16_without_null.as_slice()),
+        ("SmartcardPin", pin_utf16_without_null.as_slice()),
+    ];
+
+    let mut last_error = String::new();
+    for (property_name, pin_bytes) in strategies {
+        let mut key = NCRYPT_KEY_HANDLE::default();
+        if let Err(e) = unsafe {
+            NCryptOpenKey(
+                provider,
+                &mut key,
+                PCWSTR::from_raw(key_name_wide.as_ptr()),
+                CERT_KEY_SPEC(0),
+                NCRYPT_FLAGS(0),
+            )
+        } {
+            last_error = format!("NCryptOpenKey: {e}");
+            continue;
+        }
+
+        let property_wide: Vec<u16> =
+            property_name.encode_utf16().chain(Some(0)).collect();
+        if let Err(e) = unsafe {
+            NCryptSetProperty(
+                NCRYPT_HANDLE(key.0),
+                PCWSTR::from_raw(property_wide.as_ptr()),
+                pin_bytes,
+                NCRYPT_FLAGS(0),
+            )
+        } {
+            last_error = format!("NCryptSetProperty({property_name}): {e}");
+            unsafe {
+                let _ = NCryptFreeObject(NCRYPT_HANDLE(key.0));
+            }
+            continue;
+        }
+
+        let algorithm = get_string_prop(NCRYPT_HANDLE(key.0), "Algorithm Name")
+            .unwrap_or_else(|| "RSA".to_string());
+        let result = if algorithm.contains("ECDSA") || algorithm.contains("ECDH") {
+            unsafe {
+                ncrypt_sign_hash_raw(
+                    key,
+                    digest,
+                    None,
+                    NCRYPT_SILENT_FLAG,
+                )
+            }
+            .map(|raw| raw_ecdsa_signature_to_der(&raw))
+        } else {
+            let sha256_wide: Vec<u16> =
+                "SHA256".encode_utf16().chain(Some(0)).collect();
+            let padding = BCRYPT_PKCS1_PADDING_INFO {
+                pszAlgId: PCWSTR::from_raw(sha256_wide.as_ptr()),
+            };
+            let flags =
+                NCRYPT_FLAGS(NCRYPT_PAD_PKCS1_FLAG.0 | NCRYPT_SILENT_FLAG.0);
+            unsafe {
+                ncrypt_sign_hash_raw(
+                    key,
+                    digest,
+                    Some(&padding as *const _ as *const core::ffi::c_void),
+                    flags,
+                )
+            }
+        };
+
+        unsafe {
+            let _ = NCryptFreeObject(NCRYPT_HANDLE(key.0));
+        }
+        match result {
+            Ok(signature) => {
+                unsafe {
+                    let _ = NCryptFreeObject(NCRYPT_HANDLE(provider.0));
+                }
+                return Ok((signature, key_name));
+            }
+            Err(e) => {
+                last_error =
+                    format!("NCryptSignHash({property_name}): {e}");
+            }
+        }
+    }
+
+    unsafe {
+        let _ = NCryptFreeObject(NCRYPT_HANDLE(provider.0));
+    }
+    Err(last_error)
+}
+
+unsafe fn ncrypt_sign_hash_raw(
+    key: windows::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
+    digest: &[u8],
+    padding_info: Option<*const core::ffi::c_void>,
+    flags: windows::Win32::Security::Cryptography::NCRYPT_FLAGS,
+) -> Result<Vec<u8>, windows_core::Error> {
+    use windows::Win32::Security::Cryptography::NCryptSignHash;
+
+    let mut signature_len = 0u32;
+    NCryptSignHash(
+        key,
+        padding_info,
+        digest,
+        None,
+        &mut signature_len,
+        flags,
+    )?;
+    let mut signature = vec![0u8; signature_len as usize];
+    NCryptSignHash(
+        key,
+        padding_info,
+        digest,
+        Some(&mut signature),
+        &mut signature_len,
+        flags,
+    )?;
+    signature.truncate(signature_len as usize);
+    Ok(signature)
+}
+
+fn raw_ecdsa_signature_to_der(raw: &[u8]) -> Vec<u8> {
+    let half = raw.len() / 2;
+    let (r, s) = (&raw[..half], &raw[half..]);
+    let encode_integer = |value: &[u8]| {
+        let first_non_zero = value
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(value.len().saturating_sub(1));
+        let value = &value[first_non_zero..];
+        let mut encoded = Vec::with_capacity(value.len() + 3);
+        encoded.push(0x02);
+        encoded.push((value.len() + usize::from(value[0] >= 0x80)) as u8);
+        if value[0] >= 0x80 {
+            encoded.push(0);
+        }
+        encoded.extend_from_slice(value);
+        encoded
+    };
+    let r = encode_integer(r);
+    let s = encode_integer(s);
+    let mut der = Vec::with_capacity(2 + r.len() + s.len());
+    der.push(0x30);
+    der.push((r.len() + s.len()) as u8);
+    der.extend_from_slice(&r);
+    der.extend_from_slice(&s);
+    der
+}
+
 /// 用 NCrypt KSP 验证 PIN 并签名数据
 pub fn verify_pin_and_sign(
     _sid: &str,

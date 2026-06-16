@@ -1,0 +1,27 @@
+{
+  "name": "facewinunlock-tauri",
+  "version": "1.0.0",
+  "description": "**FaceWinUnlock-Tauri** 是一款基于 Tauri 框架开发的现代化 Windows 面容识别解锁增强软件。它通过自定义 Credential Provider (DLL) 注入 Windows 登录界面，结合前端 Vue 3 和后端 OpenCV 人脸识别算法，为用户提供类似 Windows Hello 的解锁体验。",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/starnotes-xj/FaceWinUnlock-Tauri.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues"
+  },
+  "homepage": "https://github.com/starnotes-xj/FaceWinUnlock-Tauri#readme",
+  "dependencies": {
+    "playwright": "^1.60.0"
+  }
+}

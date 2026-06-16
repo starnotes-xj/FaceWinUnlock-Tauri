@@ -7,6 +7,7 @@ use crate::ngc;
 use super::fido2;
 use super::key_store;
 use std::path::Path;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone)]
 pub struct FidoCredential {
@@ -29,35 +30,64 @@ pub fn sign_assertion(
     ngc_root: &Path,
     exe_dir: &Path,
 ) -> Result<fido2::AssertionResponse, String> {
-    // 策略 1: 尝试从已捕获密钥库加载（无需 PIN）
-    let ecdsa_key_opt = key_store::load_key(credential_id, &request.rp_id, exe_dir);
+    let auth_data = fido2::build_authenticator_data(&request.rp_id, sign_count);
+    let client_json_str = fido2::build_client_data_json(&request.challenge, &request.origin);
+    let to_sign = fido2::build_to_be_signed(&auth_data, &client_json_str);
 
+    let effective_pin = if !pin.is_empty() {
+        Some(pin.to_string())
+    } else {
+        try_load_pin_from_db(exe_dir)
+    };
+
+    // 策略 1: 使用 Passport KSP 中的真实不可导出 FIDO 密钥。
+    let mut passport_ksp_error = None;
+    if let Some(ref effective_pin) = effective_pin {
+        let digest = Sha256::digest(&to_sign);
+        match ngc::ncrypt::sign_fido_assertion_hash(
+            &request.rp_id,
+            effective_pin,
+            &digest,
+        ) {
+            Ok((signature, key_name)) => {
+                log_key_source(exe_dir, credential_id, "passport_ksp");
+                log_ksp_key(exe_dir, &key_name);
+                return Ok(build_response(
+                    credential_id,
+                    &auth_data,
+                    &client_json_str,
+                    signature,
+                ));
+            }
+            Err(error) => {
+                log_ksp_failure(exe_dir, &request.rp_id, &error);
+                passport_ksp_error = Some(error);
+            }
+        }
+    }
+
+    // 策略 2: 测试/兼容回退，使用已捕获的 ECDSA 私钥。
+    let ecdsa_key_opt = key_store::load_key(credential_id, &request.rp_id, exe_dir);
     let ecdsa_key = match ecdsa_key_opt {
         Some(key) => {
             log_key_source(exe_dir, credential_id, "captured_key_store");
             key
         }
         None => {
-            // 策略 2: NGC PIN 解密
+            // 策略 3: 旧版 NGC 文件解密
             log_key_source(exe_dir, credential_id, "ngc_decrypt");
 
-            // 确定可用的 PIN：优先用请求中的 PIN，为空则尝试从 pin_store 数据库加载
-            let effective_pin: String;
-            if !pin.is_empty() {
-                effective_pin = pin.to_string();
-            } else {
-                match try_load_pin_from_db(exe_dir) {
-                    Some(db_pin) => {
-                        eprintln!("key_store miss → 尝试用数据库存储的 PIN 解密...");
-                        effective_pin = db_pin;
-                    }
-                    None => {
-                        return Err("PIN required".into());
-                    }
-                }
-            }
+            let effective_pin = effective_pin.ok_or("PIN required")?;
 
-            let cred = find_fido_credential(ngc_root, credential_id)?;
+            let cred = match find_fido_credential(ngc_root, credential_id) {
+                Ok(credential) => credential,
+                Err(error) => {
+                    return Err(native_fallback_error(
+                        passport_ksp_error.as_deref(),
+                        &error,
+                    ));
+                }
+            };
             let key = decrypt_ecdsa_key(&effective_pin, &cred.container_path, &cred.key_filename)
                 .map_err(|e| {
                     // PIN 错误时提示用户重新输入
@@ -69,24 +99,66 @@ pub fn sign_assertion(
         }
     };
 
-    let auth_data = fido2::build_authenticator_data(&request.rp_id, sign_count);
-    let client_json_str = fido2::build_client_data_json(&request.challenge, &request.origin);
-    let to_sign = fido2::build_to_be_signed(&auth_data, &client_json_str);
     let der_sig = ecdsa_sign(&ecdsa_key, &to_sign).map_err(|e| {
         let magic = if ecdsa_key.len() >= 4 { u32::from_le_bytes([ecdsa_key[0],ecdsa_key[1],ecdsa_key[2],ecdsa_key[3]]) } else { 0 };
         let hex8: String = ecdsa_key.iter().take(16).map(|b| format!("{:02X}",b)).collect::<Vec<_>>().join(" ");
         format!("{} [key: {}B, magic=0x{:08X}, first16={}]", e, ecdsa_key.len(), magic, hex8)
     })?;
 
-    Ok(fido2::AssertionResponse {
+    Ok(build_response(
+        credential_id,
+        &auth_data,
+        &client_json_str,
+        der_sig,
+    ))
+}
+
+fn native_fallback_error(passport_error: Option<&str>, legacy_error: &str) -> String {
+    match passport_error {
+        Some(passport_error) => {
+            format!("NATIVE_FALLBACK:{passport_error}; legacy={legacy_error}")
+        }
+        None => legacy_error.to_string(),
+    }
+}
+
+pub(super) fn start_native_pin_autofill(exe_dir: &Path) -> Result<(), String> {
+    let pin = try_load_pin_from_db(exe_dir)
+        .ok_or_else(|| "stored Windows Hello PIN is unavailable".to_string())?;
+    let log_dir = exe_dir.to_path_buf();
+    std::thread::spawn(move || {
+        log_passkey(&log_dir, "INFO", "waiting for native passkey PIN dialog");
+        match crate::uia::autofill_pin(&pin, 20) {
+            Ok(message) => {
+                log_passkey(&log_dir, "INFO", &format!("native PIN autofill: {message}"));
+            }
+            Err(error) => {
+                log_passkey(
+                    &log_dir,
+                    "WARN",
+                    &format!("native PIN autofill failed: {error}"),
+                );
+            }
+        }
+    });
+    Ok(())
+}
+
+fn build_response(
+    credential_id: &str,
+    auth_data: &[u8],
+    client_json_str: &str,
+    signature: Vec<u8>,
+) -> fido2::AssertionResponse {
+    fido2::AssertionResponse {
         id: credential_id.to_string(),
         raw_id: credential_id.to_string(),
         authenticator_data: fido2::base64url(&auth_data),
         client_data_json: fido2::base64url(client_json_str.as_bytes()),
-        signature: fido2::base64url(&der_sig),
+        signature: fido2::base64url(&signature),
         user_handle: None,
         cred_type: "public-key".to_string(),
-    })
+    }
 }
 
 /// 记录实际使用的密钥来源
@@ -110,6 +182,42 @@ fn log_key_source(exe_dir: &Path, credential_id: &str, source: &str) {
             file,
             "{:02}:{:02}:{:02} [INFO] passkey: sign_assertion credential_id={} source={}",
             hour, minute, second, credential_id, source
+        );
+    }
+}
+
+fn log_ksp_key(exe_dir: &Path, key_name: &str) {
+    log_passkey(exe_dir, "INFO", &format!("Passport KSP key={key_name}"));
+}
+
+fn log_ksp_failure(exe_dir: &Path, rp_id: &str, error: &str) {
+    log_passkey(
+        exe_dir,
+        "WARN",
+        &format!("Passport KSP signing unavailable for rpId={rp_id}: {error}"),
+    );
+}
+
+fn log_passkey(exe_dir: &Path, level: &str, message: &str) {
+    let log_path = exe_dir.join("logs").join("unlock.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        use std::io::Write;
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let seconds = elapsed % 86_400;
+        let hour = seconds / 3_600;
+        let minute = (seconds % 3_600) / 60;
+        let second = seconds % 60;
+        let _ = writeln!(
+            file,
+            "{:02}:{:02}:{:02} [{}] passkey: {}",
+            hour, minute, second, level, message
         );
     }
 }

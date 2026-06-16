@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+.playwright-mcp/
+.tmp-*
 
 # Editor directories and files
 .vscode/*
@@ -21,6 +23,7 @@ dist-ssr
 *.ntvs*
 *.njsproj
 *.sln
+!PasskeyPlugin/PasskeyManager.sln
 *.sw?
 
 build/
@@ -29,6 +32,13 @@ test.js
 test.css
 
 target
+PasskeyPlugin/packages/
+PasskeyPlugin/x64/
+PasskeyPlugin/**/x64/
+PasskeyPlugin/AppPackages*/
+PasskeyPlugin/Generated Files/
+PasskeyPlugin/**/.winmd_cache/
+PasskeyPlugin/*.user
 UI/src-tauri/2
 UI.zip
 UI/src-tauri/bin/Microsoft.WebView2.FixedVersionRuntime.143.0.3650.139.x64.cab

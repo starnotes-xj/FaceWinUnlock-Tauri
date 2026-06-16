@@ -620,7 +620,7 @@ pub fn close_app(app_handle: AppHandle) -> Result<CustomResult, CustomResult> {
 // 核心服务 exe（FaceWinUnlock-Server.exe）正被运行中的服务占用、无法直接覆盖：若本次更新
 // 包含它且服务在运行，先发 "exit" 优雅停掉整个服务树（worker 干净退出码 0 → supervisor 检测到
 // success 后停止，见 Unlock/src/main.rs::run_service_supervisor），释放文件锁，替换后再通过
-// 计划任务把新版本拉起。其余文件（ngc_crack/key_verify）按需运行、通常未占用，直接覆盖即可。
+// 计划任务把新版本拉起。其余配套资源通常未占用，直接覆盖即可。
 // 极端情况下仍被占用则退回 X.new，由下次启动的 apply_pending_updates 替换。
 fn apply_downloaded_update() {
     let update_dir = ROOT_DIR.join("update_temp");

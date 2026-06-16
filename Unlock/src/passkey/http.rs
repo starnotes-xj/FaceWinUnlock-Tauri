@@ -13,18 +13,25 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 
-use super::fido2::{AssertionRequest};
+use super::fido2::AssertionRequest;
 use super::signer;
 use super::sql;
+use super::{FaceAuthorizationGate, FaceAuthorizationResult};
 
 /// 启动 HTTP 签名服务器
 ///
 /// 绑定 127.0.0.1 的随机端口，将端口号写入 `<exe_dir>/passkey_port` 文件，
 /// 供浏览器扩展读取。
-pub fn run_server(token: String, exe_dir: PathBuf, db_path: PathBuf) {
+pub fn run_server(
+    token: String,
+    exe_dir: PathBuf,
+    db_path: PathBuf,
+    face_gate: Arc<FaceAuthorizationGate>,
+) {
     // 绑定固定端口（与 BrowserExt background.js 轮询端口列表一致）
     let listener = match TcpListener::bind("127.0.0.1:19531") {
         Ok(l) => l,
@@ -54,7 +61,10 @@ pub fn run_server(token: String, exe_dir: PathBuf, db_path: PathBuf) {
                 let token = token.clone();
                 let exe_dir = exe_dir.clone();
                 let db_path = db_path.clone();
-                std::thread::spawn(move || handle_connection(stream, &token, &exe_dir, &db_path));
+                let face_gate = face_gate.clone();
+                std::thread::spawn(move || {
+                    handle_connection(stream, &token, &exe_dir, &db_path, &face_gate)
+                });
             }
             Err(e) => {
                 log_service(&exe_dir, "WARN", &format!("HTTP accept 错误: {}", e));
@@ -63,7 +73,13 @@ pub fn run_server(token: String, exe_dir: PathBuf, db_path: PathBuf) {
     }
 }
 
-fn handle_connection(mut stream: TcpStream, token: &str, exe_dir: &Path, db_path: &Path) {
+fn handle_connection(
+    mut stream: TcpStream,
+    token: &str,
+    exe_dir: &Path,
+    db_path: &Path,
+    face_gate: &FaceAuthorizationGate,
+) {
     // 设置读取超时
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
 
@@ -89,7 +105,9 @@ fn handle_connection(mut stream: TcpStream, token: &str, exe_dir: &Path, db_path
 
     // 路由
     match (method.as_str(), path.as_str()) {
-        ("POST", "/assertion") => handle_assertion(stream, &body, exe_dir, db_path),
+        ("POST", "/assertion") => {
+            handle_assertion(stream, &body, exe_dir, db_path, face_gate)
+        }
         ("GET", "/ping") => {
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}"
@@ -101,7 +119,13 @@ fn handle_connection(mut stream: TcpStream, token: &str, exe_dir: &Path, db_path
     }
 }
 
-fn handle_assertion(mut stream: TcpStream, body: &str, exe_dir: &Path, db_path: &Path) {
+fn handle_assertion(
+    mut stream: TcpStream,
+    body: &str,
+    exe_dir: &Path,
+    db_path: &Path,
+    face_gate: &FaceAuthorizationGate,
+) {
     // 解析请求
     let req: Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -130,6 +154,36 @@ fn handle_assertion(mut stream: TcpStream, body: &str, exe_dir: &Path, db_path: 
         .map(|c| c.id.as_str())
         .unwrap_or("");
 
+    let face_timeout = Duration::from_millis(
+        u64::from(assertion_req.timeout).clamp(5_000, 60_000),
+    );
+    log_service(
+        exe_dir,
+        "INFO",
+        &format!(
+            "Passkey assertion 等待人脸授权: rpId={}, timeout={}ms",
+            assertion_req.rp_id,
+            face_timeout.as_millis()
+        ),
+    );
+    match face_gate.request_and_wait(face_timeout) {
+        FaceAuthorizationResult::Authorized => {
+            log_service(exe_dir, "INFO", "Passkey assertion 人脸授权成功");
+        }
+        FaceAuthorizationResult::Rejected => {
+            log_service(exe_dir, "WARN", "Passkey assertion 人脸授权失败");
+            let resp = json_error("FACE_REJECTED");
+            let _ = stream.write_all(&http_response(403, &resp));
+            return;
+        }
+        FaceAuthorizationResult::TimedOut => {
+            log_service(exe_dir, "WARN", "Passkey assertion 人脸授权超时");
+            let resp = json_error("FACE_TIMEOUT");
+            let _ = stream.write_all(&http_response(403, &resp));
+            return;
+        }
+    }
+
     // 获取当前 signCount
     let sign_count = sql::get_sign_count(db_path, cred_id);
 
@@ -151,6 +205,29 @@ fn handle_assertion(mut stream: TcpStream, body: &str, exe_dir: &Path, db_path: 
             let _ = stream.write_all(&http_response(200, &json));
         }
         Err(e) => {
+            if e.starts_with("NATIVE_FALLBACK:") {
+                match signer::start_native_pin_autofill(exe_dir) {
+                    Ok(()) => {
+                        log_service(
+                            exe_dir,
+                            "INFO",
+                            "Passkey assertion 切换到人脸授权后的原生 WebAuthn",
+                        );
+                        let resp = json_error("NATIVE_FALLBACK");
+                        let _ = stream.write_all(&http_response(409, &resp));
+                    }
+                    Err(autofill_error) => {
+                        log_service(
+                            exe_dir,
+                            "WARN",
+                            &format!("原生 WebAuthn PIN 自动填充不可用: {autofill_error}"),
+                        );
+                        let resp = json_error(&autofill_error);
+                        let _ = stream.write_all(&http_response(500, &resp));
+                    }
+                }
+                return;
+            }
             log_service(exe_dir, "WARN", &format!("Passkey assertion 失败: {}", e));
             let resp = json_error(&e);
             let _ = stream.write_all(&http_response(500, &resp));
@@ -193,6 +270,7 @@ fn http_response(status: u16, body: &str) -> Vec<u8> {
         200 => "OK",
         400 => "Bad Request",
         403 => "Forbidden",
+        409 => "Conflict",
         500 => "Internal Server Error",
         _ => "Unknown",
     };

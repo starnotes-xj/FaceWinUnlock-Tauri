@@ -1,6 +1,6 @@
 pub mod faces;
 pub mod init;
 pub mod options;
-pub mod pin_commands;
+pub mod passkey_plugin;
 pub mod update_check;
 pub mod update_download;

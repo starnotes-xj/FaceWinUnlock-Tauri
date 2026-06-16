@@ -65,6 +65,7 @@ With a "hardware deficiency, code will fill the gap" mentality, I decided to bui
 | v0.4.3 | 2026-05-30 | Performance, bug fixes | Model loading now retries persistently instead of giving up early<br />Greatly shortened boot-time face recognition recovery time |
 | v0.4.4 | 2026-06-05 | Critical bug fix, stability hardening | **Fixed the ~30s delay before face recognition triggers on boot / lock screen**: root cause was the Unlock service panicking (exit 101) from `Instant::now() - Duration` arithmetic underflow during the first 60s after boot, crash-looping under the supervisor. Switched to `checked_sub` safe fallback — the worker now starts on the first try and recognition completes in 1-2s<br />supervisor restart now uses exponential backoff to prevent crash storms from flooding logs / burning CPU<br />panic-safety hardening: SystemTime clock-anomaly unwrap, concurrent handle double-close<br />Added worker panic logging (location + reason to unlock.log) for faster crash diagnosis<br />Intel NPU inference backend now auto-falls back to CPU when the OpenVINO runtime is absent, no longer erroring on selection |
 | v0.4.5 | 2026-06-06 | Critical bug fix | **Kept browser password-reveal face unlock and added Google/passkey (WebAuthn) PIN fallback**: browser password reveal and passkey verification expose identical `CPUS_CREDUI`, `dwflags`, auth package, CLSID, and `rgbSerialization` at the Credential Provider layer, so they cannot be reliably distinguished. CredUI hosted by `credentialuibroker.exe` now tries face unlock first; if credentials are not received within 5 seconds or `ReportResult` reports rejection, the provider hides itself and lets Windows native PIN continue. |
+| v0.5.0 | 2026-06-16 | Official Passkey Provider route | **Added the FaceWinUnlock Passkey Provider plugin**: the plugin owns non-exportable WebAuthn keys, so sites can store credentials created by this provider and authenticate with them<br />FaceWinUnlock authorizes plugin signing through a named-pipe face UV gate; it does not extract Windows Hello private keys, store PINs, or depend on a browser extension<br />Silent face authorization is supported: successful face recognition proceeds without an extra confirmation popup, while remote/no-face sessions reject as expected<br />The installer bundles the MSIX and certificate; NSIS only trusts the certificate at machine level, and the current desktop user installs/updates/opens the MSIX manager from the app<br />Disabled the old key-capture/browser-takeover experiment to avoid shipping an unverifiable fake-signature path |
 
 ---
 
@@ -289,16 +290,16 @@ This project involves modifying Windows kernel login behavior. When using or dev
 
 ---
 
-## 🔐 Passkey Takeover (Experimental)
+## 🔐 Passkey Provider
 
-FaceWinUnlock can intercept browser WebAuthn requests and sign assertions with an extracted Windows Hello FIDO2 key.
+FaceWinUnlock now uses the official Windows Passkey Provider plugin path.
 
-1. Open **Preferences → System Integration**, enable **Passkey Takeover**, and extract the NGC key.
-2. Open `chrome://extensions` or `edge://extensions`, enable Developer mode, then load the `BrowserExt` folder as an unpacked extension.
-3. Keep `FaceWinUnlock-Server.exe` running. The local signer listens on `127.0.0.1:19531`.
-4. If no PIN is stored and no cached key matches, an extension-owned PIN window appears. After a successful signature, the decrypted key is cached locally so later requests do not need the PIN.
+1. The installer bundles `FaceWinUnlock-Passkey.msix` and its signing certificate.
+2. Install or update the FaceWinUnlock Passkey plugin from the initialization wizard or **Preferences → System Integration**.
+3. Open the plugin manager and complete the one-time Windows registration and enablement step.
+4. Register a new passkey on each site with this plugin. Later logins are signed by the plugin-owned non-exportable key; FaceWinUnlock only supplies face-recognition based user verification.
 
-The PIN window is owned by the extension, is not injected into the website DOM, and does not persist the PIN. This feature is experimental; keep a recovery login method available.
+The old browser-extension interception, NGC private-key extraction, and PIN autofill path is disabled. Existing Windows Hello passkey private keys are non-exportable and cannot be migrated into this plugin, so sites must be re-registered when moving to the formal provider. Keep a recovery login method available.
 
 ## 🔍 Update Check
 

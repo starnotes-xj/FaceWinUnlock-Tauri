@@ -13,7 +13,7 @@
 	import { invoke } from '@tauri-apps/api/core'
 	import { formatObjectString, hashMessage } from '../utils/function'
 	import { info, error as errorLog, warn } from '@tauri-apps/plugin-log';
-	import { selectCustom, select, insert, update, deleteData } from '../utils/sqlite'
+	import { selectCustom } from '../utils/sqlite'
 	import { useRouter } from 'vue-router'
 	import { openUrl } from '@tauri-apps/plugin-opener';
 
@@ -69,140 +69,69 @@
 		unlockScene: (optionsStore.getOptionValueByKey('unlockScene') || '1,2,4').split(',').map((s: string) => s.trim()).filter(Boolean),
 		credUiAllowBroker: true,
 		animationFps: optionsStore.getOptionValueByKey('animationFps') || 'auto',
-		pinEnabled: optionsStore.getOptionValueByKey('pinEnabled') === 'true',
-		passkeyEnabled: optionsStore.getOptionValueByKey('passkeyEnabled') === 'true',
 	})
 
-	// ── 预存 Windows Hello PIN（人脸过后自动填充用）──────────────────
-	const pinStore = reactive({
-		userName: '',
-		hasStored: false,
-		storedTime: '',
-		pin: '',
-		pinConfirm: '',
-		saving: false,
+	const passkeyPlugin = reactive({
+		loading: false,
+		installed: false,
+		sampleInstalled: false,
+		version: '',
+		available: false,
 	})
-	// ── Passkey 密钥提取 ──────────────────────────────────────────
-	const extractLoading = ref(false)
-	const extractMsg = ref('')
-	const extractOk = ref(false)
-	// 如果初始化时已提取密钥，passkeyEnabled 会被 Init.vue 自动设为 true
-	const hasExtractedKeys = ref(optionsStore.getOptionValueByKey('passkeyEnabled') === 'true')
 
-	async function extractPasskeyKeys() {
-		extractLoading.value = true
-		extractMsg.value = ''
+	async function refreshPasskeyPluginStatus() {
+		passkeyPlugin.loading = true
 		try {
-			const pinParam = pinStore.hasStored ? null : pinStore.pin
-			const result: any = await invoke('extract_passkey_keys', { pin: pinParam })
-			extractMsg.value = result?.msg || '密钥提取成功'
-			extractOk.value = result?.code === 200
-			if (extractOk.value) {
-				ElMessage.success(result?.msg || '密钥提取成功！')
-			} else {
-				ElMessage.error(result?.msg || '提取失败')
-			}
-		} catch (e: any) {
-			extractMsg.value = String(e)
-			extractOk.value = false
-			ElMessage.error('密钥提取失败: ' + String(e))
-		} finally {
-			extractLoading.value = false
-		}
-	}
-
-	// 获取当前 Windows 用户名，再查询是否已存 PIN
-	invoke('get_now_username').then((result: any) => {
-		// get_now_username 返回 CustomResult：{ data: { username } }。
-		// 必须取 data.username 字符串，否则把整个 map 传给 encrypt_pin 会报
-		// "invalid type: map, expected a string"。
-		pinStore.userName = (typeof result === 'string')
-			? result
-			: (result?.data?.username ?? (typeof result?.data === 'string' ? result.data : ''));
-		return refreshPinStored();
-	}).catch((e) => {
-		warn(formatObjectString('获取当前用户名失败：', e));
-	});
-
-	async function refreshPinStored() {
-		if (!pinStore.userName) return;
-		try {
-			const r = await select('pin_store', ['id', 'pin_hash', 'enabled', 'lastTime'], 'user_name = ?', [pinStore.userName]);
-			pinStore.hasStored = r.rows.length > 0;
-			pinStore.storedTime = r.rows.length > 0 ? (r.rows[0].lastTime || '') : '';
-		} catch (e) {
-			// 表可能尚未就绪，忽略
-		}
-	}
-
-	async function savePinStore() {
-		const pin = pinStore.pin.trim();
-		if (!/^\d{4,}$/.test(pin)) {
-			ElMessage.warning('PIN 至少 4 位数字');
-			return;
-		}
-		if (pin !== pinStore.pinConfirm.trim()) {
-			ElMessage.warning('两次输入的 PIN 不一致');
-			return;
-		}
-		if (!pinStore.userName) {
-			ElMessage.warning('未获取到当前 Windows 用户名');
-			return;
-		}
-		pinStore.saving = true;
-		const loadingInstance = ElLoading.service({ fullscreen: true, text: '正在加密存储 PIN…' });
-		try {
-			// 后端 DPAPI(机器级)+SID 加密；返回 { blob_b64, entropy_b64, pin_hash }
-			const enc: any = await invoke('encrypt_pin', { userName: pinStore.userName, pin });
-			const existing = await select('pin_store', ['id'], 'user_name = ?', [pinStore.userName]);
-			if (existing.rows.length > 0) {
-				await update('pin_store', {
-					pin_blob: enc.blob_b64,
-					pin_entropy: enc.entropy_b64,
-					pin_hash: enc.pin_hash,
-					crypto_method: 'dpapi-sid',
-					enabled: 1,
-				}, 'user_name = ?', [pinStore.userName]);
-			} else {
-				await insert('pin_store',
-					['user_name', 'pin_blob', 'pin_entropy', 'pin_hash', 'crypto_method', 'enabled'],
-					[pinStore.userName, enc.blob_b64, enc.entropy_b64, enc.pin_hash, 'dpapi-sid', 1]
-				);
-			}
-			// 存了 PIN 自动启用 Hello PIN 解锁并同步注册表
-			dllConfig.pinEnabled = true;
-			await invoke('write_to_registry', { items: [{ key: 'PIN_ENABLED', value: '1' }] }).catch((e) => {
-				warn(formatObjectString('同步 PIN_ENABLED 注册表失败：', e));
-			});
-			pinStore.pin = '';
-			pinStore.pinConfirm = '';
-			await refreshPinStored();
-			ElMessage.success('PIN 已加密保存');
+			const result: any = await invoke('get_passkey_plugin_status')
+			const status = result?.data || {}
+			passkeyPlugin.installed = Boolean(status.installed)
+			passkeyPlugin.sampleInstalled = Boolean(status.sample_installed)
+			passkeyPlugin.version = status.package?.version || status.sample_package?.version || ''
+			passkeyPlugin.available = Boolean(status.msix_available && status.certificate_available)
 		} catch (error) {
-			const info = formatObjectString('保存 PIN 失败：', error);
-			ElMessage.error(info);
-			errorLog(info);
+			warn(formatObjectString('查询 Passkey 插件状态失败：', error))
 		} finally {
-			pinStore.saving = false;
-			loadingInstance.close();
+			passkeyPlugin.loading = false
 		}
 	}
 
-	function clearPinStore() {
-		ElMessageBox.confirm(
-			'确定删除已存储的 Hello PIN？删除后人脸识别通过将无法自动填充 PIN。',
-			'确认删除',
-			{ confirmButtonText: '确定删除', confirmButtonClass: 'el-button--danger', cancelButtonText: '取消', type: 'warning' }
-		).then(async () => {
+	async function installPasskeyPlugin() {
+		let replaceSample = false
+		if (passkeyPlugin.sampleInstalled && !passkeyPlugin.installed) {
 			try {
-				await deleteData('pin_store', 'user_name = ?', [pinStore.userName]);
-				await refreshPinStored();
-				ElMessage.success('已删除存储的 PIN');
-			} catch (error) {
-				ElMessage.error(formatObjectString('删除 PIN 失败：', error));
+				await ElMessageBox.confirm(
+					'替换 Contoso 测试插件会删除其本地保存的通行密钥，网站端旧凭据需要重新注册。确定迁移到正式插件吗？',
+					'迁移 Passkey 插件',
+					{ type: 'warning', confirmButtonText: '确认迁移', cancelButtonText: '保留测试插件' }
+				)
+				replaceSample = true
+			} catch {
+				return
 			}
-		}).catch(() => {});
+		}
+
+		passkeyPlugin.loading = true
+		try {
+			const result: any = await invoke('install_passkey_plugin', { replaceSample })
+			ElMessage.success(result?.msg || 'Passkey 插件已安装')
+			await refreshPasskeyPluginStatus()
+			await invoke('open_passkey_plugin_manager')
+		} catch (error) {
+			ElMessage.error(formatObjectString('安装 Passkey 插件失败：', error))
+		} finally {
+			passkeyPlugin.loading = false
+		}
 	}
+
+	async function openPasskeyPluginManager() {
+		try {
+			await invoke('open_passkey_plugin_manager')
+		} catch (error) {
+			ElMessage.error(formatObjectString('打开 Passkey 插件管理器失败：', error))
+		}
+	}
+
+	refreshPasskeyPluginStatus()
 
 	const refreshCameraList = ()=>{
 		cameraListLoading.value = true;
@@ -383,23 +312,13 @@
 			{
 				key: "ANIMATION_FPS",
 				value: dllConfig.animationFps // "auto" 或具体数值，DLL 解析失败时自动跟随显示器
-			},
-			{
-				key: "PIN_ENABLED",
-				value: dllConfig.pinEnabled ? "1" : "0"
-			},
-			{
-				key: "PASSKEY_TAKEOVER_ENABLED",
-				value: dllConfig.passkeyEnabled ? "1" : "0"
 			}
 		]}).then(()=>{
 			return optionsStore.saveOptions({
 				showTile: dllConfig.showTile,
 				unlockScene: dllConfig.unlockScene.join(','),
 				credUiAllowBroker: "true",
-				animationFps: dllConfig.animationFps,
-				pinEnabled: dllConfig.pinEnabled ? "true" : "false",
-				passkeyEnabled: dllConfig.passkeyEnabled ? "true" : "false"
+				animationFps: dllConfig.animationFps
 			})
 		}).then((errorArray)=>{
 			if(errorArray.length > 0){
@@ -918,7 +837,7 @@
 								<p class="label">面容识别场景</p>
 								<p class="sub">
 									选择哪些场景下启用面容解锁。<br />
-									UAC / 应用层：保留 UAC 提权；浏览器 broker 弹窗先尝试人脸，失败后回退 Windows PIN。
+									UAC / 应用层：保留 UAC 提权与浏览器密码查看；通行密钥登录由官方插件处理。
 								</p>
 							</div>
 							<el-checkbox-group v-model="dllConfig.unlockScene" style="display: flex; flex-direction: column; gap: 8px;">
@@ -930,77 +849,43 @@
 						<div class="option-row">
 							<div class="row-text">
 								<p class="label">浏览器 broker 弹窗</p>
-								<p class="sub">Chrome / Edge 查看密码先使用人脸；passkey 无法通过时自动交还 Windows PIN。</p>
+								<p class="sub">Chrome / Edge 查看密码等 CredUI 场景先使用人脸；通行密钥认证由下方官方插件独立处理。</p>
 							</div>
 							<el-tag type="success">人脸优先</el-tag>
 						</div>
-						<div class="option-row">
+						<div style="padding: 16px 0; border-bottom: 1px solid #f2f6fc;">
 							<div class="row-text">
-								<p class="label">Hello PIN 解锁</p>
+								<p class="label">FaceWinUnlock Passkey Provider</p>
 								<p class="sub">
-									启用后在锁屏磁贴显示 Hello PIN 输入框，输入 Windows Hello PIN 即可解锁。<br />
-									仅支持本地账户（需已设置 Windows Hello PIN），不支持 Microsoft / Entra 在线账户。<br />
-									PIN 不落盘、不存储，仅用于现场 NGC 解密。
+									官方 Windows 插件路线：插件持有自己的不可导出密钥，人脸识别只完成用户验证。<br />
+									不提取 Windows Hello 私钥，不保存 PIN，也不需要浏览器扩展。
 								</p>
 							</div>
-							<el-switch v-model="dllConfig.pinEnabled" />
-							<div class="option-row">
-								<div class="row-text">
-									<p class="label">Passkey 自接管（实验性）</p>
-									<p class="sub">
-										浏览器扩展拦截 passkey 登录，用 Windows Hello PIN 完成 FIDO2 签名。<br />
-										需安装配套扩展；与原生 passkey 功能重复，默认关闭。
-									</p>
-								</div>
-								<el-switch v-model="dllConfig.passkeyEnabled" />
+							<div style="display:flex; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap;">
+								<el-tag v-if="passkeyPlugin.installed" type="success">
+									正式插件已安装{{ passkeyPlugin.version ? `（${passkeyPlugin.version}）` : '' }}
+								</el-tag>
+								<el-tag v-else-if="passkeyPlugin.sampleInstalled" type="warning">
+									Contoso 测试插件已安装
+								</el-tag>
+								<el-tag v-else type="info">未安装</el-tag>
+								<el-button
+									type="primary"
+									size="small"
+									:loading="passkeyPlugin.loading"
+									:disabled="!passkeyPlugin.available"
+									@click="installPasskeyPlugin"
+								>{{ passkeyPlugin.installed ? '更新正式插件' : '安装正式插件' }}</el-button>
+								<el-button
+									v-if="passkeyPlugin.installed || passkeyPlugin.sampleInstalled"
+									size="small"
+									@click="openPasskeyPluginManager"
+								>打开管理器</el-button>
+								<el-button size="small" :loading="passkeyPlugin.loading" @click="refreshPasskeyPluginStatus">刷新</el-button>
 							</div>
-							<!-- Passkey 密钥提取 -->
-							<div v-if="dllConfig.passkeyEnabled" style="padding: 12px 0; border-bottom: 1px solid #eee;">
-								<div class="row-text" style="margin-bottom: 8px;">
-									<p class="label">NGC 密钥提取</p>
-									<p class="sub">
-										从 Windows Hello 容器提取已注册的 FIDO2 / Passkey 私钥。<br />
-										需先在上方<b>预存 PIN</b>。提取约需 1 分钟。
-									</p>
-								</div>
-								<div v-if="hasExtractedKeys || extractOk" style="display:flex; align-items:center; gap:10px;">
-									<el-tag type="success" size="small">{{ extractOk ? '提取成功！' : '密钥已就绪（初始化时已提取）' }}</el-tag>
-									<el-button type="primary" size="small" plain :loading="extractLoading" @click="extractPasskeyKeys">
-									{{ extractLoading ? '提取中…' : '重新提取' }}
-								</el-button>
-								</div>
-								<div v-else style="display:flex; align-items:center; gap:10px;">
-									<el-button type="primary" size="small" :loading="extractLoading" @click="extractPasskeyKeys">
-										{{ extractLoading ? '提取中…' : '提取 Passkey 密钥' }}
-									</el-button>
-									<el-tag v-if="extractMsg" :type="extractOk ? 'success' : 'danger'" size="small">{{ extractMsg }}</el-tag>
-								</div>
-							</div>
-						</div>
-						<div v-if="dllConfig.pinEnabled" style="padding: 16px 0; border-bottom: 1px solid #f2f6fc;">
-							<div class="row-text" style="margin-bottom: 12px;">
-								<p class="label">预存 Windows Hello PIN（人脸过后自动填充）</p>
-								<p class="sub">
-									当前账户：<b>{{ pinStore.userName || '获取中…' }}</b><br />
-									人脸识别通过后，由提升权限组件用 UIA/SendInput 自动把此 PIN 填入 Windows Hello PIN 框并提交，无需手动输入。<br />
-									PIN 经 DPAPI（机器级 + SID）加密后存于本地 <code>pin_store</code> 表，明文不落盘。
-								</p>
-							</div>
-							<div v-if="pinStore.hasStored" class="option-row" style="border:none; padding:6px 0;">
-								<el-tag type="success">已存储 PIN{{ pinStore.storedTime ? '（' + pinStore.storedTime + '）' : '' }}</el-tag>
-								<el-button type="danger" size="small" plain @click="clearPinStore">删除已存 PIN</el-button>
-							</div>
-							<el-form label-position="top" style="max-width: 360px; margin-top: 8px;">
-								<el-form-item :label="pinStore.hasStored ? '更新 PIN' : '输入 Windows Hello PIN'">
-									<el-input v-model="pinStore.pin" type="password" show-password placeholder="4 位以上数字 PIN" />
-								</el-form-item>
-								<el-form-item label="确认 PIN">
-									<el-input v-model="pinStore.pinConfirm" type="password" show-password placeholder="再次输入 PIN" />
-								</el-form-item>
-								<el-button type="primary" :loading="pinStore.saving" @click="savePinStore">
-									{{ pinStore.hasStored ? '更新并加密保存' : '加密保存 PIN' }}
-								</el-button>
-							</el-form>
+							<p v-if="passkeyPlugin.sampleInstalled && !passkeyPlugin.installed" class="sub" style="margin-top:10px;">
+								迁移会删除测试插件本地凭据，网站端需使用正式插件重新注册通行密钥。
+							</p>
 						</div>
 
 						<div class="option-row">

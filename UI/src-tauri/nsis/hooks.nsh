@@ -43,17 +43,25 @@
   ; 让安装后的主程序默认按管理员权限启动。主 EXE 也会嵌入 requireAdministrator manifest，
   ; 这里再写 AppCompat RUNASADMIN 作为快捷方式/外壳启动兜底。
   WriteRegStr HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\${MAINBINARYNAME}.exe" "RUNASADMIN"
-  ; Passkey 浏览器扩展当前仅部署解压资源。若未来同时打包 CRX + update.xml，
-  ; 再启用外部扩展注册；现在跳过失效注册，避免浏览器反复读取不存在的更新源。
-  IfFileExists "$INSTDIR\BrowserExt\facewinunlock-passkey.crx" 0 skip_browserext_registry
-  IfFileExists "$INSTDIR\BrowserExt\update.xml" 0 skip_browserext_registry
-    WriteRegStr HKLM "Software\Google\Chrome\Extensions\facewinunlock-passkey-bridge" "update_url" "file:///$INSTDIR\BrowserExt\update.xml"
-    WriteRegStr HKLM "Software\Microsoft\Edge\Extensions\facewinunlock-passkey-bridge" "update_url" "file:///$INSTDIR\BrowserExt\update.xml"
-    DetailPrint "已注册浏览器扩展更新源"
-    Goto done_browserext_registry
-  skip_browserext_registry:
-    DetailPrint "未检测到打包好的 BrowserExt CRX，跳过自动注册；请在 chrome://extensions 手动加载 $INSTDIR\\BrowserExt"
-  done_browserext_registry:
+  ; 官方 Windows Passkey Provider 插件（FaceWinUnlock-Passkey.msix + .cer + 安装脚本）
+  ; 已由安装包放置到 $INSTDIR。此处【不】直接 Add-AppxPackage：
+  ; NSIS 以管理员 / perMachine 提权运行，而 MSIX 是“按用户”安装的——提权上下文的账户
+  ; 可能不是目标桌面用户（标准用户 + 管理员凭据提权场景），会把插件装到管理员账户，
+  ; 对桌面用户不可见。因此插件安装改由应用内“当前登录用户”触发
+  ; （初始化页 / 设置页 → “安装正式插件”，调用 install_passkey_plugin 命令），
+  ; 该路径在检测到 Contoso 测试包时还会要求显式确认迁移，避免静默删除测试凭据。
+  ; “信任自签名证书”是机器级、需要管理员的步骤，正好由提权的 NSIS 完成一次：
+  ; 把证书导入 LocalMachine 的 TrustedPeople + Root，否则 per-user 的 Add-AppxPackage 会报
+  ; 0x800B0109（应用包签名的根证书必须是受信任的证书）。证书信任是机器级、与具体用户无关，
+  ; 因此放在提权安装器里安全；真正的 MSIX 安装仍由应用内当前登录用户完成。
+  IfFileExists "$INSTDIR\FaceWinUnlock-Passkey.cer" 0 done_passkey_cert
+    DetailPrint "正在信任 FaceWinUnlock Passkey 证书（机器级 TrustedPeople + Root）..."
+    nsExec::ExecToStack 'certutil -f -addstore TrustedPeople "$INSTDIR\FaceWinUnlock-Passkey.cer"'
+    Pop $0
+    nsExec::ExecToStack 'certutil -f -addstore Root "$INSTDIR\FaceWinUnlock-Passkey.cer"'
+    Pop $0
+  done_passkey_cert:
+  DetailPrint "Passkey 插件文件与证书已就绪，请在 FaceWinUnlock 应用内完成安装与启用"
 
   WriteRegStr HKLM "Software\facewinunlock-tauri" "UNLOCK_SCENE" "1,2,4"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "SHOW_TILE" "1"
@@ -64,7 +72,7 @@
   WriteRegStr HKLM "Software\facewinunlock-tauri" "RETRY_DELAY" "1.0"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "CREDUI_ALLOW_BROKER" "1"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "CREDUI_BROKER_FALLBACK_TIMEOUT" "2.0"
-  WriteRegStr HKLM "Software\facewinunlock-tauri" "PASSKEY_TAKEOVER_ENABLED" "1"
+  WriteRegStr HKLM "Software\facewinunlock-tauri" "PASSKEY_TAKEOVER_ENABLED" "0"
 
   DetailPrint "FaceWinUnlock 安装完成"
 !macroend
@@ -73,6 +81,13 @@
   DetailPrint "正在结束 FaceWinUnlock-Server.exe..."
   nsExec::ExecToStack 'taskkill /F /IM "FaceWinUnlock-Server.exe"'
   Sleep 1000
+
+  IfFileExists "$INSTDIR\scripts\uninstall-passkey-plugin.ps1" 0 done_passkey_uninstall
+    DetailPrint "正在卸载 FaceWinUnlock Passkey 插件..."
+    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\scripts\uninstall-passkey-plugin.ps1" -CertificatePath "$INSTDIR\FaceWinUnlock-Passkey.cer"'
+    Pop $0
+    Pop $1
+  done_passkey_uninstall:
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
@@ -88,12 +103,7 @@
   ; 1b. AppCompat 注册（RUNASADMIN）
   DeleteRegValue HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\${MAINBINARYNAME}.exe"
 
-  ; 1c. 浏览器扩展注册（Chrome / Edge 外部扩展 + 策略强制安装）
-  DeleteRegKey HKLM "Software\Google\Chrome\Extensions\facewinunlock-passkey-bridge"
-  DeleteRegKey HKLM "Software\Microsoft\Edge\Extensions\facewinunlock-passkey-bridge"
-  DeleteRegValue HKLM "Software\Policies\Google\Chrome\ExtensionInstallForcelist" "1"
-
-  ; 1d. 应用设置键（所有值：UNLOCK_SCENE, SHOW_TILE, CONNECT_TO_PIPE, DLL_LOG_PATH,
+  ; 1c. 应用设置键（所有值：UNLOCK_SCENE, SHOW_TILE, CONNECT_TO_PIPE, DLL_LOG_PATH,
   ;     ANIMATION_FRAMES_PATH, UNLOCK_GRACE_PERIOD, RETRY_DELAY, CREDUI_ALLOW_BROKER,
   ;     CREDUI_BROKER_FALLBACK_TIMEOUT, PASSKEY_TAKEOVER_ENABLED, PIN_ENABLED 等）
   ;     先逐个 DeleteRegValue 确保不残留，再 DeleteRegKey 清理空键
@@ -113,7 +123,7 @@
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_ALLOW_GENERIC"
   DeleteRegKey HKLM "Software\facewinunlock-tauri"
 
-  ; 1e. 各用户 HKCU 下的 facewinunlock-tauri 残留（WebView2/EBWebView 路径等）
+  ; 1d. 各用户 HKCU 下的 facewinunlock-tauri 残留（WebView2/EBWebView 路径等）
   DeleteRegKey HKCU "Software\facewinunlock-tauri"
 
   ; ─── 2. 计划任务 ─────────────────────────────────────────────────
@@ -143,7 +153,7 @@
   RMDir /r "$PROGRAMDATA\facewinunlock-tauri"
   ; 安装目录自身（NSIS 默认保留空目录，显式清理）
   RMDir /r "$INSTDIR\logs"
-  RMDir /r "$INSTDIR\BrowserExt"
+  RMDir /r "$INSTDIR\scripts"
   RMDir /r "$INSTDIR\nsis"
   RMDir /r "$INSTDIR\resources"
   Delete "$INSTDIR\*.*"

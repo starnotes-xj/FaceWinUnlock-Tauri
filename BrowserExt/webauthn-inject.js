@@ -1,25 +1,23 @@
-// FaceWinUnlock Passkey Bridge — Content Script
+// FaceWinUnlock Passkey Bridge - MAIN-world WebAuthn hook.
 //
-// Injected at document_start to override navigator.credentials.get
-// before any page scripts can access it.
-//
-// Reference: Shwmae ShwmaeExt/webauthn-inject.js
+// Chrome isolates ordinary content scripts from page JavaScript. This file is
+// explicitly loaded in the MAIN world so websites call this override. Requests
+// are forwarded to webauthn-bridge.js through window.postMessage.
 
 (function () {
   'use strict';
 
-  // Only override if the passkey bridge extension is present
-  if (typeof chrome === 'undefined' || !chrome.runtime) {
+  if (!navigator.credentials || navigator.credentials.get.__faceWinUnlockHook) {
     return;
   }
 
-  const EXTENSION_ID = 'facewinunlock-passkey-bridge';
-  const SIGNER_PORT_FILE = ''; // Will be read via extension native messaging
+  const REQUEST_SOURCE = 'facewinunlock-passkey-page';
+  const RESPONSE_SOURCE = 'facewinunlock-passkey-extension';
+  const pending = new Map();
+  let requestSequence = 0;
 
-  // Save original for cleanup
   const _originalGet = navigator.credentials.get.bind(navigator.credentials);
 
-  // ── Base64url helpers ────────────────────────────────────────────────
   function toBase64url(buffer) {
     const bytes = new Uint8Array(buffer);
     let binary = '';
@@ -44,14 +42,57 @@
     return bytes.buffer;
   }
 
-  // ── Override navigator.credentials.get ───────────────────────────────
-  navigator.credentials.get = function (options) {
-    // Only intercept public-key (WebAuthn) requests
+  function sendToExtension(type, options, pin) {
+    return new Promise((resolve, reject) => {
+      const requestId = `${Date.now()}-${++requestSequence}`;
+      const timeout = setTimeout(() => {
+        pending.delete(requestId);
+        reject(new Error('FaceWinUnlock extension bridge timed out'));
+      }, Math.max(options.timeout || 60000, 5000) + 5000);
+
+      pending.set(requestId, { resolve, reject, timeout });
+      window.postMessage({
+        source: REQUEST_SOURCE,
+        requestId,
+        type,
+        options,
+        pin,
+      }, '*');
+    });
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window || event.data?.source !== RESPONSE_SOURCE) {
+      return;
+    }
+
+    if (event.data.ready) {
+      document.documentElement.setAttribute(
+        'data-facewinunlock-passkey-bridge',
+        'ready'
+      );
+      return;
+    }
+
+    const waiter = pending.get(event.data.requestId);
+    if (!waiter) {
+      return;
+    }
+
+    pending.delete(event.data.requestId);
+    clearTimeout(waiter.timeout);
+    waiter.resolve(event.data.response);
+  });
+
+  async function faceWinUnlockGet(options) {
     if (!options || !options.publicKey) {
       return _originalGet(options);
     }
 
     const pkOptions = options.publicKey;
+    if (!pkOptions.allowCredentials || pkOptions.allowCredentials.length === 0) {
+      return _originalGet(options);
+    }
 
     // Convert challenge and allowCredentials to JSON-serializable form
     const serialized = {
@@ -66,56 +107,39 @@
       }))
     };
 
-    // Forward to background script for PIN dialog and signing
-    return new Promise((resolve, reject) => {
-      // 同扩展内通信，无需指定 EXTENSION_ID
-      chrome.runtime.sendMessage(
-        { type: 'WEBAUTHN_GET', options: serialized },
-        function (response) {
-          if (chrome.runtime.lastError) {
-            console.warn('[FaceWinUnlock] Bridge unavailable, falling back to native:',
-              chrome.runtime.lastError.message);
-            // Fall back to original WebAuthn
-            return resolve(_originalGet(options));
-          }
+    let response;
+    try {
+      response = await sendToExtension('WEBAUTHN_GET', serialized);
+    } catch (error) {
+      console.warn('[FaceWinUnlock] Bridge unavailable, falling back to native:', error);
+      return _originalGet(options);
+    }
 
-          if (!response || response.error) {
-            // 需要 PIN → 在页面上下文弹框（service worker 无权弹）
-            if (response?.error === 'PIN_REQUIRED') {
-              const pin = prompt(
-                (new URL(window.location.origin)).hostname + ' 需要 passkey 认证\n\n请输入 Windows Hello PIN:',
-                ''
-              );
-              if (pin) {
-                // 重试带 PIN 的请求
-                chrome.runtime.sendMessage(
-                  { type: 'WEBAUTHN_GET_PIN', options: serialized, pin: pin },
-                  function (retryResponse) {
-                    if (chrome.runtime.lastError || !retryResponse || retryResponse.error) {
-                      const err = new Error(retryResponse?.error || 'Passkey assertion failed');
-                      err.name = 'NotAllowedError';
-                      return reject(err);
-                    }
-                    resolve(buildAssertion(retryResponse));
-                  }
-                );
-                return;
-              }
-            }
-            const err = new Error(response?.error || 'Passkey assertion failed');
-            err.name = 'NotAllowedError';
-            return reject(err);
-          }
+    if (response?.error === 'NATIVE_FALLBACK') {
+      return _originalGet(options);
+    }
 
-          resolve(buildAssertion(response));
-        }
+    if (response?.error === 'PIN_REQUIRED') {
+      const pin = prompt(
+        `${location.hostname} 需要 passkey 认证\n\n请输入 Windows Hello PIN:`,
+        ''
       );
-    });
-  };
+      if (pin) {
+        response = await sendToExtension('WEBAUTHN_GET_PIN', serialized, pin);
+      }
+    }
 
-  // ── helper ──
+    if (!response || response.error) {
+      const error = new Error(response?.error || 'Passkey assertion failed');
+      error.name = 'NotAllowedError';
+      throw error;
+    }
+
+    return buildAssertion(response);
+  }
+
   function buildAssertion(response) {
-    return {
+    const assertion = {
       id: response.id,
       rawId: fromBase64url(response.rawId),
       response: {
@@ -125,7 +149,37 @@
         userHandle: response.userHandle ? fromBase64url(response.userHandle) : null
       },
       type: 'public-key',
-      authenticatorAttachment: 'platform'
+      authenticatorAttachment: 'platform',
+      getClientExtensionResults() {
+        return {};
+      },
+      toJSON() {
+        return {
+          id: this.id,
+          rawId: toBase64url(this.rawId),
+          response: {
+            authenticatorData: toBase64url(this.response.authenticatorData),
+            clientDataJSON: toBase64url(this.response.clientDataJSON),
+            signature: toBase64url(this.response.signature),
+            userHandle: this.response.userHandle
+              ? toBase64url(this.response.userHandle)
+              : null
+          },
+          type: this.type,
+          authenticatorAttachment: this.authenticatorAttachment,
+          clientExtensionResults: this.getClientExtensionResults()
+        };
+      }
     };
+    return assertion;
   }
+
+  Object.defineProperty(faceWinUnlockGet, '__faceWinUnlockHook', {
+    value: true,
+  });
+  navigator.credentials.get = faceWinUnlockGet;
+  document.documentElement.setAttribute(
+    'data-facewinunlock-passkey-hook',
+    'ready'
+  );
 })();

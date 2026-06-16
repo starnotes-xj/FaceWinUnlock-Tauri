@@ -53,6 +53,7 @@
 | v0.4.3 | 2026-05-30 | 性能优化、Bug修复 | 模型加载改为持续重试而非轻易放弃<br />大幅缩短开机面容恢复时间 |
 | v0.4.4 | 2026-06-05 | 重要Bug修复、稳定性加固 | **彻底修复开机/锁屏人脸识别需等约 30 秒才触发摄像头的问题**：根因为 Unlock 服务在开机头 60 秒内 `Instant::now() - Duration` 算术下溢 panic（exit 101）反复崩溃重启，改用 `checked_sub` 安全回退，worker 开机一次启动成功、识别仅需 1-2 秒<br />supervisor 重启改为指数退避，杜绝崩溃风暴刷爆日志 / 空耗 CPU<br />panic 安全加固：修复 SystemTime 时钟异常 unwrap、并发句柄 double-close<br />新增 worker panic 日志（位置+原因写入 unlock.log），崩溃定位更快<br />Intel NPU 推理后端在缺少 OpenVINO 运行时时自动回退 CPU，选择不再报错 |
 | v0.4.5 | 2026-06-06 | 重要Bug修复 | **保留浏览器查看密码人脸识别，并为 Google/passkey（WebAuthn）增加 PIN 回退**：实测浏览器查看密码与 passkey 验证在 Credential Provider 层的 `CPUS_CREDUI`、`dwflags`、auth package、CLSID、`rgbSerialization` 完全一致，无法精准区分；因此 `credentialuibroker.exe` 中的 CredUI 默认先尝试面容识别，若 5 秒内未拿到凭据或 `ReportResult` 表明凭据被拒绝，则隐藏本 Provider 并交还 Windows 原生 PIN。 |
+| v0.5.0 | 2026-06-16 | Passkey Provider 正式路线 | **新增 FaceWinUnlock Passkey Provider 正式插件**：插件自持不可导出 WebAuthn 密钥，网站端可保存该插件生成的通行密钥并完成登录认证<br />FaceWinUnlock 通过命名管道人脸 UV gate 授权插件签名，不提取 Windows Hello 私钥、不保存 PIN、不依赖浏览器扩展<br />支持静默人脸授权：刷脸成功后不再弹出额外确认窗口，远程/无人脸场景会按预期拒绝<br />安装包内置 MSIX 与证书，NSIS 只做机器级证书信任，MSIX 由当前桌面用户在应用内安装/更新/打开管理器<br />停用旧的密钥捕获/浏览器接管实验路线，避免发布不可验证的伪签名路径 |
 
 ---
 
@@ -250,16 +251,16 @@ $env:PATH        = "D:\Rust\CARGO\bin;" + $env:PATH
 2. 建议在虚拟机 (VMware/Hyper-V) 环境中进行调试。
 3. 作者不对因使用本软件导致的任何数据丢失、系统崩溃或安全漏洞承担责任。
 
-## 🔐 Passkey 自接管（实验性）
+## 🔐 Passkey Provider（官方插件路线）
 
-FaceWinUnlock 可通过浏览器扩展拦截 WebAuthn 请求，并使用已提取的 Windows Hello FIDO2 密钥签名：
+FaceWinUnlock 现在使用 Windows 官方 Passkey Provider 插件路线：
 
-1. 在“首选项 → 系统集成”启用“Passkey 自接管”，完成 NGC 密钥提取。
-2. 打开 `chrome://extensions` 或 `edge://extensions`，启用开发者模式，以“加载已解压的扩展程序”方式选择仓库中的 `BrowserExt` 目录。
-3. 保持 `FaceWinUnlock-Server.exe` 运行；本地签名器监听 `127.0.0.1:19531`。
-4. 未预存 PIN 且本地没有匹配密钥时，会弹出扩展自有 PIN 窗口。首次签名成功后，解密密钥会缓存在本机，后续无需再次输入 PIN。
+1. 安装包内置 `FaceWinUnlock-Passkey.msix` 和签名证书。
+2. 在“初始化向导”或“首选项 → 系统集成”中安装/更新 FaceWinUnlock Passkey 插件。
+3. 打开插件管理器，按 Windows 要求完成一次注册和启用。
+4. 使用该插件在网站重新注册通行密钥；之后登录时由插件持有的不可导出密钥签名，FaceWinUnlock 只负责人脸识别用户验证。
 
-PIN 窗口不注入网站 DOM，也不会持久化 PIN。该功能仍属实验性，请确保账户保留其他恢复登录方式。
+旧的浏览器扩展拦截、NGC 私钥提取和 PIN 自动填充路线已经停用。Windows Hello 已有通行密钥的私钥不可导出，不能被迁移到本插件；迁移到正式插件时需要在网站端重新注册通行密钥。请确保账户保留其他恢复登录方式。
 
 ## 🔍 检查更新
 

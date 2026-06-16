@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "facewinunlock-tauri",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "identifier": "com.administrator.facewinunlock-tauri",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -36,12 +36,10 @@
     ],
     "resources": {
       "../../target/release/FaceWinUnlock-Server.exe": "FaceWinUnlock-Server.exe",
-      "../../target/release/passkey_keys.json": "passkey_keys.json",
-      "../../target/release/ngc_crack.exe": "ngc_crack.exe",
-      "../../target/release/key_verify.exe": "key_verify.exe",
-      "../../BrowserExt/manifest.json": "BrowserExt/manifest.json",
-      "../../BrowserExt/background.js": "BrowserExt/background.js",
-      "../../BrowserExt/webauthn-inject.js": "BrowserExt/webauthn-inject.js",
+      "../../target/release/FaceWinUnlock-Passkey.msix": "FaceWinUnlock-Passkey.msix",
+      "../../target/release/FaceWinUnlock-Passkey.cer": "FaceWinUnlock-Passkey.cer",
+      "../../scripts/install-passkey-plugin.ps1": "scripts/install-passkey-plugin.ps1",
+      "../../scripts/uninstall-passkey-plugin.ps1": "scripts/uninstall-passkey-plugin.ps1",
       "./nsis/cleanup_tiles.ps1": "nsis/cleanup_tiles.ps1",
       "../../target/release/FaceWinUnlock_Tauri.dll": "resources/FaceWinUnlock-Tauri.dll",
       "../resources/animation_frames.bin": "resources/animation_frames.bin",

@@ -260,7 +260,7 @@ mod tests {
             r"C:\evil.exe",
             "/evil.exe",
             "bin/../evil.exe",
-            "tools/key_verify.exe",
+            "tools/helper.exe",
         ] {
             assert!(validated_manifest_path(path).is_err(), "{path}");
         }

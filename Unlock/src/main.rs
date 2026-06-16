@@ -68,6 +68,7 @@ use windows_core::PCWSTR;
 
 const PIPE_SERVER_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustServer";
 const PIPE_UNLOCK_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustUnlock";
+const PIPE_PASSKEY_FACE_NAME: &str = r"\\.\pipe\FaceWinUnlockPasskeyFaceAuth";
 const BUF_SIZE: u32 = 4096;
 const CAMERA_WARMUP_MAX_FRAMES: usize = 4;
 const CAMERA_WARMUP_READY_FRAMES: usize = 1;
@@ -107,6 +108,8 @@ struct State {
     /// 0 表示无冷却。冷却解决 credentialuibroker.exe 每次请求
     /// 创建新进程导致 DLL 端 static 变量归零的问题。
     after_release_cooldown_until: AtomicI64,
+    /// 浏览器 passkey assertion 的一次性人脸授权门。
+    passkey_face_gate: Arc<passkey::FaceAuthorizationGate>,
 }
 
 impl State {
@@ -127,6 +130,7 @@ impl State {
             last_successful_unlock_at: AtomicI64::new(0),
             consecutive_failures: AtomicU32::new(0),
             after_release_cooldown_until: AtomicI64::new(0),
+            passkey_face_gate: Arc::new(passkey::FaceAuthorizationGate::default()),
         })
     }
 }
@@ -298,74 +302,6 @@ fn acquire_single_instance_mutex(exe_dir: &Path) -> Option<HANDLE> {
     )
 }
 
-/// 读取 `HKLM\SOFTWARE\facewinunlock-tauri` 下的注册表字符串值
-fn read_registry_string(key_name: &str) -> Result<String, String> {
-    use windows::Win32::System::Registry::{
-        RegOpenKeyExW, RegQueryValueExW, RegCloseKey, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ,
-    };
-    use windows_core::PCWSTR;
-
-    let reg_path: Vec<u16> = "SOFTWARE\\facewinunlock-tauri"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let key_wide: Vec<u16> = key_name
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-
-    unsafe {
-        let mut hkey = std::mem::zeroed();
-        if RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR::from_raw(reg_path.as_ptr()),
-            None,
-            KEY_READ,
-            &mut hkey,
-        )
-        .is_err()
-        {
-            return Err("打开注册表失败".to_string());
-        }
-
-        let mut data_type = REG_SZ;
-        let mut data_len = 0u32;
-        let _ = RegQueryValueExW(
-            hkey,
-            PCWSTR::from_raw(key_wide.as_ptr()),
-            None,
-            Some(&mut data_type),
-            None,
-            Some(&mut data_len),
-        );
-
-        if data_len == 0 {
-            let _ = RegCloseKey(hkey);
-            return Err("注册表值为空".to_string());
-        }
-
-        let mut buffer = vec![0u16; (data_len / 2) as usize];
-        if RegQueryValueExW(
-            hkey,
-            PCWSTR::from_raw(key_wide.as_ptr()),
-            None,
-            None,
-            Some(buffer.as_mut_ptr() as *mut u8),
-            Some(&mut data_len),
-        )
-        .is_err()
-        {
-            let _ = RegCloseKey(hkey);
-            return Err("读取注册表值失败".to_string());
-        }
-        let _ = RegCloseKey(hkey);
-
-        Ok(String::from_utf16_lossy(&buffer)
-            .trim_end_matches('\0')
-            .to_string())
-    }
-}
-
 fn log_service(exe_dir: &Path, level: &str, message: &str) {
     let logs_dir = exe_dir.join("logs");
     let _ = create_dir_all(&logs_dir);
@@ -525,6 +461,69 @@ fn run_unlock_server(state: Arc<State>) {
         handles.push(thread::spawn(move || unlock_accept_loop(st)));
     }
     for h in handles { let _ = h.join(); }
+}
+
+fn handle_passkey_face_client(pipe: HANDLE, state: Arc<State>) {
+    let response = match pipe_read(pipe) {
+        Ok(data) if String::from_utf8_lossy(&data).trim() == "authorize" => {
+            log_service(
+                &state.exe_dir,
+                "INFO",
+                "passkey plugin requested face authorization",
+            );
+            match state
+                .passkey_face_gate
+                .request_and_wait(Duration::from_secs(60))
+            {
+                passkey::FaceAuthorizationResult::Authorized => b"AUTHORIZED".as_slice(),
+                passkey::FaceAuthorizationResult::Rejected => b"REJECTED".as_slice(),
+                passkey::FaceAuthorizationResult::TimedOut => b"TIMEOUT".as_slice(),
+            }
+        }
+        Ok(_) => b"INVALID_REQUEST".as_slice(),
+        Err(_) => b"READ_ERROR".as_slice(),
+    };
+
+    let _ = pipe_write(pipe, response);
+    unsafe { let _ = DisconnectNamedPipe(pipe); }
+    close_handle(pipe);
+}
+
+fn passkey_face_accept_loop(state: Arc<State>) {
+    loop {
+        if state.should_exit.load(Ordering::SeqCst) { break; }
+
+        let pipe = match create_named_pipe(PIPE_PASSKEY_FACE_NAME) {
+            Ok(pipe) => pipe,
+            Err(_) => {
+                thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+        };
+
+        if wait_for_client(pipe).is_err() {
+            close_handle(pipe);
+            continue;
+        }
+
+        spawn_pipe_handler(
+            state.clone(),
+            pipe,
+            "passkey-face",
+            handle_passkey_face_client,
+        );
+    }
+}
+
+fn run_passkey_face_server(state: Arc<State>) {
+    let mut handles = Vec::with_capacity(2);
+    for _ in 0..2 {
+        let st = state.clone();
+        handles.push(thread::spawn(move || passkey_face_accept_loop(st)));
+    }
+    for handle in handles {
+        let _ = handle.join();
+    }
 }
 
 fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
@@ -1165,6 +1164,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         if state.should_exit.load(Ordering::SeqCst) { break; }
 
         if state.release_requested.swap(false, Ordering::SeqCst) {
+            state.passkey_face_gate.reject_pending();
             cam = None;
             delayed_run_at = None;
             delay_session_armed = false;
@@ -1372,12 +1372,19 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             }
         }
 
-        if !state.run_requested.swap(false, Ordering::SeqCst) {
+        let passkey_request_id = state.passkey_face_gate.pending_request_id();
+        let normal_run_requested = if passkey_request_id.is_none() {
+            state.run_requested.swap(false, Ordering::SeqCst)
+        } else {
+            false
+        };
+        if passkey_request_id.is_none() && !normal_run_requested {
             thread::sleep(Duration::from_millis(30));
             continue;
         }
 
-        if let Some(failed_at) = last_failed_at {
+        if passkey_request_id.is_none() {
+            if let Some(failed_at) = last_failed_at {
             let elapsed = failed_at.elapsed();
             if elapsed < retry_delay {
                 let remaining_ms = retry_delay.saturating_sub(elapsed).as_millis();
@@ -1388,6 +1395,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 );
                 thread::sleep(Duration::from_millis(30));
                 continue;
+            }
             }
         }
         state.recognition_active.store(true, Ordering::SeqCst);
@@ -1409,7 +1417,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         }
         if records.is_empty() {
             log_service(&exe_dir, "WARN", "run requested but no enabled face records found");
-            state.run_requested.store(false, Ordering::SeqCst);
+            if let Some(request_id) = passkey_request_id {
+                state.passkey_face_gate.reject(request_id);
+            } else {
+                state.run_requested.store(false, Ordering::SeqCst);
+            }
             state.recognition_active.store(false, Ordering::SeqCst);
             cam = None;
             continue;
@@ -1438,7 +1450,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 }
                 // 10 秒内仍未就绪——放弃本次 run，下次 run 会再试
                 log_service(&exe_dir, "WARN", "model not ready after 20 retries, deferring run");
-                state.run_requested.store(false, Ordering::SeqCst);
+                if let Some(request_id) = passkey_request_id {
+                    state.passkey_face_gate.reject(request_id);
+                } else {
+                    state.run_requested.store(false, Ordering::SeqCst);
+                }
                 state.recognition_active.store(false, Ordering::SeqCst);
                 continue 'main;
             }
@@ -1527,13 +1543,27 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                         let score = cosine_sim(&cam_bytes, &rec.feature_bytes);
                         let threshold = rec.threshold as f64 / 100.0;
                         if score >= threshold {
-                            *state.matched_creds.lock().unwrap() = Some((rec.user_name.clone(), rec.user_pwd.clone(), rec.domain.clone()));
-                            log_service(&exe_dir, "INFO", &format!("face matched for {}", rec.user_name));
+                            if passkey_request_id.is_some() {
+                                log_service(
+                                    &exe_dir,
+                                    "INFO",
+                                    &format!("face matched for passkey authorization: {}", rec.user_name),
+                                );
+                            } else {
+                                *state.matched_creds.lock().unwrap() = Some((
+                                    rec.user_name.clone(),
+                                    rec.user_pwd.clone(),
+                                    rec.domain.clone(),
+                                ));
+                                log_service(&exe_dir, "INFO", &format!("face matched for {}", rec.user_name));
+                            }
                             matched_face_id = Some(rec.id);
                             // 更新活跃时间：人脸识别成功说明用户在
                             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
                             state.last_user_active.store(now, Ordering::SeqCst);
-                            state.last_successful_unlock_at.store(now, Ordering::SeqCst);
+                            if passkey_request_id.is_none() {
+                                state.last_successful_unlock_at.store(now, Ordering::SeqCst);
+                            }
                             matched = true;
                             // 仅提交密码凭据（Approach B）——所有场景统一走密码，登录/解锁秒过，
                             // CredUI 被拒时由 DLL 回退 Windows 原生 PIN。不再加载/注入存储 PIN。
@@ -1567,29 +1597,41 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             set_brightness(orig);
         }
 
-        if matched {
-            insert_unlock_log(&db_path, &exe_dir, matched_face_id, true, None);
-            last_failed_at = None;
-            state.run_requested.store(false, Ordering::SeqCst);
-            state.consecutive_failures.store(0, Ordering::SeqCst);
-            // 重置 delay 状态，确保下次锁屏时能重新布防。
-            delayed_run_at = None;
-            delay_session_armed = false;
-        } else if !state.release_requested.load(Ordering::SeqCst) {
-            if saw_face {
-                insert_unlock_log(&db_path, &exe_dir, None, false, None);
+        if let Some(request_id) = passkey_request_id {
+            if matched {
+                if state.passkey_face_gate.authorize(request_id) {
+                    log_service(&exe_dir, "INFO", "passkey face authorization granted");
+                } else {
+                    log_service(&exe_dir, "WARN", "passkey face authorization expired before match");
+                }
+            } else if state.passkey_face_gate.reject(request_id) {
+                log_service(&exe_dir, "WARN", "passkey face authorization rejected");
             }
-            last_failed_at = Some(Instant::now());
-            // 递增连续失败计数，用于 delay 退避。
-            let fails = state.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
-            // 重置 delay 状态，允许下次 prepare 心跳重新布防。
-            delayed_run_at = None;
-            delay_session_armed = false;
-            log_service(&exe_dir, "WARN", &format!(
-                "face recognition finished without a match (consecutive failures: {fails})"
-            ));
+        } else {
+            if matched {
+                insert_unlock_log(&db_path, &exe_dir, matched_face_id, true, None);
+                last_failed_at = None;
+                state.run_requested.store(false, Ordering::SeqCst);
+                state.consecutive_failures.store(0, Ordering::SeqCst);
+                // 重置 delay 状态，确保下次锁屏时能重新布防。
+                delayed_run_at = None;
+                delay_session_armed = false;
+            } else if !state.release_requested.load(Ordering::SeqCst) {
+                if saw_face {
+                    insert_unlock_log(&db_path, &exe_dir, None, false, None);
+                }
+                last_failed_at = Some(Instant::now());
+                // 递增连续失败计数，用于 delay 退避。
+                let fails = state.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                // 重置 delay 状态，允许下次 prepare 心跳重新布防。
+                delayed_run_at = None;
+                delay_session_armed = false;
+                log_service(&exe_dir, "WARN", &format!(
+                    "face recognition finished without a match (consecutive failures: {fails})"
+                ));
+            }
+            state.run_requested.store(false, Ordering::SeqCst);
         }
-        state.run_requested.store(false, Ordering::SeqCst);
         state.recognition_active.store(false, Ordering::SeqCst);
         cam = None;
     }
@@ -1804,9 +1846,8 @@ fn run_service_worker(exe_dir: PathBuf) -> i32 {
     let dir2 = exe_dir.clone();
     thread::spawn(move || auto_lock_monitor(s3, dir2));
 
-    // Passkey 自接管 HTTP 签名服务（灰度：PASSKEY_TAKEOVER_ENABLED=1 时启动）
-    let db_path = exe_dir.join("database.db");
-    passkey::start_if_enabled(&exe_dir, &db_path);
+    let s4 = state.clone();
+    thread::spawn(move || run_passkey_face_server(s4));
 
     face_recognition_loop(state, exe_dir);
     0
@@ -1880,7 +1921,7 @@ fn main() {
 
     // ── NGC 解密链 Smoke Test（CLI 模式）────────────────────────────
     let args: Vec<String> = std::env::args().collect();
-    let is_cli_mode = args.iter().any(|a| a == "--ngc-smoke-test" || a == "--ngc-probe" || a == "--ngc-dump" || a == "--ngc-keys" || a == "--ngc-sign" || a == "--ngc-enum-cng" || a == "--ngc-sign-probe" || a == "--ngc-container-dump" || a == "--ngc-srk" || a == "--ngc-ncrypt" || a == "--ngc-ncrypt-vault" || a == "--ngc-ncrypt-export" || a == "--ngc-dump-enc" || a == "--ngc-cbor-deep-dump" || a == "--ngc-phase1" || a == "--ngc-phase1-path-a" || a == "--ngc-probe-derive" || a == "--uia-dump-credui" || a == "--uia-dump-all" || a == "--uia-autofill-pin" || a == "--uia-blind-inject" || a == "--pin-save");
+    let is_cli_mode = args.iter().any(|a| a == "--ngc-smoke-test" || a == "--ngc-probe" || a == "--ngc-dump" || a == "--ngc-keys" || a == "--ngc-enum-cng" || a == "--ngc-sign-probe" || a == "--ngc-container-dump" || a == "--ngc-srk" || a == "--ngc-ncrypt" || a == "--ngc-ncrypt-vault" || a == "--ngc-ncrypt-export" || a == "--ngc-dump-enc" || a == "--ngc-cbor-deep-dump" || a == "--ngc-phase1" || a == "--ngc-phase1-path-a" || a == "--ngc-probe-derive" || a == "--uia-dump-credui" || a == "--uia-dump-all" || a == "--uia-autofill-pin" || a == "--uia-blind-inject" || a == "--pin-save");
 
     // windows_subsystem="windows" → 无控制台。CLI 结果全量写入文件。
     let cli_out_path: Option<std::path::PathBuf> = if is_cli_mode {
@@ -2638,24 +2679,6 @@ fn main() {
         cli_done(cli_out_path.as_ref().unwrap(), true);
     }
 
-    if args.iter().any(|a| a == "--ngc-sign") {
-        let uidx = args.iter().position(|a| a == "--ngc-sign").unwrap_or(0) + 1;
-        let u = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
-        let p = args.get(uidx+1).map(|s| s.as_str()).unwrap_or("");
-        if u.is_empty() || p.is_empty() { cli_println!(&cli_out_path, "用法: --ngc-sign <用户名> <PIN>"); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        cli_println!(&cli_out_path, "=== NGC ECDSA 签名测试 ===");
-        cli_println!(&cli_out_path, "用户: {}", u);
-        use sha2::{Sha256, Digest};
-        let hash = Sha256::digest(b"FaceWinUnlock sign test");
-        cli_println!(&cli_out_path, "SHA-256: {:02x?}", &hash[..8]);
-        let ngc_root = std::path::Path::new(r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc");
-        let req = passkey::fido2::AssertionRequest { rp_id: "test.local".to_string(), challenge: ngc::base64_encode(&hash), origin: "https://test.local".to_string(), timeout: 60000, allow_credentials: vec![] };
-        match passkey::signer::sign_assertion(p, &req, "", 1, ngc_root, &exe_dir) {
-            Ok(a) => { cli_println!(&cli_out_path, "ECDSA签名: 成功 (sig len={})", a.signature.len()); cli_done(cli_out_path.as_ref().unwrap(), true); }
-            Err(e) => { cli_println!(&cli_out_path, "签名失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        }
-    }
-
     if args.iter().any(|a| a == "--ngc-keys") {
         let username = args.iter().position(|a| a == "--ngc-keys")
             .and_then(|i| args.get(i + 1)).map(|s| s.as_str()).unwrap_or("");
@@ -2750,6 +2773,44 @@ fn main() {
                 cli_println!(&cli_out_path, "❌ 找不到 SID: {}", e);
                 cli_println!(&cli_out_path, "请手动指定: --pin-save \"星记\" <PIN> S-1-5-21-xxx");
                 cli_done(cli_out_path.as_ref().unwrap(), false);
+            }
+        }
+    }
+
+    // 诊断探针：直接测试 Passport KSP 能否对真实 FIDO 密钥静默签名。
+    // 用法: --probe-ksp-sign <rpId> <PIN文件路径>
+    // PIN 从文件读取，避免出现在进程参数 / 命令行回显里。
+    if args.iter().any(|a| a == "--probe-ksp-sign") {
+        let idx = args.iter().position(|a| a == "--probe-ksp-sign").unwrap() + 1;
+        let rp_id = args.get(idx).map(|s| s.as_str()).unwrap_or("webauthn.io");
+        let pin_file = args.get(idx + 1).map(|s| s.as_str()).unwrap_or("");
+        let pin = if pin_file.is_empty() {
+            String::new()
+        } else {
+            std::fs::read_to_string(pin_file)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        };
+        println!("=== Passport KSP 签名探针 ===");
+        println!("rpId : {}", rp_id);
+        println!(
+            "PIN  : {} ({} 位)",
+            if pin.is_empty() { "<空>" } else { "<已从文件读取>" },
+            pin.chars().count()
+        );
+        let digest = [0x42u8; 32];
+        let start = std::time::Instant::now();
+        match ngc::ncrypt::sign_fido_assertion_hash(rp_id, &pin, &digest) {
+            Ok((sig, key_name)) => {
+                println!("✅ 签名成功: {} 字节 DER (耗时 {:.2?})", sig.len(), start.elapsed());
+                println!("   密钥名: {}", key_name);
+                println!("   → Passport KSP 允许静默签名，Approach B 对现有密钥可行。");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                println!("❌ 签名失败 (耗时 {:.2?}): {}", start.elapsed(), e);
+                println!("   → 若错误指向拒绝/需交互式 UI，则 KSP 禁止静默签名，须走官方插件。");
+                std::process::exit(1);
             }
         }
     }

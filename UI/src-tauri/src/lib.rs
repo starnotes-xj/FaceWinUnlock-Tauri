@@ -19,10 +19,11 @@ use modules::faces::{
 };
 use modules::init::{
     check_admin_privileges, check_camera_status, deploy_core_components, uninstall_init,
-    extract_passkey_keys,
 };
 use modules::options::write_to_registry;
-use modules::pin_commands::{encrypt_pin, verify_pin_hash_stored, get_user_sid};
+use modules::passkey_plugin::{
+    get_passkey_plugin_status, install_passkey_plugin, open_passkey_plugin_manager,
+};
 use modules::update_check::check_update;
 use modules::update_download::{apply_update, fetch_update_diff};
 use opencv::{
@@ -199,7 +200,9 @@ pub fn run() {
                 check_camera_status,
                 deploy_core_components,
                 uninstall_init,
-                extract_passkey_keys,
+                get_passkey_plugin_status,
+                install_passkey_plugin,
+                open_passkey_plugin_manager,
                 check_update,
                 fetch_update_diff,
                 apply_update,
@@ -233,10 +236,6 @@ pub fn run() {
                 check_trigger_via_xml,
                 repair_unlock_scheduled_task,
                 restart_unlock_service,
-                // PIN 存储模块
-                encrypt_pin,
-                verify_pin_hash_stored,
-                get_user_sid,
             ]);
     }
     builder

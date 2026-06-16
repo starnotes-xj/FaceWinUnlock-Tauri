@@ -13,7 +13,7 @@ Write-Host " FaceWinUnlock-Tauri 构建脚本" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
 # ── 1. 设置 Rust 环境 ──────────────────────────────────────
-Write-Host "`n[1/4] 设置 Rust 环境..." -ForegroundColor Yellow
+Write-Host "`n[1/5] 设置 Rust 环境..." -ForegroundColor Yellow
 $env:RUSTUP_HOME = "D:\Rust"
 $env:CARGO_HOME  = "D:\Rust\CARGO"
 $env:PATH        = "D:\Rust\CARGO\bin;" + $env:PATH
@@ -28,7 +28,7 @@ try {
 }
 
 # ── 2. 构建 Rust 项目 (工作区: Server + Unlock + UI) ─────────
-Write-Host "`n[2/4] 构建 Rust 工作区 (Server DLL + Unlock EXE + UI)..." -ForegroundColor Yellow
+Write-Host "`n[2/5] 构建 Rust 工作区 (Server DLL + Unlock EXE + UI)..." -ForegroundColor Yellow
 Write-Host "  这可能需要几分钟，取决于 CPU 性能..." -ForegroundColor Gray
 
 Push-Location $ScriptDir
@@ -40,13 +40,20 @@ try {
     Pop-Location
 }
 
-# ── 3. 验证关键产物 ─────────────────────────────────────────
-Write-Host "`n[3/4] 验证构建产物..." -ForegroundColor Yellow
+# ── 3. 构建官方 Passkey 插件 MSIX ────────────────────────────
+Write-Host "`n[3/5] 构建 FaceWinUnlock Passkey 插件..." -ForegroundColor Yellow
+& (Join-Path $ScriptDir "scripts\build-passkey-plugin.ps1")
+if ($LASTEXITCODE -ne 0) { throw "Passkey 插件构建失败" }
+
+# ── 4. 验证关键产物 ─────────────────────────────────────────
+Write-Host "`n[4/5] 验证构建产物..." -ForegroundColor Yellow
 
 $targetDir = Join-Path $ScriptDir "target\release"
 $dll  = Join-Path $targetDir "FaceWinUnlock_Tauri.dll"
 $exe  = Join-Path $targetDir "FaceWinUnlock-Server.exe"
 $ui   = Join-Path $targetDir "facewinunlock-tauri.exe"
+$passkeyMsix = Join-Path $targetDir "FaceWinUnlock-Passkey.msix"
+$passkeyCer = Join-Path $targetDir "FaceWinUnlock-Passkey.cer"
 
 $allGood = $true
 if (-not (Test-Path $dll)) {
@@ -70,13 +77,27 @@ if (-not (Test-Path $ui)) {
     Write-Host "  [✓] UI EXE: facewinunlock-tauri.exe ($((Get-Item $ui).Length) bytes)" -ForegroundColor Green
 }
 
+if (-not (Test-Path $passkeyMsix)) {
+    Write-Host "  [缺失] $passkeyMsix" -ForegroundColor Red
+    $allGood = $false
+} else {
+    Write-Host "  [✓] Passkey MSIX: FaceWinUnlock-Passkey.msix ($((Get-Item $passkeyMsix).Length) bytes)" -ForegroundColor Green
+}
+
+if (-not (Test-Path $passkeyCer)) {
+    Write-Host "  [缺失] $passkeyCer" -ForegroundColor Red
+    $allGood = $false
+} else {
+    Write-Host "  [✓] Passkey 证书: FaceWinUnlock-Passkey.cer ($((Get-Item $passkeyCer).Length) bytes)" -ForegroundColor Green
+}
+
 if (-not $allGood) {
     Write-Host "`n  构建产物不完整，请检查上方缺失项" -ForegroundColor Red
     exit 1
 }
 
-# ── 4. 构建 Tauri 安装包 (NSIS) ─────────────────────────────
-Write-Host "`n[4/4] 构建 Tauri 安装包..." -ForegroundColor Yellow
+# ── 5. 构建 Tauri 安装包 (NSIS) ─────────────────────────────
+Write-Host "`n[5/5] 构建 Tauri 安装包..." -ForegroundColor Yellow
 Push-Location (Join-Path $ScriptDir "UI")
 try {
     # 首次构建需要 npm install
@@ -103,6 +124,7 @@ $installer = $null
 if (Test-Path $bundleDir) {
     $installer = Get-ChildItem -Path $bundleDir -Filter "*.exe" -Recurse |
         Where-Object { $_.Name -like "*setup*" -or $_.Name -like "*install*" } |
+        Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
 }
 
@@ -111,7 +133,9 @@ if ($installer) {
 } else {
     # 可能是 msi 格式
     if (Test-Path $bundleDir) {
-        $msi = Get-ChildItem -Path $bundleDir -Filter "*.msi" -Recurse | Select-Object -First 1
+        $msi = Get-ChildItem -Path $bundleDir -Filter "*.msi" -Recurse |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
         if ($msi) {
             Write-Host "`n  MSI 安装包: $($msi.FullName)" -ForegroundColor Green
         }
