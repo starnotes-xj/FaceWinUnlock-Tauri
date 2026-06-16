@@ -18,6 +18,10 @@
     const checkingUpdate = ref(false);
     const { isDark, toggleTheme } = useTheme();
 
+    function formatUpdateMessage(info: any) {
+        return info?.update_reason || `当前 v${info?.current_version} → 最新 v${info?.latest_version}`;
+    }
+
     async function manualCheckUpdate() {
         checkingUpdate.value = true;
         try {
@@ -25,8 +29,8 @@
             if (info?.has_update) {
                 const updateUrl = info.release_url || '';
                 ElNotification({
-                    title: '发现新版本',
-                    message: `当前 v${info.current_version} → 最新 v${info.latest_version}（点击前往下载）`,
+                    title: '发现更新',
+                    message: `${formatUpdateMessage(info)}（点击前往下载）`,
                     type: 'info',
                     duration: 0,
                     onClick: () => { if (updateUrl) window.open(updateUrl, '_blank'); },
@@ -55,8 +59,8 @@
             } catch {
                 const updateUrl = info.release_url || '';
                 ElNotification({
-                    title: '发现新版本',
-                    message: `当前 v${info.current_version} → 最新 v${info.latest_version}（点击前往下载）`,
+                    title: '发现更新',
+                    message: `${formatUpdateMessage(info)}（点击前往下载）`,
                     type: 'info',
                     duration: 10000,
                     onClick: () => { if (updateUrl) window.open(updateUrl, '_blank'); },
@@ -69,8 +73,8 @@
 
             try {
                 await ElMessageBox.confirm(
-                    `发现新版本 v${diff.version}，需下载 ${diff.files_to_update.length} 个文件（约 ${diff.total_size_mb.toFixed(1)} MB），是否立即更新？`,
-                    '发现新版本',
+                    `${formatUpdateMessage(info)}，需下载 ${diff.files_to_update.length} 个文件（约 ${diff.total_size_mb.toFixed(1)} MB），是否立即更新？`,
+                    '发现更新',
                     { confirmButtonText: '立即更新', cancelButtonText: '稍后', type: 'info' }
                 );
             } catch {

@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use opencv::{
     core::{Mat, Rect, Scalar, Size, Vector},
     imgcodecs, imgproc,
@@ -30,14 +30,13 @@ fn rotate_frame(frame: &Mat, rotation: i32) -> Result<Mat, String> {
         return frame.try_clone().map_err(|e| e.to_string());
     }
     let code = match rotation {
-        90  => opencv::core::ROTATE_90_CLOCKWISE,
+        90 => opencv::core::ROTATE_90_CLOCKWISE,
         180 => opencv::core::ROTATE_180,
         270 => opencv::core::ROTATE_90_COUNTERCLOCKWISE,
-        _   => return frame.try_clone().map_err(|e| e.to_string()),
+        _ => return frame.try_clone().map_err(|e| e.to_string()),
     };
     let mut rotated = Mat::default();
-    opencv::core::rotate(frame, &mut rotated, code)
-        .map_err(|e| format!("旋转帧失败: {:?}", e))?;
+    opencv::core::rotate(frame, &mut rotated, code).map_err(|e| format!("旋转帧失败: {:?}", e))?;
     Ok(rotated)
 }
 
@@ -46,15 +45,23 @@ fn mat_to_data_url(frame: &Mat) -> Result<String, String> {
     let mut buf = Vector::<u8>::new();
     imgcodecs::imencode(".jpg", frame, &mut buf, &params)
         .map_err(|e| format!("JPEG 编码失败: {:?}", e))?;
-    Ok(format!("data:image/jpeg;base64,{}", B64.encode(buf.as_slice())))
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        B64.encode(buf.as_slice())
+    ))
 }
 
 fn base64_to_mat(b64: &str) -> Result<Mat, String> {
-    let payload = if let Some(p) = b64.find(',') { &b64[p + 1..] } else { b64 };
-    let bytes = B64.decode(payload).map_err(|e| format!("base64 解码失败: {:?}", e))?;
+    let payload = if let Some(p) = b64.find(',') {
+        &b64[p + 1..]
+    } else {
+        b64
+    };
+    let bytes = B64
+        .decode(payload)
+        .map_err(|e| format!("base64 解码失败: {:?}", e))?;
     let buf = Vector::<u8>::from_iter(bytes);
-    imgcodecs::imdecode(&buf, imgcodecs::IMREAD_COLOR)
-        .map_err(|e| format!("图片解码失败: {:?}", e))
+    imgcodecs::imdecode(&buf, imgcodecs::IMREAD_COLOR).map_err(|e| format!("图片解码失败: {:?}", e))
 }
 
 /// 从帧中检测人脸，返回检测结果 Mat（rows == 0 表示未检测到）
@@ -201,8 +208,7 @@ fn check_face_inner(frame: Mat, detection_threshold: f64) -> Result<CustomResult
     let faces = detect_faces(&frame, threshold)
         .map_err(|e| CustomResult::error(Some(format!("人脸检测失败: {}", e)), None))?;
 
-    let raw_b64 = mat_to_data_url(&frame)
-        .map_err(|e| CustomResult::error(Some(e), None))?;
+    let raw_b64 = mat_to_data_url(&frame).map_err(|e| CustomResult::error(Some(e), None))?;
 
     if faces.rows() == 0 {
         return Ok(CustomResult::success(
@@ -212,10 +218,8 @@ fn check_face_inner(frame: Mat, detection_threshold: f64) -> Result<CustomResult
     }
 
     let mut display = frame.clone();
-    draw_face_box(&mut display, &faces)
-        .map_err(|e| CustomResult::error(Some(e), None))?;
-    let display_b64 = mat_to_data_url(&display)
-        .map_err(|e| CustomResult::error(Some(e), None))?;
+    draw_face_box(&mut display, &faces).map_err(|e| CustomResult::error(Some(e), None))?;
+    let display_b64 = mat_to_data_url(&display).map_err(|e| CustomResult::error(Some(e), None))?;
 
     Ok(CustomResult::success(
         None,
@@ -235,21 +239,23 @@ pub fn check_face_from_camera(
         let mut state = APP_STATE
             .lock()
             .map_err(|e| CustomResult::error(Some(format!("获取 APP_STATE 失败: {}", e)), None))?;
-        let cam = state
-            .camera
-            .as_mut()
-            .ok_or_else(|| CustomResult::error(Some("摄像头未打开，请先调用 open_camera".to_string()), None))?;
+        let cam = state.camera.as_mut().ok_or_else(|| {
+            CustomResult::error(Some("摄像头未打开，请先调用 open_camera".to_string()), None)
+        })?;
         let mut f = Mat::default();
         cam.inner
             .read(&mut f)
             .map_err(|e| CustomResult::error(Some(format!("读取摄像头帧失败: {:?}", e)), None))?;
         if f.empty() {
-            return Err(CustomResult::error(Some("摄像头返回空帧".to_string()), None));
+            return Err(CustomResult::error(
+                Some("摄像头返回空帧".to_string()),
+                None,
+            ));
         }
         f
     };
-    let frame = rotate_frame(&frame, camera_rotation)
-        .map_err(|e| CustomResult::error(Some(e), None))?;
+    let frame =
+        rotate_frame(&frame, camera_rotation).map_err(|e| CustomResult::error(Some(e), None))?;
     check_face_inner(frame, face_detection_threshold)
 }
 
@@ -278,12 +284,10 @@ pub fn save_face_registration(
     reference_base64: String,
     face_detection_threshold: f64,
 ) -> Result<CustomResult, CustomResult> {
-    let frame = base64_to_mat(&reference_base64)
-        .map_err(|e| CustomResult::error(Some(e), None))?;
+    let frame = base64_to_mat(&reference_base64).map_err(|e| CustomResult::error(Some(e), None))?;
 
     let threshold = face_detection_threshold as f32;
-    let faces = detect_faces(&frame, threshold)
-        .map_err(|e| CustomResult::error(Some(e), None))?;
+    let faces = detect_faces(&frame, threshold).map_err(|e| CustomResult::error(Some(e), None))?;
 
     if faces.rows() == 0 {
         return Err(CustomResult::error(
@@ -297,8 +301,8 @@ pub fn save_face_registration(
         .map_err(|e| CustomResult::error(Some(format!("获取检测结果失败: {:?}", e)), None))?
         .try_clone()
         .map_err(|e| CustomResult::error(Some(format!("克隆检测行失败: {:?}", e)), None))?;
-    let feature = extract_feature(&frame, &face_row)
-        .map_err(|e| CustomResult::error(Some(e), None))?;
+    let feature =
+        extract_feature(&frame, &face_row).map_err(|e| CustomResult::error(Some(e), None))?;
 
     let uuid = uuid::Uuid::new_v4().to_string();
     let faces_dir = ROOT_DIR.join("faces");
@@ -317,19 +321,30 @@ pub fn save_face_registration(
     std::fs::write(faces_dir.join(format!("{}.faceimg", uuid)), &img_bytes)
         .map_err(|e| CustomResult::error(Some(format!("写图片文件失败: {}", e)), None))?;
 
-    Ok(CustomResult::success(None, Some(json!({ "file_name": uuid }))))
+    Ok(CustomResult::success(
+        None,
+        Some(json!({ "file_name": uuid })),
+    ))
 }
 
 /// 从参考图提取特征向量（带缓存），避免每帧重复解码+检测+特征提取 (#121)
 fn get_ref_feature(reference_base64: &str, threshold: f32) -> Result<Mat, String> {
     // 用 base64 长度+前16字符做简易哈希，检测参考图变化
-    let hash_key = format!("{}:{}:{}", reference_base64.len(), threshold, &reference_base64[..reference_base64.len().min(64)]);
+    let hash_key = format!(
+        "{}:{}:{}",
+        reference_base64.len(),
+        threshold,
+        &reference_base64[..reference_base64.len().min(64)]
+    );
 
     {
         let cache = VERIFY_CACHE.lock().map_err(|e| e.to_string())?;
         if let Some(c) = cache.as_ref() {
             if c.reference_hash == hash_key {
-                return c.reference_feature.try_clone().map_err(|e| format!("克隆缓存特征失败: {:?}", e));
+                return c
+                    .reference_feature
+                    .try_clone()
+                    .map_err(|e| format!("克隆缓存特征失败: {:?}", e));
             }
         }
     }
@@ -340,8 +355,11 @@ fn get_ref_feature(reference_base64: &str, threshold: f32) -> Result<Mat, String
     if ref_faces.rows() == 0 {
         return Err("参考图中未检测到人脸".to_string());
     }
-    let ref_row = ref_faces.row(0).map_err(|e| e.to_string())?
-        .try_clone().map_err(|e| format!("克隆检测行失败: {:?}", e))?;
+    let ref_row = ref_faces
+        .row(0)
+        .map_err(|e| e.to_string())?
+        .try_clone()
+        .map_err(|e| format!("克隆检测行失败: {:?}", e))?;
     let ref_feature = extract_feature(&ref_frame, &ref_row)?;
 
     // 存入缓存
@@ -385,21 +403,23 @@ pub fn verify_face(
             .read(&mut f)
             .map_err(|e| CustomResult::error(Some(format!("读取摄像头帧失败: {:?}", e)), None))?;
         if f.empty() {
-            return Err(CustomResult::error(Some("摄像头返回空帧".to_string()), None));
+            return Err(CustomResult::error(
+                Some("摄像头返回空帧".to_string()),
+                None,
+            ));
         }
         f
     };
-    let frame = rotate_frame(&frame, camera_rotation)
-        .map_err(|e| CustomResult::error(Some(e), None))?;
+    let frame =
+        rotate_frame(&frame, camera_rotation).map_err(|e| CustomResult::error(Some(e), None))?;
 
     // 2. 检测摄像头帧中的人脸
-    let cam_faces = detect_faces(&frame, threshold)
-        .map_err(|e| CustomResult::error(Some(e), None))?;
+    let cam_faces =
+        detect_faces(&frame, threshold).map_err(|e| CustomResult::error(Some(e), None))?;
 
     if cam_faces.rows() == 0 {
         // 返回裸帧用于预览（不做参考图处理，节省时间）
-        let raw_b64 = mat_to_data_url(&frame)
-            .map_err(|e| CustomResult::error(Some(e), None))?;
+        let raw_b64 = mat_to_data_url(&frame).map_err(|e| CustomResult::error(Some(e), None))?;
         return Ok(CustomResult::success(
             None,
             Some(json!({
@@ -413,13 +433,13 @@ pub fn verify_face(
 
     // 3. 活体检测（可选）
     if liveness_enabled {
-        let live_score = liveness_score(&frame, &cam_faces)
-            .map_err(|e| CustomResult::error(Some(e), None))?;
+        let live_score =
+            liveness_score(&frame, &cam_faces).map_err(|e| CustomResult::error(Some(e), None))?;
         if (live_score as f64) < liveness_threshold {
             let mut display = frame.clone();
             let _ = draw_face_box(&mut display, &cam_faces);
-            let display_b64 = mat_to_data_url(&display)
-                .map_err(|e| CustomResult::error(Some(e), None))?;
+            let display_b64 =
+                mat_to_data_url(&display).map_err(|e| CustomResult::error(Some(e), None))?;
             return Ok(CustomResult::success(
                 None,
                 Some(json!({
@@ -438,8 +458,8 @@ pub fn verify_face(
         .map_err(|e| CustomResult::error(Some(format!("获取检测结果行失败: {:?}", e)), None))?
         .try_clone()
         .map_err(|e| CustomResult::error(Some(format!("克隆检测行失败: {:?}", e)), None))?;
-    let cam_feature = extract_feature(&frame, &cam_row)
-        .map_err(|e| CustomResult::error(Some(e), None))?;
+    let cam_feature =
+        extract_feature(&frame, &cam_row).map_err(|e| CustomResult::error(Some(e), None))?;
 
     // 5. 获取参考图特征（首次提取后缓存复用 #121）
     let ref_feature = get_ref_feature(&reference_base64, threshold)
@@ -452,8 +472,7 @@ pub fn verify_face(
     // 7. 绘制结果并返回
     let mut display = frame.clone();
     let _ = draw_face_box(&mut display, &cam_faces);
-    let display_b64 = mat_to_data_url(&display)
-        .map_err(|e| CustomResult::error(Some(e), None))?;
+    let display_b64 = mat_to_data_url(&display).map_err(|e| CustomResult::error(Some(e), None))?;
 
     let success = score >= 0.5;
     let message = if success {

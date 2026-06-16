@@ -4,8 +4,8 @@ use std::path::Path;
 use opencv::videoio::{VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst};
 use tauri_plugin_log::log;
 use windows::Win32::Foundation::HANDLE;
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use winreg::enums::{HKEY_CLASSES_ROOT, HKEY_LOCAL_MACHINE, KEY_WRITE};
 use winreg::RegKey;
 
@@ -105,7 +105,13 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         }
         std::fs::copy(&src, &dst).map_err(|e| {
             CustomResult::error(
-                Some(format!("复制 {} 失败: {} → {}: {}", name, src.display(), dst.display(), e)),
+                Some(format!(
+                    "复制 {} 失败: {} → {}: {}",
+                    name,
+                    src.display(),
+                    dst.display(),
+                    e
+                )),
                 None,
             )
         })?;
@@ -156,7 +162,9 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
 
     let log_dir = ROOT_DIR.join("logs");
     let _ = fs::create_dir_all(&log_dir);
-    let root_dir_value = ROOT_DIR.to_str().unwrap_or(r"C:\Program Files\facewinunlock-tauri");
+    let root_dir_value = ROOT_DIR
+        .to_str()
+        .unwrap_or(r"C:\Program Files\facewinunlock-tauri");
     let log_dir_value = log_dir.to_str().unwrap_or(root_dir_value);
     let animation_frames_path = ROOT_DIR.join("resources").join("animation_frames.bin");
     let animation_frames_value = animation_frames_path.to_str().unwrap_or("");
@@ -191,7 +199,9 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         if current.trim_end_matches(['\\', '/']) == root_dir_value.trim_end_matches(['\\', '/']) {
             app_key
                 .set_value("DLL_LOG_PATH", &log_dir_value)
-                .map_err(|e| CustomResult::error(Some(format!("迁移 DLL_LOG_PATH 失败: {e}")), None))?;
+                .map_err(|e| {
+                    CustomResult::error(Some(format!("迁移 DLL_LOG_PATH 失败: {e}")), None)
+                })?;
         }
     }
 
@@ -199,15 +209,17 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         if current.trim() == "5.0" {
             app_key
                 .set_value("UNLOCK_GRACE_PERIOD", &"0.0")
-                .map_err(|e| CustomResult::error(Some(format!("迁移 UNLOCK_GRACE_PERIOD 失败: {e}")), None))?;
+                .map_err(|e| {
+                    CustomResult::error(Some(format!("迁移 UNLOCK_GRACE_PERIOD 失败: {e}")), None)
+                })?;
         }
     }
 
     if let Ok(current) = app_key.get_value::<String, _>("RETRY_DELAY") {
         if matches!(current.trim(), "10.0" | "10" | "2.0" | "2") {
-            app_key
-                .set_value("RETRY_DELAY", &"1.0")
-                .map_err(|e| CustomResult::error(Some(format!("迁移 RETRY_DELAY 失败: {e}")), None))?;
+            app_key.set_value("RETRY_DELAY", &"1.0").map_err(|e| {
+                CustomResult::error(Some(format!("迁移 RETRY_DELAY 失败: {e}")), None)
+            })?;
         }
     }
 
@@ -215,14 +227,18 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         if current.trim() == "0" {
             app_key
                 .set_value("CREDUI_ALLOW_BROKER", &"1")
-                .map_err(|e| CustomResult::error(Some(format!("迁移 CREDUI_ALLOW_BROKER 失败: {e}")), None))?;
+                .map_err(|e| {
+                    CustomResult::error(Some(format!("迁移 CREDUI_ALLOW_BROKER 失败: {e}")), None)
+                })?;
         }
     }
 
     if !animation_frames_value.is_empty() {
         app_key
             .set_value("ANIMATION_FRAMES_PATH", &animation_frames_value)
-            .map_err(|e| CustomResult::error(Some(format!("写 ANIMATION_FRAMES_PATH 失败: {e}")), None))?;
+            .map_err(|e| {
+                CustomResult::error(Some(format!("写 ANIMATION_FRAMES_PATH 失败: {e}")), None)
+            })?;
     }
     app_key
         .set_value("PASSKEY_TAKEOVER_ENABLED", &"0")
@@ -306,5 +322,3 @@ fn run_hidden(program: &str, args: &[&str]) -> std::io::Result<std::process::Out
         .creation_flags(CREATE_NO_WINDOW)
         .output()
 }
-
-

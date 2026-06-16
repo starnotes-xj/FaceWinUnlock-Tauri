@@ -1,7 +1,7 @@
 # Windows Hello 风格动画 UI 开发计划
 
 > 本文档跟踪 Credential Provider DLL 动画 UI 功能的设计与实现进度。
-> 起源于 [issue #99](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/99) 提出的"增加动画引导提示"建议。
+> 起源于 [issue #99](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/99) 提出的"增加动画引导提示"建议。
 
 ---
 

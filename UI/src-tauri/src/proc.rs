@@ -1,18 +1,13 @@
-use tauri_plugin_log::log::{error};
+use tauri_plugin_log::log::error;
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     UI::{
         Shell::DefSubclassProc,
-        WindowsAndMessaging::{
-            WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK,
-            WTS_SESSION_UNLOCK,
-        },
+        WindowsAndMessaging::{WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK},
     },
 };
 
-use crate::
-    utils::api::stop_camera
-;
+use crate::utils::api::stop_camera;
 // windows回调
 pub unsafe extern "system" fn wnd_proc_subclass(
     hwnd: HWND,
@@ -33,9 +28,7 @@ pub unsafe extern "system" fn wnd_proc_subclass(
                     error!("关闭摄像头失败: {}", e.to_string());
                 }
             }
-            WTS_SESSION_UNLOCK => {
-
-            }
+            WTS_SESSION_UNLOCK => {}
             _ => {}
         }
     }

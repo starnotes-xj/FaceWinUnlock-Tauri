@@ -58,7 +58,7 @@
 		return invoke("init_model");
 	}).then(()=>{
 		return facesStore.init();
-	}).then(()=>{
+	}).then(async ()=>{
 		let is_initialized = optionsStore.getOptionByKey('is_initialized');
 		if(is_initialized.index == -1 || is_initialized.data.val != 'true'){
 			warn("程序未初始化，强制跳转初始化界面");
@@ -78,7 +78,13 @@
 		}).catch((error)=>{
 			warn(formatObjectString("核心服务计划任务自动修复失败：", error));
 		});
-		if(optionsStore.getOptionValueByKey('silentRun') != "true"){
+		invoke("repair_ui_auto_start_task").then((result)=>{
+			info(`UI 自启任务自动修复完成: ${JSON.stringify(result?.data ?? {})}`);
+		}).catch((error)=>{
+			warn(formatObjectString("UI 自启任务自动修复失败：", error));
+		});
+		const launchedSilently = await invoke("is_silent_launch").catch(() => false);
+		if(!launchedSilently && optionsStore.getOptionValueByKey('silentRun') != "true"){
 			currentWindow.isVisible().then((visible) => {
 				if(!visible){
 					currentWindow.show();

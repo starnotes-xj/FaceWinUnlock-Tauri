@@ -1,15 +1,6 @@
-use std::{
-    os::windows::process::CommandExt,
-    process::Command,
-    thread,
-    time::Duration,
-};
+use std::{os::windows::process::CommandExt, process::Command, thread, time::Duration};
 
-use crate::{
-    utils::custom_result::CustomResult,
-    OpenCVResource, APP_STATE, GLOBAL_TRAY, ROOT_DIR,
-};
-use tauri_plugin_log::log::{info, warn};
+use crate::{utils::custom_result::CustomResult, OpenCVResource, APP_STATE, GLOBAL_TRAY, ROOT_DIR};
 use opencv::{
     core::{Mat, MatTraitConst, Ptr, Size},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
@@ -19,18 +10,23 @@ use opencv::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Manager};
+use tauri_plugin_log::log::{info, warn};
 use windows::{
     core::PWSTR,
     Win32::{
         Foundation::HWND,
         System::{
-            RemoteDesktop::WTSUnRegisterSessionNotification,
-            WindowsProgramming::GetUserNameW,
+            RemoteDesktop::WTSUnRegisterSessionNotification, WindowsProgramming::GetUserNameW,
         },
     },
 };
 
 use super::pipe::Client;
+
+#[tauri::command]
+pub fn is_silent_launch() -> bool {
+    std::env::args().any(|arg| arg == "-s" || arg == "--silent" || arg == "--s")
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct ValidCameraInfo {
@@ -78,7 +74,10 @@ pub fn get_now_username() -> Result<CustomResult, CustomResult> {
         let mut size = 0u32;
         let _ = GetUserNameW(None, &mut size);
         if size == 0 {
-            return Err(CustomResult::error(Some("获取用户名失败".to_string()), None));
+            return Err(CustomResult::error(
+                Some("获取用户名失败".to_string()),
+                None,
+            ));
         }
         let mut buf: Vec<u16> = vec![0u16; size as usize];
         match GetUserNameW(Some(PWSTR(buf.as_mut_ptr())), &mut size) {
@@ -103,9 +102,8 @@ pub fn get_now_username() -> Result<CustomResult, CustomResult> {
 pub fn test_win_logon(user_name: String, password: String) -> Result<CustomResult, CustomResult> {
     // 创建 block 目录
     let block_dir = ROOT_DIR.join("block");
-    std::fs::create_dir_all(&block_dir).map_err(|e| {
-        CustomResult::error(Some(format!("创建 block 目录失败: {}", e)), None)
-    })?;
+    std::fs::create_dir_all(&block_dir)
+        .map_err(|e| CustomResult::error(Some(format!("创建 block 目录失败: {}", e)), None))?;
 
     // 写入凭据 JSON
     let creds = serde_json::json!({
@@ -114,9 +112,8 @@ pub fn test_win_logon(user_name: String, password: String) -> Result<CustomResul
         "domain": "."
     });
     let creds_path = block_dir.join("test_creds.tmp");
-    std::fs::write(&creds_path, creds.to_string()).map_err(|e| {
-        CustomResult::error(Some(format!("写凭据文件失败: {}", e)), None)
-    })?;
+    std::fs::write(&creds_path, creds.to_string())
+        .map_err(|e| CustomResult::error(Some(format!("写凭据文件失败: {}", e)), None))?;
 
     // 锁屏
     unsafe {
@@ -156,8 +153,14 @@ pub fn init_model() -> Result<CustomResult, CustomResult> {
         .map_err(|e| CustomResult::error(Some(format!("初始化识别器模型失败: {:?}", e)), None))?;
 
     // 加载活体检测模型
-    let _ = opencv::dnn::read_net_from_onnx(ROOT_DIR.join("resources").join("face_liveness.onnx").to_str().unwrap())
-            .map_err(|e| CustomResult::error(Some(format!("初始化活体检测模型失败: {:?}", e)), None))?;
+    let _ = opencv::dnn::read_net_from_onnx(
+        ROOT_DIR
+            .join("resources")
+            .join("face_liveness.onnx")
+            .to_str()
+            .unwrap(),
+    )
+    .map_err(|e| CustomResult::error(Some(format!("初始化活体检测模型失败: {:?}", e)), None))?;
 
     Ok(CustomResult::success(None, None))
 }
@@ -199,7 +202,11 @@ pub fn open_camera(
     // 按指定后端或依次尝试 MSMF → DShow → Any
     let backends_to_try: Vec<CameraBackend> = match backend {
         Some(b) => vec![b],
-        None => vec![CameraBackend::MSMF, CameraBackend::DShow, CameraBackend::Any],
+        None => vec![
+            CameraBackend::MSMF,
+            CameraBackend::DShow,
+            CameraBackend::Any,
+        ],
     };
 
     let mut last_err = String::from("无可用摄像头后端");
@@ -284,14 +291,22 @@ pub fn add_scheduled_task(
     // 开机面容识别：同时使用 BootTrigger + LogonTrigger（兜底）。
     // Unlock EXE 启动时只创建管道，模型/摄像头在锁屏收到 run 后才按需加载，
     // 因此 BootTrigger 不再延迟，配合高优先级让核心服务尽早进入可连接状态。
-    // LogonTrigger 作为兜底：如果 BootTrigger 因故未触发，用户登录后仍可启动后台服务，
-    // 配合 SessionUnlock 触发器保证后续锁屏解锁可用。
-    // TimeTrigger 每1分钟周期性检查，作为 supervisor 进程异常退出后的兜底。
-    // Unlock worker 崩溃由 supervisor 立即重启；任务计划器只负责拉起/兜底。
-    let trigger_xml = if run_on_system_start {
-        "<BootTrigger><Enabled>true</Enabled></BootTrigger>\n    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT1M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
+    // LogonTrigger 作为兜底：如果 BootTrigger 因故未触发，用户登录后仍可启动后台服务。
+    // SessionUnlock 触发器也只属于核心服务，保证休眠/唤醒后后台服务可用。
+    // 只有服务端任务保留 TimeTrigger 作为 supervisor 异常退出后的兜底；
+    // UI 自启任务不应每分钟重拉前台，否则会反复打断当前页面并抢焦点。
+    let trigger_xml = if is_server {
+        if run_on_system_start {
+            "<BootTrigger><Enabled>true</Enabled></BootTrigger>\n    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT1M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
+        } else {
+            "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT1M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
+        }
     } else {
-        "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2024-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT1M</Interval>\n        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n      <Enabled>true</Enabled>\n    </TimeTrigger>"
+        if run_on_system_start {
+            "<BootTrigger><Enabled>true</Enabled></BootTrigger>\n    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
+        } else {
+            "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
+        }
     };
 
     let principal_xml = if use_system {
@@ -307,6 +322,11 @@ pub fn add_scheduled_task(
 
     let args_xml = if silent {
         "<Arguments>--silent</Arguments>"
+    } else {
+        ""
+    };
+    let session_unlock_trigger = if is_server {
+        "<SessionStateChangeTrigger>\n      <StateChange>SessionUnlock</StateChange>\n    </SessionStateChangeTrigger>"
     } else {
         ""
     };
@@ -333,9 +353,7 @@ pub fn add_scheduled_task(
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
     {trigger}
-    <SessionStateChangeTrigger>
-      <StateChange>SessionUnlock</StateChange>
-    </SessionStateChangeTrigger>
+    {session_unlock_trigger}
   </Triggers>
   <Principals>
     {principal}
@@ -364,6 +382,7 @@ pub fn add_scheduled_task(
   </Actions>
 </Task>"#,
         trigger = trigger_xml,
+        session_unlock_trigger = session_unlock_trigger,
         principal = principal_xml,
         exe = exe_path,
         args = args_xml,
@@ -373,22 +392,20 @@ pub fn add_scheduled_task(
     // 写 XML 到临时文件
     let temp_path = std::env::temp_dir().join(format!("fwu_task_{}.xml", uuid::Uuid::new_v4()));
     // schtasks /Create /XML 需要 UTF-16 LE 编码
-    let utf16: Vec<u8> = std::iter::once(0xFFu8)   // BOM
+    let utf16: Vec<u8> = std::iter::once(0xFFu8) // BOM
         .chain(std::iter::once(0xFEu8))
-        .chain(
-            xml.encode_utf16()
-                .flat_map(|c| c.to_le_bytes())
-        )
+        .chain(xml.encode_utf16().flat_map(|c| c.to_le_bytes()))
         .collect();
-    std::fs::write(&temp_path, &utf16).map_err(|e| {
-        CustomResult::error(Some(format!("写临时 XML 失败: {}", e)), None)
-    })?;
+    std::fs::write(&temp_path, &utf16)
+        .map_err(|e| CustomResult::error(Some(format!("写临时 XML 失败: {}", e)), None))?;
 
     let output = Command::new("schtasks")
         .args(&[
             "/Create",
-            "/TN", &task_name,
-            "/XML", temp_path.to_str().unwrap_or(""),
+            "/TN",
+            &task_name,
+            "/XML",
+            temp_path.to_str().unwrap_or(""),
             "/F",
         ])
         .creation_flags(CREATE_NO_WINDOW)
@@ -469,10 +486,7 @@ pub fn check_process_running() -> Result<CustomResult, CustomResult> {
     let client = match Client::new(r"\\.\pipe\MansonWindowsUnlockRustUnlock") {
         Ok(c) => c,
         Err(e) => {
-            return Err(CustomResult::error(
-                Some(format!("pipe错误: {}", e)),
-                None,
-            ));
+            return Err(CustomResult::error(Some(format!("pipe错误: {}", e)), None));
         }
     };
 
@@ -491,10 +505,7 @@ pub fn delete_process_running() -> Result<CustomResult, CustomResult> {
     let client = match Client::new(r"\\.\pipe\MansonWindowsUnlockRustUnlock") {
         Ok(c) => c,
         Err(e) => {
-            return Err(CustomResult::error(
-                Some(format!("pipe错误: {}", e)),
-                None,
-            ));
+            return Err(CustomResult::error(Some(format!("pipe错误: {}", e)), None));
         }
     };
 
@@ -540,7 +551,10 @@ pub fn repair_unlock_scheduled_task() -> Result<CustomResult, CustomResult> {
     let exe_path = ROOT_DIR.join("FaceWinUnlock-Server.exe");
     if !exe_path.exists() {
         return Err(CustomResult::error(
-            Some(format!("核心服务不存在，无法修复计划任务: {}", exe_path.display())),
+            Some(format!(
+                "核心服务不存在，无法修复计划任务: {}",
+                exe_path.display()
+            )),
             None,
         ));
     }
@@ -561,7 +575,10 @@ pub fn repair_unlock_scheduled_task() -> Result<CustomResult, CustomResult> {
             true
         }
         Err(e) => {
-            warn!("执行 schtasks 查询核心服务计划任务失败，将按开机启动重建: {}", e);
+            warn!(
+                "执行 schtasks 查询核心服务计划任务失败，将按开机启动重建: {}",
+                e
+            );
             true
         }
     };
@@ -584,6 +601,49 @@ pub fn repair_unlock_scheduled_task() -> Result<CustomResult, CustomResult> {
             "runOnSystemStart": run_on_system_start,
             "started": should_start_now
         })),
+    ))
+}
+
+#[tauri::command]
+pub fn repair_ui_auto_start_task() -> Result<CustomResult, CustomResult> {
+    const TASK_NAME: &str = "FaceWinUnlockAutoStart";
+
+    let query_output = Command::new("schtasks")
+        .args(&["/Query", "/TN", TASK_NAME, "/XML"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| CustomResult::error(Some(format!("查询 UI 自启任务失败: {}", e)), None))?;
+
+    if !query_output.status.success() {
+        return Ok(CustomResult::success(
+            Some("UI 自启任务不存在，无需修复".to_string()),
+            Some(json!({"exists": false, "repaired": false})),
+        ));
+    }
+
+    let xml = decode_schtasks_xml(&query_output.stdout);
+    let needs_repair = xml.contains("TimeTrigger")
+        || xml.contains("SessionStateChangeTrigger")
+        || !xml.contains("--silent");
+    if !needs_repair {
+        return Ok(CustomResult::success(
+            Some("UI 自启任务无需修复".to_string()),
+            Some(json!({"exists": true, "repaired": false})),
+        ));
+    }
+
+    add_scheduled_task(
+        "facewinunlock-tauri.exe".to_string(),
+        TASK_NAME.to_string(),
+        false,
+        true,
+        false,
+        false,
+    )?;
+
+    Ok(CustomResult::success(
+        Some("UI 自启任务已修复".to_string()),
+        Some(json!({"exists": true, "repaired": true})),
     ))
 }
 
@@ -688,14 +748,7 @@ fn stop_unlock_service() {
 fn build_opencv_models(
     backend_id: i32,
     target_id: i32,
-) -> Result<
-    (
-        Ptr<FaceDetectorYN>,
-        Ptr<FaceRecognizerSF>,
-        opencv::dnn::Net,
-    ),
-    String,
-> {
+) -> Result<(Ptr<FaceDetectorYN>, Ptr<FaceRecognizerSF>, opencv::dnn::Net), String> {
     let detector_path = ROOT_DIR
         .join("resources")
         .join("face_detection_yunet_2023mar.onnx");
@@ -898,14 +951,8 @@ fn decode_schtasks_xml(bytes: &[u8]) -> String {
     let sample_len = bytes.len().min(200);
     if sample_len >= 4 {
         let sample = &bytes[..sample_len];
-        let le_zeroes = sample
-            .chunks_exact(2)
-            .filter(|chunk| chunk[1] == 0)
-            .count();
-        let be_zeroes = sample
-            .chunks_exact(2)
-            .filter(|chunk| chunk[0] == 0)
-            .count();
+        let le_zeroes = sample.chunks_exact(2).filter(|chunk| chunk[1] == 0).count();
+        let be_zeroes = sample.chunks_exact(2).filter(|chunk| chunk[0] == 0).count();
         let units = sample_len / 2;
 
         if le_zeroes > units / 2 {
@@ -1002,7 +1049,10 @@ pub fn restart_unlock_service(task_name: String) -> Result<CustomResult, CustomR
     // 先检查 Unlock EXE 是否已经在运行
     if check_process_running().is_ok() {
         info!("Unlock 核心服务已在运行，无需重启");
-        return Ok(CustomResult::success(Some("already_running".to_string()), None));
+        return Ok(CustomResult::success(
+            Some("already_running".to_string()),
+            None,
+        ));
     }
 
     // 执行 schtasks /Run 启动任务

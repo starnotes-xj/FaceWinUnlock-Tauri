@@ -1,4 +1,4 @@
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tauri::{
@@ -47,7 +47,7 @@ fn try_create_tray(app: &AppHandle<Wry>) -> Result<Arc<TrayIcon<Wry>>, Box<dyn s
     // 绑定托盘事件
     let window = app.get_webview_window("main").unwrap().clone();
     let tray_clone = tray.clone();
-    
+
     tray.on_menu_event(move |app, event| match event.id.as_ref() {
         "show-window" => {
             let _ = window.show();
@@ -129,9 +129,7 @@ fn start_tray_retry_thread(app: AppHandle<Wry>) {
 }
 
 // 创建托盘菜单
-pub fn create_tray_menu(
-    app: &AppHandle<Wry>,
-) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
+pub fn create_tray_menu(app: &AppHandle<Wry>) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
     let show_window = MenuItem::with_id(app, "show-window", "显示窗口", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 

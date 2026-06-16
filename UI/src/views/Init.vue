@@ -32,6 +32,8 @@
         installed: false,
         sampleInstalled: false,
         version: '',
+        bundledVersion: '',
+        updateAvailable: false,
         available: false,
     });
 
@@ -43,6 +45,8 @@
             passkeyPlugin.installed = Boolean(status.installed);
             passkeyPlugin.sampleInstalled = Boolean(status.sample_installed);
             passkeyPlugin.version = status.package?.version || status.sample_package?.version || '';
+            passkeyPlugin.bundledVersion = status.bundled_version || '';
+            passkeyPlugin.updateAvailable = Boolean(status.update_available);
             passkeyPlugin.available = Boolean(status.msix_available && status.certificate_available);
         } catch (error) {
             warn(formatObjectString('查询 Passkey 插件状态失败：', error));
@@ -73,7 +77,8 @@
 
         passkeyPlugin.loading = true;
         try {
-            if (!passkeyPlugin.installed || !auto) {
+            const needsInstall = !passkeyPlugin.installed || passkeyPlugin.updateAvailable || replaceSample;
+            if (needsInstall) {
                 if (!passkeyPlugin.available) {
                     ElMessage.warning('安装包中缺少 Passkey 插件或签名证书，无法自动安装');
                     return;
@@ -412,9 +417,11 @@
                         <div style="max-width: 520px; margin: 20px auto;">
                             <el-alert
                                 v-if="passkeyPlugin.installed"
-                                type="success"
+                                :type="passkeyPlugin.updateAvailable ? 'warning' : 'success'"
                                 :title="`正式插件已安装${passkeyPlugin.version ? `（${passkeyPlugin.version}）` : ''}`"
-                                description="向导会自动注册插件并打开 Windows 设置页；你只需要在系统设置中启用 Provider，然后用该插件重新注册网站通行密钥。"
+                                :description="passkeyPlugin.updateAvailable
+                                    ? `安装包内有更新版本${passkeyPlugin.bundledVersion ? `（${passkeyPlugin.bundledVersion}）` : ''}，点击按钮会先更新再打开启用页面。`
+                                    : '向导会自动注册插件并打开 Windows 设置页；你只需要在系统设置中启用 Provider，然后用该插件重新注册网站通行密钥。'"
                                 show-icon
                                 :closable="false"
                             />
@@ -438,9 +445,9 @@
                                 <el-button
                                     type="primary"
                                     :loading="passkeyPlugin.loading"
-                                    :disabled="!passkeyPlugin.available"
+                                    :disabled="(!passkeyPlugin.installed || passkeyPlugin.updateAvailable) && !passkeyPlugin.available"
                                     @click="setupPasskeyPlugin"
-                                >{{ passkeyPlugin.installed ? '修复/更新并打开启用页' : '安装并打开启用页' }}</el-button>
+                                >{{ passkeyPlugin.installed ? (passkeyPlugin.updateAvailable ? '更新并打开启用页' : '打开注册/启用流程') : '安装并打开启用页' }}</el-button>
                                 <el-button
                                     v-if="passkeyPlugin.installed || passkeyPlugin.sampleInstalled"
                                     @click="openPasskeyPluginManager"

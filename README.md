@@ -9,8 +9,8 @@
 **Fork 相对原版的主要变化：**
 - ✅ 复原全部 Rust 核心源码：Server DLL（5文件）、UI 后端（init/faces/api）、Unlock 服务（607行完整人脸识别管线）——均可编译
 - ✅ 修复/实现 13 个原仓库 Issue：#102 #118 #112 #113 #114 #115 #116 #117 #108 #126 #121 #96 #99
-- ✅ 新增摄像头旋转选项：0° / 顺时针 90° / 180° / 逆时针 90°，适用于笔记本侧放等特殊摆放场景，在「首选项 → 识别参数」中配置，录入预览及解锁识别均实时生效 ([#96](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/96))
-- ✅ 新增解锁时屏幕亮度调节：面容识别期间自动提升至目标亮度（0=不调节），识别结束后恢复原始亮度，改善弱光环境解锁成功率 ([#99](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/99))
+- ✅ 新增摄像头旋转选项：0° / 顺时针 90° / 180° / 逆时针 90°，适用于笔记本侧放等特殊摆放场景，在「首选项 → 识别参数」中配置，录入预览及解锁识别均实时生效 ([#96](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/96))
+- ✅ 新增解锁时屏幕亮度调节：面容识别期间自动提升至目标亮度（0=不调节），识别结束后恢复原始亮度，改善弱光环境解锁成功率 ([#99](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/99))
 - ✅ 新增推理后端选择：CPU / OpenCL GPU / OpenCL FP16 / Intel NPU（#125），在「首选项 → 识别参数」中配置
 - ✅ 面容解锁场景可按场景独立配置（登录/解锁/UAC应用层），在「首选项 → 系统集成」中通过复选框调整
 - ✅ 修复多进程日志丢失：Chrome 的 CredUI 在独立进程 `credentialuibroker.exe` 中加载 DLL，现在日志以追加+共享写入模式打开
@@ -39,7 +39,7 @@
 | v0.1.1 | 2026-01-13 | Bug 修复 | 1. 修复用户名或密码错误时，点击磁贴进入无限循环的bug (#1)<br>2. 修复不显示页面磁贴时，解锁失败的问题 (#4) <br/>**需要重新初始化**|
 | v0.2.0 | 2026-01-19 | 功能添加、Bug修复 | 添加按操作调用面容代码的功能<br />添加面容识别失败后的重试功能(仅按操作生效)<br />添加面容禁用功能 (#10)<br />添加重试时间选项<br />添加静默自启选项<br />添加版本号显示<br />修复DLL设置显示磁贴不管用的bug (#15)<br />修复核心组件的线程无法安全退出的bug<br />修复核心组件重复创建凭证类的bug<br />修复每次修改面容后，缩略图会强制启用的bug<br />修复笔记本不插电源线时，自启失效的bug<br />可能修复了所有Win11自启不管用的bug (#16) (#17)<br />优化缩略图的显示状态提示<br />优化多开时的显示逻辑（会将程序设为焦点）<br />**需要重新初始化**|
 | v0.2.1 | 2026-01-21 | Bug修复、系统增强 | 修复自启不显示窗口的bug<br />修复在某部分系统上自启不显示托盘的bug<br />添加密码输入提示<br />修改重试时间最低为1秒<br />自启添加失败后的重试机制<br />**需要重新初始化**|
-| v0.2.2 | 2026-01-26 | 功能添加、增强安全性，优化部分UI | 由[@tztztzy提供](https://github.com/tztztzy)提供，代码切换[tztztzy分支](https://github.com/zs1083339604/FaceWinUnlock-Tauri/tree/tztztzy)<br />增加活体检测功能，模型使用通义实验室的[人脸活体检测模型-RGB](https://modelscope.cn/models/iic/cv_manual_face-liveness_flrgb/summary)<br />增加应用密码，需要密码才可进入应用，超过设定时间自动要求重新登录，增强安全性<br />优化一部分UI<br />**需要重新初始化**|
+| v0.2.2 | 2026-01-26 | 功能添加、增强安全性，优化部分UI | 由[@tztztzy提供](https://github.com/tztztzy)提供，代码切换[tztztzy分支](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/tree/tztztzy)<br />增加活体检测功能，模型使用通义实验室的[人脸活体检测模型-RGB](https://modelscope.cn/models/iic/cv_manual_face-liveness_flrgb/summary)<br />增加应用密码，需要密码才可进入应用，超过设定时间自动要求重新登录，增强安全性<br />优化一部分UI<br />**需要重新初始化**|
 | v0.3.0 | 2026-02-03 | 功能添加、性能优化、Bug修复 | 添加开机面容解锁的支持 (#25) (#18) (#42) (#40) (#30)<br />添加解锁失败时记录最后一帧画面的功能<br />添加服务日志<br />一致性验证添加活体检测逻辑<br />修复多面容只识别第1个的bug<br />修复多账户不能用的问题（由[@Xiao-yu233提供](https://github.com/Xiao-yu233)）<br />修改所有日志为倒序<br />修复账户输入密码时取消登录，发生的内存泄漏并导致无法正常解锁的bug (#35)<br />修复账户输入密码时取消登录，引用计数错乱的bug<br />修复安装到有空格的路径时，开机自启失败的bug (#25)<br />大幅优化程序的内存占用问题 (#33) (#40)<br />优化未检测到人脸的提示<br />增强活体检测的准确性（默认0.6）<br />更新登录安全的相关功能 (#21)<br />修复0xc000007b报错问题 (#43)<br />**需要重新初始化**|
 | v0.3.1 | 2026-02-07 | Bug修复 | 添加用户名和账户类型修改提示<br />优化活体检测的准确性 (#56) (#51) (#35)<br />修复Program目录无法读取和写入数据的bug (#50) (#46) (#44)<br />修复开机时数据库数据读取异常的bug (#60) (#61)<br />修复开机时延迟时间解锁不能用的bug (#60) (#61) |
 | v0.3.2 | 2026-02-13 | 功能添加、性能优化、Bug修复 | 添加未检测到面容停止识别功能 (#32) (#22) (#73)<br />添加活体检测开启提示（准确率高后会去除）<br />添加活体检测时的人脸对齐选项<br />优化活体检测算法（仍无法与2.2相比） (#64) (#56) (#51) (#35)<br />修复RAF报错后无法录入人脸的bug (#63)<br />优化录入人脸未检测到人脸提示 (#58) |
@@ -264,7 +264,7 @@ FaceWinUnlock 现在使用 Windows 官方 Passkey Provider 插件路线：
 
 ## 🔍 检查更新
 
-程序启动时会联网检查 GitHub Release。若新版包含 `update_manifest.json`，客户端会按 SHA256 比对本地运行时文件，只下载发生变化的文件，完成大小与哈希校验后暂存，并在应用退出时替换。旧版 Release 没有 manifest 时仍回退为“点击通知打开 Release 页面”。
+程序启动时会联网检查 GitHub Release，并按**语义版本**判断是否需要更新：只有最新版本高于当前版本时才提示；若版本号相同，则继续用 `update_manifest.json` 的 SHA256 与本地运行时文件比对，只要 hash 不一致也会提醒同步最新构建。需要下载时，客户端只拉取发生变化的文件，完成大小与哈希校验后暂存，并在应用退出时替换。旧版 Release 没有 manifest 时仍回退为“点击通知打开 Release 页面”。
 
 | 项目 | 内容 |
 |------|------|
@@ -279,7 +279,7 @@ FaceWinUnlock 现在使用 Windows 官方 Passkey Provider 插件路线：
 
 | 层 | 文件 | 说明 |
 |----|------|------|
-| 版本检查 | `UI/src-tauri/src/modules/update_check.rs` | `check_update`：GET GitHub API → 比对版本 |
+| 版本检查 | `UI/src-tauri/src/modules/update_check.rs` | `check_update`：GET GitHub API → 语义版本比较 → 同版本时继续做 manifest/hash 校验 |
 | 增量下载 | `UI/src-tauri/src/modules/update_download.rs` | 下载 manifest、计算差异、下载并校验变化文件 |
 | 文件落盘 | `UI/src-tauri/src/utils/api.rs` | `close_app` 时应用 `update_temp` 中的已校验文件 |
 | 前端调用 | `UI/src/layout/MainLayout.vue` | 检查新版 → 展示差异 → 下载 → 提示退出应用 |

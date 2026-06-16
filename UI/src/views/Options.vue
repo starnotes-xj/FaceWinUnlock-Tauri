@@ -76,6 +76,8 @@
 		installed: false,
 		sampleInstalled: false,
 		version: '',
+		bundledVersion: '',
+		updateAvailable: false,
 		available: false,
 	})
 
@@ -87,6 +89,8 @@
 			passkeyPlugin.installed = Boolean(status.installed)
 			passkeyPlugin.sampleInstalled = Boolean(status.sample_installed)
 			passkeyPlugin.version = status.package?.version || status.sample_package?.version || ''
+			passkeyPlugin.bundledVersion = status.bundled_version || ''
+			passkeyPlugin.updateAvailable = Boolean(status.update_available)
 			passkeyPlugin.available = Boolean(status.msix_available && status.certificate_available)
 		} catch (error) {
 			warn(formatObjectString('查询 Passkey 插件状态失败：', error))
@@ -112,9 +116,16 @@
 
 		passkeyPlugin.loading = true
 		try {
-			const result: any = await invoke('install_passkey_plugin', { replaceSample })
-			ElMessage.success(result?.msg || 'Passkey 插件已安装')
-			await refreshPasskeyPluginStatus()
+			const needsInstall = !passkeyPlugin.installed || passkeyPlugin.updateAvailable || replaceSample
+			if (needsInstall) {
+				if (!passkeyPlugin.available) {
+					ElMessage.warning('安装包中缺少 Passkey 插件或签名证书，无法自动安装')
+					return
+				}
+				const result: any = await invoke('install_passkey_plugin', { replaceSample })
+				ElMessage.success(result?.msg || 'Passkey 插件已安装')
+				await refreshPasskeyPluginStatus()
+			}
 			await invoke('open_passkey_plugin_setup')
 			ElMessage.success('已打开 Passkey 插件注册与启用流程')
 		} catch (error) {
@@ -578,8 +589,7 @@
 						@click="activeTab === 'dll' ? applyDllSettings() : saveAppConfig()">
 						{{ activeTab === 'dll' ? '同步至系统注册表' : '保存本地配置' }}
 					</el-button>
-					<el-button type="info" plain @click="openUrl('https://github.com/zs1083339604/FaceWinUnlock-Tauri')">Github</el-button>
-					<el-button type="danger" plain @click="openUrl('https://gitee.com/lieranhuasha/face-win-unlock-tauri')">Gitee</el-button>
+					<el-button type="info" plain @click="openUrl('https://github.com/starnotes-xj/FaceWinUnlock-Tauri')">GitHub</el-button>
 				</div>
 			</div>
 
@@ -866,6 +876,9 @@
 								<el-tag v-if="passkeyPlugin.installed" type="success">
 									正式插件已安装{{ passkeyPlugin.version ? `（${passkeyPlugin.version}）` : '' }}
 								</el-tag>
+								<el-tag v-if="passkeyPlugin.installed && passkeyPlugin.updateAvailable" type="warning">
+									可更新到 {{ passkeyPlugin.bundledVersion }}
+								</el-tag>
 								<el-tag v-else-if="passkeyPlugin.sampleInstalled" type="warning">
 									Contoso 测试插件已安装
 								</el-tag>
@@ -874,9 +887,9 @@
 									type="primary"
 									size="small"
 									:loading="passkeyPlugin.loading"
-									:disabled="!passkeyPlugin.available"
+									:disabled="(!passkeyPlugin.installed || passkeyPlugin.updateAvailable) && !passkeyPlugin.available"
 									@click="setupPasskeyPlugin"
-								>{{ passkeyPlugin.installed ? '修复/更新并打开启用页' : '安装并打开启用页' }}</el-button>
+								>{{ passkeyPlugin.installed ? (passkeyPlugin.updateAvailable ? '更新并打开启用页' : '打开注册/启用流程') : '安装并打开启用页' }}</el-button>
 								<el-button
 									v-if="passkeyPlugin.installed || passkeyPlugin.sampleInstalled"
 									size="small"

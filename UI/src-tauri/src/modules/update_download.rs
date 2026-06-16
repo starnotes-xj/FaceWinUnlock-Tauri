@@ -1,6 +1,6 @@
 //! 增量更新下载模块
 //!
-//! 在 `check_update`（仅比对版本号）之上扩展，实现「只下载变化文件」：
+//! 在 `check_update`（语义版本比较 + 同版本 hash 校验）之上扩展，实现「只下载变化文件」：
 //!   - `fetch_update_diff` — 下载 `update_manifest.json`，按 SHA256 比对本地文件，算出差异清单
 //!   - `apply_update`      — 下载差异文件到 `ROOT_DIR/update_temp`，退出时由 `close_app` 落盘替换
 //!
@@ -25,7 +25,7 @@ const MANIFEST_URL: &str =
 const USER_AGENT: &str = "FaceWinUnlock-Tauri-UpdateDownload";
 
 #[derive(Deserialize, Clone)]
-struct ManifestFile {
+pub(crate) struct ManifestFile {
     /// 安装目录下的文件名（如 `FaceWinUnlock-Server.exe`）
     path: String,
     /// 期望的 SHA256（小写 hex）
@@ -37,9 +37,9 @@ struct ManifestFile {
 }
 
 #[derive(Deserialize)]
-struct UpdateManifest {
-    version: String,
-    files: Vec<ManifestFile>,
+pub(crate) struct UpdateManifest {
+    pub(crate) version: String,
+    pub(crate) files: Vec<ManifestFile>,
 }
 
 /// 差异比对结果，返回给前端用于确认弹窗。
@@ -55,6 +55,10 @@ pub struct DiffResult {
 /// 步骤1：下载 manifest 并比对差异（不下载任何二进制文件，供确认弹窗预估流量）。
 #[tauri::command]
 pub fn fetch_update_diff() -> Result<DiffResult, String> {
+    fetch_update_diff_internal()
+}
+
+pub(crate) fn fetch_update_diff_internal() -> Result<DiffResult, String> {
     let manifest = download_manifest()?;
     compute_diff(&manifest)
 }
@@ -98,7 +102,7 @@ pub fn apply_update() -> Result<String, String> {
     Ok(tmp_dir.to_string_lossy().to_string())
 }
 
-fn download_manifest() -> Result<UpdateManifest, String> {
+pub(crate) fn download_manifest() -> Result<UpdateManifest, String> {
     let resp = ureq::get(MANIFEST_URL)
         .set("User-Agent", USER_AGENT)
         .set("Accept", "application/json")
@@ -111,7 +115,7 @@ fn download_manifest() -> Result<UpdateManifest, String> {
     Ok(manifest)
 }
 
-fn compute_diff(manifest: &UpdateManifest) -> Result<DiffResult, String> {
+pub(crate) fn compute_diff(manifest: &UpdateManifest) -> Result<DiffResult, String> {
     compute_diff_at(&ROOT_DIR, manifest)
 }
 
@@ -161,9 +165,10 @@ fn validate_manifest(manifest: &UpdateManifest) -> Result<(), String> {
         if file.sha256.len() != 64 || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(format!("更新文件 SHA256 无效: {}", file.path));
         }
-        if !file.url.starts_with(
-            "https://github.com/starnotes-xj/FaceWinUnlock-Tauri/releases/download/",
-        ) {
+        if !file
+            .url
+            .starts_with("https://github.com/starnotes-xj/FaceWinUnlock-Tauri/releases/download/")
+        {
             return Err(format!("更新文件来源不受信任: {}", file.path));
         }
     }
@@ -173,8 +178,8 @@ fn validate_manifest(manifest: &UpdateManifest) -> Result<(), String> {
 fn validated_manifest_path(raw: &str) -> Result<PathBuf, String> {
     let path = Path::new(raw);
     let mut components = path.components();
-    let is_single_file = matches!(components.next(), Some(Component::Normal(_)))
-        && components.next().is_none();
+    let is_single_file =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
     if raw.trim().is_empty() || path.is_absolute() || !is_single_file {
         return Err(format!("更新清单包含不安全路径: {raw}"));
     }
@@ -198,8 +203,8 @@ fn download_file(url: &str, dest: &Path, expected_size: u64) -> Result<(), Strin
     let mut file = std::fs::File::create(&part_path)
         .map_err(|e| format!("创建 {} 失败: {e}", part_path.display()))?;
     let mut reader = resp.into_reader().take(expected_size.saturating_add(1));
-    let written = std::io::copy(&mut reader, &mut file)
-        .map_err(|e| format!("读取下载内容失败: {e}"))?;
+    let written =
+        std::io::copy(&mut reader, &mut file).map_err(|e| format!("读取下载内容失败: {e}"))?;
     file.flush()
         .map_err(|e| format!("刷新 {} 失败: {e}", part_path.display()))?;
 
@@ -213,8 +218,7 @@ fn download_file(url: &str, dest: &Path, expected_size: u64) -> Result<(), Strin
         ));
     }
 
-    std::fs::rename(&part_path, dest)
-        .map_err(|e| format!("写入 {} 失败: {e}", dest.display()))?;
+    std::fs::rename(&part_path, dest).map_err(|e| format!("写入 {} 失败: {e}", dest.display()))?;
     Ok(())
 }
 
@@ -269,10 +273,8 @@ mod tests {
 
     #[test]
     fn compute_diff_only_returns_changed_files() {
-        let root = std::env::temp_dir().join(format!(
-            "facewinunlock-update-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("facewinunlock-update-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("same.exe"), b"same").unwrap();

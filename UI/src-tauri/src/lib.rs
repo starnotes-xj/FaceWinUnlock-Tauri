@@ -35,11 +35,12 @@ use opencv::{
 use proc::wnd_proc_subclass;
 use tauri_plugin_log::{Target, TargetKind};
 use utils::api::{
-    add_scheduled_task, check_process_running, check_scheduled_task, close_app,
-    delete_process_running, disable_scheduled_task, get_camera, get_install_dir,
-    get_now_username, init_model, load_opencv_model, open_camera, open_directory,
-    restart_unlock_service, repair_unlock_scheduled_task, stop_camera, test_win_logon,
-    unload_model, get_uuid_v4, get_cache_dir, run_scheduled_task, check_trigger_via_xml
+    add_scheduled_task, check_process_running, check_scheduled_task, check_trigger_via_xml,
+    close_app, delete_process_running, disable_scheduled_task, get_cache_dir, get_camera,
+    get_install_dir, get_now_username, get_uuid_v4, init_model, is_silent_launch,
+    load_opencv_model, open_camera, open_directory, repair_ui_auto_start_task,
+    repair_unlock_scheduled_task, restart_unlock_service, run_scheduled_task, stop_camera,
+    test_win_logon, unload_model,
 };
 mod tray;
 use tray::create_system_tray;
@@ -115,7 +116,14 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder
-            .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+                let is_silent = args
+                    .iter()
+                    .any(|arg| arg == "-s" || arg == "--silent" || arg == "--s");
+                if is_silent {
+                    return;
+                }
+
                 let main = app.get_webview_window("main").expect("no main window");
                 if !main.is_visible().unwrap() {
                     main.show().unwrap();
@@ -217,6 +225,7 @@ pub fn run() {
                 write_to_registry,
                 // 通用api
                 get_install_dir,
+                is_silent_launch,
                 get_now_username,
                 test_win_logon,
                 init_model,
@@ -236,6 +245,7 @@ pub fn run() {
                 get_cache_dir,
                 run_scheduled_task,
                 check_trigger_via_xml,
+                repair_ui_auto_start_task,
                 repair_unlock_scheduled_task,
                 restart_unlock_service,
             ]);

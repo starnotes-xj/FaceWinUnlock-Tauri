@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Repository Overview
 
-This is a fork of [FaceWinUnlock-Tauri](https://github.com/zs1083339604/FaceWinUnlock-Tauri) that **reconstructs the deleted core Rust source code** (v0.3.5). The original author closed the source in March 2026 (commit `94025f8`, "闭源核心代码"); this fork reverse-engineers and restores the missing files so the full project can be built.
+This is a fork of [FaceWinUnlock-Tauri](https://github.com/starnotes-xj/FaceWinUnlock-Tauri) that **reconstructs the deleted core Rust source code** (v0.3.5). The original author closed the source in March 2026 (commit `94025f8`, "闭源核心代码"); this fork reverse-engineers and restores the missing files so the full project can be built.
 
 **Three separate executables, all in the same repo:**
 
@@ -129,23 +129,23 @@ Files in `Server/src/`:
 
 | Issue | 描述 | 修复方式 |
 |-------|------|----------|
-| [#102](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/102) | 密码错误后仍然尝试登录 | `ReportResult` 中登录失败时清除 `is_ready` 标志，防止 Windows 持续用错误凭据重试 |
-| [#118](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/118) | 浏览器 PIN 弹窗卡顿 | `SetUsageScenario` 对 `UNLOCK_SCENE` 列表外的场景返回 `E_NOTIMPL`，阻止不受支持的场景（如 CredUI 4）激活面容识别 |
-| [#120](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/120) | 微软账户解锁问题 | 同上 #118 修复：CredUI 场景过滤后，微软账户浏览器 PIN 弹窗不再被拦截 |
-| [#126](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/126) | 微软应用程式密码不支持 | `GetSerialization` 中 `CredPackAuthenticationBufferW` 改用 `CRED_PACK_PROTECTED_CREDENTIALS`，凭据加密后正确路由到 CloudAP 身份提供程序 |
-| [#113](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/113) | 解锁核心服务突然故障 | DLL Client 线程添加外层重连循环，Unlock EXE 崩溃后自动重连；UI 添加 `restart_unlock_service` 命令用于守护重启 |
-| [#112](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/112) | UAC 面容解锁磁贴弹一下就消失 | `GetCredentialCount` 始终初始化输出指针消除 UB；`is_unlocked` 改为 `SharedCredentials` 中的脉冲信号，由 `GetSerialization` 消费后重置，解决 UAC 多次调用 `GetCredentialCount` 导致的 autologon 竞态丢失 |
-| [#115](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/115) | 锁屏后风扇狂转 | Client 线程 `"run"` 重试添加指数退避策略：前10次正常间隔，11-30次 5× 间隔，31次后 20× 间隔，避免无人时持续高频人脸识别消耗 CPU |
-| [#114](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/114) | 应用和UAC解锁冲突（RDP干扰） | `SetUsageScenario` 检测 `dwflags` 中的 `CREDUIWIN_GENERIC` 标志，配合注册表 `CREDUI_ALLOW_GENERIC`（默认`"0"`）过滤 RDP 等应用的通用凭据弹窗，保留 UAC 系统提权的人脸解锁 |
-| [#108](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/108) | 休眠/重启后不自启动 | `add_scheduled_task` 计划任务 XML 额外添加 `SessionStateChangeTrigger(SessionUnlock)` 触发器，确保休眠唤醒解锁后自动启动 Unlock EXE（`MultipleInstancesPolicy:IgnoreNew` 防止重复实例） |
-| [#116](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/116) | Win11 原生动态锁失效 | Client 线程首次连接后添加可配置宽限期 `UNLOCK_GRACE_PERIOD`（默认 5 秒），锁屏后给用户足够时间走开再开始面容识别，避免动态锁触发后用户被立即面容解锁 |
-| [#117](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/117) | 启动不自启 + 手动解锁后摄像头占用 | Part1 由 #108（SessionUnlock 触发器）+ #113（`restart_unlock_service`）覆盖；Part2 `stop_and_join` 在主场景（登录/解锁）中若面容未识别（手动解锁）则发送 "exit" 通知 Unlock EXE 释放摄像头，CREDUI 场景不发送 |
-| [#121](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/121) | 一致性验证极其卡顿（1-2 FPS） | `verify_face` 添加 `VERIFY_CACHE` 缓存参考图特征（首帧提取，后续帧复用），避免每帧重复 JPEG 解码+DNN检测+128维特征提取；前端帧间延迟从 100ms 降至 33ms |
-| [#92](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/92) | 深色模式 | 新增加 `useTheme` composable（localStorage 持久化 + 系统偏好跟随），导入 `element-plus/theme-chalk/dark/css-vars.css`，侧边栏添加 Sun/Moon 切换按钮，所有硬编码色值改为 CSS 变量 |
-| [#91](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/91) | 解锁磁贴优化 | 自有磁贴 `CPFT_LARGE_TEXT` 改为 `CPFT_SMALL_TEXT`（更小巧/状态指示器风格），标签文字精简为"面容解锁"；在用户账户磁贴上添加标记无法实现（Windows 凭据提供程序架构限制：一个 Provider 不能修改另一个的磁贴） |
-| [#94](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/94) | NVIDIA Broadcast 虚拟摄像头无法工作 | `try_open_camera_with_backend` 和 Unlock EXE 摄像头打开处设置默认 640×480 帧尺寸 + 10 帧预热，解决虚拟摄像头输出异常分辨率/格式导致的花屏或黑帧问题 |
-| [#103](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/103) | 面容被禁用后进行"虚空"登录 | Unlock EXE `load_face_records` 过滤 `view=false`（禁用）和 `lock=true`（锁定）的面容；DLL Creds 线程拒绝空用户名凭据 |
-| [#104](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/104) | 支持域账户登录 | `AccountAuthForm` 新增"域账户"类型 + 域名输入框；Unlock EXE `JsonData`/`FaceRecord` 新增 `domain` 字段，管道凭据组装用实际域名替代硬编码 `"."` |
+| [#102](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/102) | 密码错误后仍然尝试登录 | `ReportResult` 中登录失败时清除 `is_ready` 标志，防止 Windows 持续用错误凭据重试 |
+| [#118](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/118) | 浏览器 PIN 弹窗卡顿 | `SetUsageScenario` 对 `UNLOCK_SCENE` 列表外的场景返回 `E_NOTIMPL`，阻止不受支持的场景（如 CredUI 4）激活面容识别 |
+| [#120](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/120) | 微软账户解锁问题 | 同上 #118 修复：CredUI 场景过滤后，微软账户浏览器 PIN 弹窗不再被拦截 |
+| [#126](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/126) | 微软应用程式密码不支持 | `GetSerialization` 中 `CredPackAuthenticationBufferW` 改用 `CRED_PACK_PROTECTED_CREDENTIALS`，凭据加密后正确路由到 CloudAP 身份提供程序 |
+| [#113](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/113) | 解锁核心服务突然故障 | DLL Client 线程添加外层重连循环，Unlock EXE 崩溃后自动重连；UI 添加 `restart_unlock_service` 命令用于守护重启 |
+| [#112](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/112) | UAC 面容解锁磁贴弹一下就消失 | `GetCredentialCount` 始终初始化输出指针消除 UB；`is_unlocked` 改为 `SharedCredentials` 中的脉冲信号，由 `GetSerialization` 消费后重置，解决 UAC 多次调用 `GetCredentialCount` 导致的 autologon 竞态丢失 |
+| [#115](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/115) | 锁屏后风扇狂转 | Client 线程 `"run"` 重试添加指数退避策略：前10次正常间隔，11-30次 5× 间隔，31次后 20× 间隔，避免无人时持续高频人脸识别消耗 CPU |
+| [#114](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/114) | 应用和UAC解锁冲突（RDP干扰） | `SetUsageScenario` 检测 `dwflags` 中的 `CREDUIWIN_GENERIC` 标志，配合注册表 `CREDUI_ALLOW_GENERIC`（默认`"0"`）过滤 RDP 等应用的通用凭据弹窗，保留 UAC 系统提权的人脸解锁 |
+| [#108](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/108) | 休眠/重启后不自启动 | `add_scheduled_task` 计划任务 XML 额外添加 `SessionStateChangeTrigger(SessionUnlock)` 触发器，确保休眠唤醒解锁后自动启动 Unlock EXE（`MultipleInstancesPolicy:IgnoreNew` 防止重复实例） |
+| [#116](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/116) | Win11 原生动态锁失效 | Client 线程首次连接后添加可配置宽限期 `UNLOCK_GRACE_PERIOD`（默认 5 秒），锁屏后给用户足够时间走开再开始面容识别，避免动态锁触发后用户被立即面容解锁 |
+| [#117](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/117) | 启动不自启 + 手动解锁后摄像头占用 | Part1 由 #108（SessionUnlock 触发器）+ #113（`restart_unlock_service`）覆盖；Part2 `stop_and_join` 在主场景（登录/解锁）中若面容未识别（手动解锁）则发送 "exit" 通知 Unlock EXE 释放摄像头，CREDUI 场景不发送 |
+| [#121](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/121) | 一致性验证极其卡顿（1-2 FPS） | `verify_face` 添加 `VERIFY_CACHE` 缓存参考图特征（首帧提取，后续帧复用），避免每帧重复 JPEG 解码+DNN检测+128维特征提取；前端帧间延迟从 100ms 降至 33ms |
+| [#92](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/92) | 深色模式 | 新增加 `useTheme` composable（localStorage 持久化 + 系统偏好跟随），导入 `element-plus/theme-chalk/dark/css-vars.css`，侧边栏添加 Sun/Moon 切换按钮，所有硬编码色值改为 CSS 变量 |
+| [#91](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/91) | 解锁磁贴优化 | 自有磁贴 `CPFT_LARGE_TEXT` 改为 `CPFT_SMALL_TEXT`（更小巧/状态指示器风格），标签文字精简为"面容解锁"；在用户账户磁贴上添加标记无法实现（Windows 凭据提供程序架构限制：一个 Provider 不能修改另一个的磁贴） |
+| [#94](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/94) | NVIDIA Broadcast 虚拟摄像头无法工作 | `try_open_camera_with_backend` 和 Unlock EXE 摄像头打开处设置默认 640×480 帧尺寸 + 10 帧预热，解决虚拟摄像头输出异常分辨率/格式导致的花屏或黑帧问题 |
+| [#103](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/103) | 面容被禁用后进行"虚空"登录 | Unlock EXE `load_face_records` 过滤 `view=false`（禁用）和 `lock=true`（锁定）的面容；DLL Creds 线程拒绝空用户名凭据 |
+| [#104](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/104) | 支持域账户登录 | `AccountAuthForm` 新增"域账户"类型 + 域名输入框；Unlock EXE `JsonData`/`FaceRecord` 新增 `domain` 字段，管道凭据组装用实际域名替代硬编码 `"."` |
 
 ### Registry Keys
 

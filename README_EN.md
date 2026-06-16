@@ -24,8 +24,8 @@ This repository is a fork of the original project. After the original author rem
 - ✅ Face unlock scenarios now default to UAC/application layer support (`UNLOCK_SCENE` defaults to `"1,2,4"`), configurable in Preferences → System Integration
 - ✅ Fixed multi-process log loss: Chrome CredUI loads the DLL in a separate `credentialuibroker.exe` process — logs now use append+shared write mode, startup entries include PID
 - ✅ Adjusted Google/passkey (WebAuthn) fallback: CredUI hosted by `credentialuibroker.exe` tries face unlock first, then hands control back to Windows PIN if passkey rejects the credential or recognition times out; Chrome/Edge password reveal keeps face unlock
-- ✅ Added camera rotation option: 0° / clockwise 90° / 180° / counter-clockwise 90°, for laptops used sideways or other non-standard orientations, configurable in Preferences → Recognition Parameters, real-time in preview and unlock ([#96](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/96))
-- ✅ Added unlock brightness boost: automatically raises screen brightness during face recognition and restores it when done — improves unlock success rate in low-light environments ([#99](https://github.com/zs1083339604/FaceWinUnlock-Tauri/issues/99))
+- ✅ Added camera rotation option: 0° / clockwise 90° / 180° / counter-clockwise 90°, for laptops used sideways or other non-standard orientations, configurable in Preferences → Recognition Parameters, real-time in preview and unlock ([#96](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/96))
+- ✅ Added unlock brightness boost: automatically raises screen brightness during face recognition and restores it when done — improves unlock success rate in low-light environments ([#99](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/99))
 
 **Original upstream notice:** The original author closed the source in March 2026 after discovering the software was being resold. Core Rust code was removed, leaving only the v0.3.2 framework. This fork reconstructs the missing code for educational and research purposes.
 
@@ -303,7 +303,7 @@ The old browser-extension interception, NGC private-key extraction, and PIN auto
 
 ## 🔍 Update Check
 
-On startup, the app checks the latest GitHub Release. When `update_manifest.json` is available, it compares SHA256 hashes, downloads only changed runtime files, verifies them, and applies them when the app exits. Older releases without a manifest fall back to a notification that opens the Release page.
+On startup, the app checks the latest GitHub Release and uses **semantic version comparison**: it only prompts when the latest version is newer than the current one. If the version is the same, it still compares `update_manifest.json` SHA256 hashes against local runtime files, and will prompt again if the published assets changed under the same version. When an update is needed, it downloads only the changed runtime files, verifies them, and applies them when the app exits. Older releases without a manifest still fall back to a notification that opens the Release page.
 
 | Item | Details |
 |------|---------|
@@ -318,7 +318,7 @@ On startup, the app checks the latest GitHub Release. When `update_manifest.json
 
 | Layer | File | Description |
 |-------|------|-------------|
-| Version check | `UI/src-tauri/src/modules/update_check.rs` | `check_update`: GET GitHub API → version comparison |
+| Version check | `UI/src-tauri/src/modules/update_check.rs` | `check_update`: GET GitHub API → semantic version comparison → same-version manifest/hash check |
 | Incremental download | `UI/src-tauri/src/modules/update_download.rs` | Downloads the manifest, computes the diff, downloads and verifies changed files |
 | File application | `UI/src-tauri/src/utils/api.rs` | Applies verified files from `update_temp` during `close_app` |
 | Frontend | `UI/src/layout/MainLayout.vue` | Checks version → shows diff → downloads → prompts to exit |

@@ -48,6 +48,8 @@
 
     const isEditMode = computed(() => route.query.mode === 'edit');
     const targetId = route.query.id;
+    let modelReady = false;
+    let modelLoadingPromise: Promise<void> | null = null;
 
     // 推理后端名称到 OpenCV DNN backend/target ID 的映射
     const INFERENCE_BACKEND_MAP: Record<string, { backend: number; target: number }> = {
@@ -57,24 +59,36 @@
         'intel_npu':   { backend: 2, target: 9 },
     };
 
-    onMounted(async () => {
-        const loadingInstance = ElLoading.service({ fullscreen: true })
-        try {
-            const backendKey = optionsStore.getOptionValueByKey('inferenceBackend') || 'cpu';
-            const { backend, target } = INFERENCE_BACKEND_MAP[backendKey] ?? { backend: 0, target: 0 };
-            const loadResult: any = await invoke('load_opencv_model', { backend, target });
-            // 所选推理后端不可用（如 Intel NPU 缺少 OpenVINO 运行时）时已自动回退到 CPU，
-            // 在此明确告知用户，避免误以为仍在使用所选后端 (issue #125)。
-            if (loadResult && loadResult.fell_back) {
-                warn(`推理后端不可用，已自动回退到 CPU：${loadResult.fallback_reason || ''}`);
-                ElMessage.warning('所选推理后端不可用（Intel NPU 需安装 OpenVINO 运行时），已自动回退到 CPU。');
+    async function ensureModelLoaded() {
+        if (modelReady) return;
+        if (modelLoadingPromise) return modelLoadingPromise;
+
+        const loadingInstance = ElLoading.service({ fullscreen: true, text: '正在加载人脸识别模型...' });
+        modelLoadingPromise = (async () => {
+            try {
+                const backendKey = optionsStore.getOptionValueByKey('inferenceBackend') || 'cpu';
+                const { backend, target } = INFERENCE_BACKEND_MAP[backendKey] ?? { backend: 0, target: 0 };
+                const loadResult: any = await invoke('load_opencv_model', { backend, target });
+                modelReady = true;
+                // 所选推理后端不可用（如 Intel NPU 缺少 OpenVINO 运行时）时已自动回退到 CPU，
+                // 在此明确告知用户，避免误以为仍在使用所选后端 (issue #125)。
+                if (loadResult && loadResult.fell_back) {
+                    warn(`推理后端不可用，已自动回退到 CPU：${loadResult.fallback_reason || ''}`);
+                    ElMessage.warning('所选推理后端不可用（Intel NPU 需安装 OpenVINO 运行时），已自动回退到 CPU。');
+                }
+            } catch (error) {
+                ElMessage.error(formatObjectString("加载OpenCV模型失败：", error));
+                throw error;
+            } finally {
+                loadingInstance.close();
+                modelLoadingPromise = null;
             }
-        } catch (error) {
-            loadingInstance.close();
-            ElMessage.error(formatObjectString("加载OpenCV模型失败：", error));
-            router.push('/faces');
-        }
-        loadingInstance.close();
+        })();
+
+        return modelLoadingPromise;
+    }
+
+    onMounted(async () => {
         if (isEditMode.value) {
             editFaceData = facesStore.getFaceById(targetId);
             if(editFaceData){
@@ -88,11 +102,14 @@
                 threshold.value = editFaceData.json_data.threshold;
                 faceDetectionThreshold.value = editFaceData.json_data.faceDetectionThreshold * 100;
                 // 添加人脸信息
-                loadFaceFormPath(localStorage.getItem("exe_dir") + "\\faces\\"+editFaceData.face_token+".faceimg").catch((error)=>{
+                try {
+                    await ensureModelLoaded();
+                    await loadFaceFormPath(localStorage.getItem("exe_dir") + "\\faces\\"+editFaceData.face_token+".faceimg");
+                } catch (error) {
                     const info = formatObjectString("载入图片失败：", error);
                     errorLog(info);
                     ElMessage.error(info);
-                })
+                }
             }else{
                 ElMessage.warning('未找到该人脸数据');
                 router.push('/faces');
@@ -109,10 +126,12 @@
 
     onUnmounted(async ()=>{
         await stopCamera();
-        try {
-            await invoke('unload_model');
-        } catch (error) {
-            ElMessage.error(formatObjectString("卸载模型失败：", error));
+        if (modelReady) {
+            try {
+                await invoke('unload_model');
+            } catch (error) {
+                ElMessage.error(formatObjectString("卸载模型失败：", error));
+            }
         }
     })
 
@@ -128,6 +147,7 @@
             if (!selected) return; 
 
             isProcessing.value = true;
+            await ensureModelLoaded();
             
             await loadFaceFormPath(selected);
 
@@ -151,20 +171,26 @@
         ElMessage.success('图片载入成功');
     }
 
-    const startCamera = () => {
+    const startCamera = async () => {
+        if (isProcessing.value) return;
+        isProcessing.value = true;
         let cameraIndex = parseInt(optionsStore.getOptionValueByKey("camera"));
         if(isNaN(cameraIndex)){
             cameraIndex = 0;
         }
-        invoke("open_camera", { backend: null, camearIndex: cameraIndex }).then(()=>{
+        try {
+            await ensureModelLoaded();
+            await invoke("open_camera", { backend: null, camearIndex: cameraIndex });
             isCameraStreaming.value = true;
             isLoopRunning = true;
             streamLoop();
-        }).catch((error)=>{
+        } catch (error) {
             const info = formatObjectString("摄像头开启失败：", error);
             errorLog(info);
             ElMessage.error(formatObjectString(error));
-        });
+        } finally {
+            isProcessing.value = false;
+        }
     };
 
     const streamLoop = async () => {
@@ -261,25 +287,33 @@
     }
 
     // 切换验证模式
-    const toggleVerification = () => {
-        verificationMode.value = !verificationMode.value;
+    const toggleVerification = async () => {
         if (verificationMode.value) {
+            verificationMode.value = false;
+            stopCamera().then(()=>{
+                verifyingStreamImage.value = '';
+            }).catch(()=>{});
+            return;
+        }
+
+        verificationMode.value = true;
+        isProcessing.value = true;
+        try {
+            await ensureModelLoaded();
             let cameraIndex = parseInt(optionsStore.getOptionValueByKey("camera"));
             if(isNaN(cameraIndex)){
                 cameraIndex = 0;
             }
-            invoke("open_camera", { backend: null, camearIndex: cameraIndex }).then(()=>{
-                isLoopRunning = true;
-                streamLoop();
-            }).catch((error)=>{
-                const info = formatObjectString("摄像头开启失败：", error);
-                errorLog(info);
-                ElMessage.error(info);
-            });
-        } else {
-            stopCamera().then(()=>{
-                verifyingStreamImage.value = '';
-            }).catch(()=>{});
+            await invoke("open_camera", { backend: null, camearIndex: cameraIndex });
+            isLoopRunning = true;
+            streamLoop();
+        } catch (error) {
+            verificationMode.value = false;
+            const info = formatObjectString("摄像头开启失败：", error);
+            errorLog(info);
+            ElMessage.error(info);
+        } finally {
+            isProcessing.value = false;
         }
     };
 
