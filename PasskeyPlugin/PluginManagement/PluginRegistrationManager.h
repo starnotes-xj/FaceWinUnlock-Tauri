@@ -30,6 +30,7 @@ constexpr wchar_t c_pluginRegistryPath[] = L"Software\\FaceWinUnlock\\PasskeyMan
 constexpr wchar_t c_windowsPluginRequestSigningKeyRegKeyName[] = L"RequestSigningKeyBlob";
 constexpr wchar_t c_windowsPluginVaultLockedRegKeyName[] = L"VaultLocked";
 constexpr wchar_t c_windowsPluginSilentOperationRegKeyName[] = L"SilentOperation";
+constexpr wchar_t c_windowsPluginSetupRequestedRegKeyName[] = L"SetupRequested";
 constexpr wchar_t c_windowsPluginDBUpdateInd[] = L"PluginDBUpdate";
 constexpr wchar_t c_pluginHMACSecretInput[] = L"HMACSecretInput";
 constexpr wchar_t c_pluginEncryptedVaultData[] = L"EncryptedVaultData";

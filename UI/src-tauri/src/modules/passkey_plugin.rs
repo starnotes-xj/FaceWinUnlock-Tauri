@@ -31,6 +31,10 @@ fn powershell_literal(value: &Path) -> String {
     format!("'{}'", value.display().to_string().replace('\'', "''"))
 }
 
+fn powershell_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 fn artifact_path(file_name: &str) -> PathBuf {
     let installed = ROOT_DIR.join(file_name);
     if installed.exists() {
@@ -156,8 +160,59 @@ pub fn install_passkey_plugin(replace_sample: bool) -> Result<CustomResult, Cust
 
     let status = status_value().map_err(|e| CustomResult::error(Some(e), None))?;
     Ok(CustomResult::success(
-        Some("FaceWinUnlock Passkey 已安装，请打开管理器完成注册和启用".to_string()),
+        Some("FaceWinUnlock Passkey 已安装，正在打开注册与启用流程".to_string()),
         Some(status),
+    ))
+}
+
+#[tauri::command]
+pub fn open_passkey_plugin_setup() -> Result<CustomResult, CustomResult> {
+    let formal =
+        query_package(FORMAL_PACKAGE_NAME).map_err(|e| CustomResult::error(Some(e), None))?;
+    let Some(package) = formal else {
+        return Err(CustomResult::error(
+            Some("尚未安装 FaceWinUnlock Passkey 正式插件".to_string()),
+            None,
+        ));
+    };
+
+    let package_family_name = package["package_family_name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    if package_family_name.is_empty() {
+        return Err(CustomResult::error(
+            Some("插件包信息不完整，无法打开设置流程".to_string()),
+            None,
+        ));
+    }
+
+    let target = format!("shell:AppsFolder\\{package_family_name}!{FORMAL_APP_ID}");
+    let script = format!(
+        "$localState = Join-Path $env:LOCALAPPDATA {}; \
+         New-Item -ItemType Directory -Path $localState -Force | Out-Null; \
+         Set-Content -Path (Join-Path $localState 'FaceWinUnlockSetupRequested.flag') -Value '1' -Encoding ASCII -Force; \
+         Start-Process -FilePath 'explorer.exe' -ArgumentList {} -ErrorAction Stop;",
+        powershell_string_literal(&format!(
+            "Packages\\{package_family_name}\\LocalState"
+        )),
+        powershell_string_literal(&target)
+    );
+    let output = run_powershell(&script)
+        .map_err(|e| CustomResult::error(Some(format!("启动 Passkey 设置流程失败: {e}")), None))?;
+    if !output.status.success() {
+        return Err(CustomResult::error(
+            Some(format!(
+                "启动 Passkey 设置流程失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            None,
+        ));
+    }
+
+    Ok(CustomResult::success(
+        Some("已打开 Passkey 插件设置流程".to_string()),
+        None,
     ))
 }
 

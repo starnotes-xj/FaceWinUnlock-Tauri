@@ -25,6 +25,7 @@
     const isFinalizing = ref(false);
     const optionsStore = useOptionsStore();
     const riskDialogVisible = ref(false);
+    const passkeyAutoSetupAttempted = ref(false);
 
     const passkeyPlugin = reactive({
         loading: false,
@@ -50,9 +51,14 @@
         }
     }
 
-    async function installPasskeyPlugin() {
+    async function setupPasskeyPlugin(options = {}) {
+        const auto = Boolean(options.auto);
         let replaceSample = false;
         if (passkeyPlugin.sampleInstalled && !passkeyPlugin.installed) {
+            if (auto) {
+                warn('检测到 Contoso 测试插件，自动 Passkey 设置已跳过，等待用户确认迁移');
+                return;
+            }
             try {
                 await ElMessageBox.confirm(
                     '当前安装的是 Contoso 测试插件。替换后，该测试插件本地保存的通行密钥会被删除，网站端旧凭据也需要重新注册。确定迁移到正式插件吗？',
@@ -67,12 +73,19 @@
 
         passkeyPlugin.loading = true;
         try {
-            const result = await invoke('install_passkey_plugin', { replaceSample });
-            ElMessage.success(result?.msg || 'Passkey 插件已安装');
-            await refreshPasskeyPluginStatus();
-            await invoke('open_passkey_plugin_manager');
+            if (!passkeyPlugin.installed || !auto) {
+                if (!passkeyPlugin.available) {
+                    ElMessage.warning('安装包中缺少 Passkey 插件或签名证书，无法自动安装');
+                    return;
+                }
+                const result = await invoke('install_passkey_plugin', { replaceSample });
+                ElMessage.success(result?.msg || 'Passkey 插件已安装');
+                await refreshPasskeyPluginStatus();
+            }
+            await invoke('open_passkey_plugin_setup');
+            ElMessage.success('已打开 Passkey 插件注册与启用流程');
         } catch (error) {
-            ElMessage.error(formatObjectString('安装 Passkey 插件失败：', error));
+            ElMessage.error(formatObjectString('启动 Passkey 插件设置失败：', error));
         } finally {
             passkeyPlugin.loading = false;
         }
@@ -105,9 +118,24 @@
         }
     })
 
+    async function maybeAutoSetupPasskeyPlugin() {
+        if (passkeyAutoSetupAttempted.value) return;
+        passkeyAutoSetupAttempted.value = true;
+        await refreshPasskeyPluginStatus();
+        if (passkeyPlugin.sampleInstalled && !passkeyPlugin.installed) return;
+        if (passkeyPlugin.installed || passkeyPlugin.available) {
+            await setupPasskeyPlugin({ auto: true });
+        }
+    }
+
     // 步骤切换
-    const handleNextStep = () => {
-        if (activeStep.value < 3) activeStep.value++;
+    const handleNextStep = async () => {
+        if (activeStep.value < 3) {
+            activeStep.value++;
+            if (activeStep.value === 2) {
+                await maybeAutoSetupPasskeyPlugin();
+            }
+        }
     };
 
     // 环境自检（摄像头检测不作为阻塞项——VM 环境通常无摄像头）
@@ -386,7 +414,7 @@
                                 v-if="passkeyPlugin.installed"
                                 type="success"
                                 :title="`正式插件已安装${passkeyPlugin.version ? `（${passkeyPlugin.version}）` : ''}`"
-                                description="请在插件管理器中注册并启用 Provider，然后用该插件重新注册网站通行密钥。"
+                                description="向导会自动注册插件并打开 Windows 设置页；你只需要在系统设置中启用 Provider，然后用该插件重新注册网站通行密钥。"
                                 show-icon
                                 :closable="false"
                             />
@@ -402,7 +430,7 @@
                                 v-else
                                 type="info"
                                 title="尚未安装 Passkey 插件"
-                                description="安装后仍需在 Windows 的插件管理器中完成一次注册和启用。"
+                                description="点击下方按钮后会自动安装、注册插件并打开 Windows 启用页面。"
                                 show-icon
                                 :closable="false"
                             />
@@ -411,8 +439,8 @@
                                     type="primary"
                                     :loading="passkeyPlugin.loading"
                                     :disabled="!passkeyPlugin.available"
-                                    @click="installPasskeyPlugin"
-                                >{{ passkeyPlugin.installed ? '更新正式插件' : '安装正式插件' }}</el-button>
+                                    @click="setupPasskeyPlugin"
+                                >{{ passkeyPlugin.installed ? '修复/更新并打开启用页' : '安装并打开启用页' }}</el-button>
                                 <el-button
                                     v-if="passkeyPlugin.installed || passkeyPlugin.sampleInstalled"
                                     @click="openPasskeyPluginManager"

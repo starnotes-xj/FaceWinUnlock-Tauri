@@ -46,6 +46,7 @@ namespace winrt::PasskeyManager::implementation
         winrt::IAsyncAction TestPasskeyVaultUnlock_Click(IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
 
         winrt::fire_and_forget UpdateCredentialList();
+        winrt::fire_and_forget RunFirstRunSetup();
 
         winrt::IAsyncAction OnNavigatedTo(Microsoft::UI::Xaml::Navigation::NavigationEventArgs);
 
@@ -86,6 +87,7 @@ namespace winrt::PasskeyManager::implementation
         winrt::IMap<winrt::IBuffer, IInspectable> m_selectedCredentialsSet = winrt::single_threaded_map<winrt::IBuffer, IInspectable>();
         wil::unique_registry_watcher m_registryWatcher;
         wil::unique_folder_change_reader_nothrow m_mockCredentialsDBWatcher;
+        bool m_setupFlowStarted = false;
 
         void UpdateVaultUnlockControlText(bool isLocked);
     };

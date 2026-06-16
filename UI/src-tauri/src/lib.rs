@@ -23,6 +23,7 @@ use modules::init::{
 use modules::options::write_to_registry;
 use modules::passkey_plugin::{
     get_passkey_plugin_status, install_passkey_plugin, open_passkey_plugin_manager,
+    open_passkey_plugin_setup,
 };
 use modules::update_check::check_update;
 use modules::update_download::{apply_update, fetch_update_diff};
@@ -203,6 +204,7 @@ pub fn run() {
                 get_passkey_plugin_status,
                 install_passkey_plugin,
                 open_passkey_plugin_manager,
+                open_passkey_plugin_setup,
                 check_update,
                 fetch_update_diff,
                 apply_update,

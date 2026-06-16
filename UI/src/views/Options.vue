@@ -95,7 +95,7 @@
 		}
 	}
 
-	async function installPasskeyPlugin() {
+	async function setupPasskeyPlugin() {
 		let replaceSample = false
 		if (passkeyPlugin.sampleInstalled && !passkeyPlugin.installed) {
 			try {
@@ -115,9 +115,10 @@
 			const result: any = await invoke('install_passkey_plugin', { replaceSample })
 			ElMessage.success(result?.msg || 'Passkey 插件已安装')
 			await refreshPasskeyPluginStatus()
-			await invoke('open_passkey_plugin_manager')
+			await invoke('open_passkey_plugin_setup')
+			ElMessage.success('已打开 Passkey 插件注册与启用流程')
 		} catch (error) {
-			ElMessage.error(formatObjectString('安装 Passkey 插件失败：', error))
+			ElMessage.error(formatObjectString('启动 Passkey 插件设置失败：', error))
 		} finally {
 			passkeyPlugin.loading = false
 		}
@@ -858,7 +859,7 @@
 								<p class="label">FaceWinUnlock Passkey Provider</p>
 								<p class="sub">
 									官方 Windows 插件路线：插件持有自己的不可导出密钥，人脸识别只完成用户验证。<br />
-									不提取 Windows Hello 私钥，不保存 PIN，也不需要浏览器扩展。
+									不提取 Windows Hello 私钥，不保存 PIN，也不需要浏览器扩展；安装后会自动注册插件并打开 Windows 启用页面。
 								</p>
 							</div>
 							<div style="display:flex; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap;">
@@ -874,8 +875,8 @@
 									size="small"
 									:loading="passkeyPlugin.loading"
 									:disabled="!passkeyPlugin.available"
-									@click="installPasskeyPlugin"
-								>{{ passkeyPlugin.installed ? '更新正式插件' : '安装正式插件' }}</el-button>
+									@click="setupPasskeyPlugin"
+								>{{ passkeyPlugin.installed ? '修复/更新并打开启用页' : '安装并打开启用页' }}</el-button>
 								<el-button
 									v-if="passkeyPlugin.installed || passkeyPlugin.sampleInstalled"
 									size="small"

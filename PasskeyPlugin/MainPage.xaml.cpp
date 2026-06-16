@@ -14,6 +14,8 @@
 #include <DispatcherQueue.h>
 #include <winrt/Microsoft.ui.interop.h>
 #include <winrt/Microsoft.UI.Content.h>
+#include <winrt/Windows.Storage.h>
+#include <winrt/Windows.System.h>
 
 namespace winrt {
     using namespace winrt::Microsoft::UI::Xaml;
@@ -23,6 +25,57 @@ namespace winrt {
 // and more about our project templates, see: http://aka.ms/winui-project-info.
 
 namespace {
+
+    constexpr wchar_t c_setupArgument[] = L"-FaceWinUnlockSetup";
+    constexpr wchar_t c_setupRequestFileName[] = L"FaceWinUnlockSetupRequested.flag";
+
+    bool HasSetupArgument(winrt::hstring const& launchArgs)
+    {
+        std::wstring argsString{ launchArgs.c_str() };
+        return argsString.find(c_setupArgument) != std::wstring::npos;
+    }
+
+    bool ConsumeRegistrySetupRequest()
+    {
+        auto setupRequested = wil::reg::try_get_value_dword(
+            HKEY_CURRENT_USER,
+            c_pluginRegistryPath,
+            c_windowsPluginSetupRequestedRegKeyName);
+        if (setupRequested.value_or(0) == 0)
+        {
+            return false;
+        }
+
+        wil::unique_hkey hKey;
+        if (RegOpenKeyEx(HKEY_CURRENT_USER, c_pluginRegistryPath, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+        {
+            RegDeleteValue(hKey.get(), c_windowsPluginSetupRequestedRegKeyName);
+        }
+
+        return true;
+    }
+
+    bool ConsumeFileSetupRequest()
+    {
+        winrt::Windows::Storage::ApplicationData appData = winrt::Windows::Storage::ApplicationData::Current();
+        std::wstring requestPath{ appData.LocalFolder().Path().c_str() };
+        requestPath += L"\\";
+        requestPath += c_setupRequestFileName;
+
+        DWORD attributes = GetFileAttributes(requestPath.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            return false;
+        }
+
+        DeleteFile(requestPath.c_str());
+        return true;
+    }
+
+    bool ConsumeSetupRequest()
+    {
+        return ConsumeRegistrySetupRequest() || ConsumeFileSetupRequest();
+    }
 
     void CALLBACK WebAuthNStatusChangeCallback(void* context)
     {
@@ -299,7 +352,87 @@ namespace winrt::PasskeyManager::implementation
     {
         UpdatePluginEnableState();
         UpdateCredentialList();
+        auto launchArgs = winrt::unbox_value_or<winrt::hstring>(e.Parameter(), L"");
+        if (!m_setupFlowStarted && (HasSetupArgument(launchArgs) || ConsumeSetupRequest()))
+        {
+            m_setupFlowStarted = true;
+            RunFirstRunSetup();
+        }
         co_return;
+    }
+
+    winrt::fire_and_forget MainPage::RunFirstRunSetup()
+    {
+        auto lifetime = get_strong();
+        auto weakThis = get_weak();
+        auto dispatcherQueue = DispatcherQueue();
+
+        LogInProgress(L"Preparing FaceWinUnlock Passkey setup...");
+
+        bool wasRegistered = false;
+        HRESULT operationHr = S_OK;
+        HRESULT stateHr = S_OK;
+        AUTHENTICATOR_STATE pluginState = AuthenticatorState_Disabled;
+
+        co_await winrt::resume_background();
+        auto& registrationManager = PluginRegistrationManager::getInstance();
+        stateHr = registrationManager.RefreshPluginState();
+        wasRegistered = SUCCEEDED(stateHr);
+
+        if (wasRegistered)
+        {
+            operationHr = registrationManager.UpdatePlugin();
+        }
+        else
+        {
+            operationHr = registrationManager.RegisterPlugin();
+        }
+
+        if (SUCCEEDED(operationHr))
+        {
+            stateHr = registrationManager.RefreshPluginState();
+            pluginState = registrationManager.GetPluginState();
+        }
+
+        co_await wil::resume_foreground(dispatcherQueue);
+        auto self = weakThis.get();
+        if (!self)
+        {
+            co_return;
+        }
+
+        self->UpdatePluginEnableState();
+        self->UpdateCredentialList();
+
+        if (FAILED(operationHr))
+        {
+            self->LogFailure(
+                wasRegistered ? L"WebAuthNPluginUpdateAuthenticatorDetails" : L"WebAuthNPluginAddAuthenticator",
+                operationHr);
+            co_return;
+        }
+
+        self->LogSuccess(wasRegistered ? L"Plugin details updated" : L"Plugin registered");
+
+        if (FAILED(stateHr))
+        {
+            self->LogWarning(L"Plugin state refresh failed after setup", stateHr);
+            co_return;
+        }
+
+        if (pluginState == AuthenticatorState_Enabled)
+        {
+            self->LogSuccess(L"Plugin is already enabled");
+            co_return;
+        }
+
+        self->LogInProgress(L"Opening Windows passkey settings. Enable FaceWinUnlock Passkey there...");
+        auto uri = Windows::Foundation::Uri(L"ms-settings:passkeys-advancedoptions");
+        bool launched = co_await Windows::System::Launcher::LaunchUriAsync(uri);
+        if (!launched)
+        {
+            self->LogWarning(L"Could not open Windows passkey settings");
+        }
     }
 
     winrt::IAsyncAction MainPage::unregisterPluginButton_Click(IInspectable const&, RoutedEventArgs const&)
