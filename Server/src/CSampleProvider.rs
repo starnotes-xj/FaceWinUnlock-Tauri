@@ -171,19 +171,13 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             if let Some(events) = &inner.events {
                 // 主场景（登录/解锁）：允许 stop_and_join 时通知 Unlock EXE 释放摄像头 (#117)
                 let is_primary = inner.usage_scenario.0 == 1 || inner.usage_scenario.0 == 2;
-                if is_broker {
-                    let broker_scenario = crate::broker_detect::detect_broker_scenario();
-                    info!(
-                        "SampleProvider::Advise - broker 场景检测结果: {:?}",
-                        broker_scenario
-                    );
-                    if broker_scenario.should_skip_face() {
-                        inner.shared_creds.lock().unwrap().broker_fallback_to_pin = true;
-                        crate::CPipeListener::mark_broker_pin_fallback();
-                        info!("SampleProvider::Advise - broker 场景直退 Windows PIN，不启动人脸监听");
-                        return Ok(());
-                    }
-                }
+                // broker(credentialuibroker.exe) 场景（如 Chrome「查看密码」「确保那是你」）
+                // 也直接尝试人脸，接入方式与通行密钥登录一致。
+                // 不再用 UIA 预检测区分「查看密码 / 通行密钥」：UIA 在受限 broker 进程内被彻底封禁
+                //（CoCreateInstance 与 DllGetClassObject 均 ClassNotReg / NotAvailable），是死路，
+                // 已移除整个 broker_detect 模块。人脸未匹配或提交凭据被拒时，由运行期
+                // broker_fallback_to_pin（CSampleCredential::ReportResult、CPipeListener）回退
+                // Windows PIN——用户可在通行密钥选择器里改用原生，原生 passkey 仍可走 PIN。
                 let slot = inner.animation_slot.clone();
                 inner.listener = Some(CPipeListener::start(
                     events.clone(),

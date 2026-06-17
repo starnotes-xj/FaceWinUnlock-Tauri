@@ -71,7 +71,11 @@
   WriteRegStr HKLM "Software\facewinunlock-tauri" "UNLOCK_GRACE_PERIOD" "0.0"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "RETRY_DELAY" "1.0"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "CREDUI_ALLOW_BROKER" "1"
-  WriteRegStr HKLM "Software\facewinunlock-tauri" "CREDUI_BROKER_FALLBACK_TIMEOUT" "2.0"
+  ; broker(查看密码等)场景从开始人脸识别起，超过此秒数仍未刷脸成功才回退 Windows PIN。
+  ; 必须 ≥ 人脸识别耗时（开摄像头预热 ~2s + 检测匹配 ~1-2s ≈ 3-4s），否则查看密码会在
+  ; 刷脸完成前就超时回退 PIN（修复 Chrome 查看密码人脸的前提）。代价：选原生通行密钥时
+  ; 回退 PIN 会多等这几秒。取 6.0 兼顾两者。
+  WriteRegStr HKLM "Software\facewinunlock-tauri" "CREDUI_BROKER_FALLBACK_TIMEOUT" "6.0"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "PASSKEY_TAKEOVER_ENABLED" "0"
 
   DetailPrint "FaceWinUnlock 安装完成"

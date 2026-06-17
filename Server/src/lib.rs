@@ -26,7 +26,6 @@ pub mod CSampleCredential;
 pub mod CPipeListener;
 pub mod Pipe;
 pub mod animation;
-pub mod broker_detect;
 
 use CSampleProvider::SampleProvider;
 
