@@ -1,5 +1,5 @@
 <script setup lang="ts">
-	import { ref, computed, watch, onMounted } from 'vue'
+	import { ref, computed, watch, onMounted, nextTick } from 'vue'
 	import {
 		Search,
 		Warning,
@@ -124,52 +124,51 @@
 		});
 	};
 
-	// 根据logsType获取日志
-	const fetchLogs = async () => {
-		loading.value = true;
-		try {
-			let logData = [];
-			if (logsType.value === 'unlock') {
-				// 分页查询数据库
-				const res = await queryLogsByPage(currentPage.value, pageSize.value);
-				total.value = res.total || 0;
-				logData = parseUnlockLogs(res.list || []);
-			} else if (logsType.value === 'soft') {
-				// 读取文件并解析
-				const res = await readText('logs/app.log');
-				const allLogs = parseSoftLogs(res);
-				total.value = allLogs.length;
-				logData = allLogs.reverse();;
-			} else if (logsType.value === 'dll') {
-				// 新版本写入 logs\，旧版本可能写在安装根目录，两个路径都兼容
-				const res = await readFirstExistingText(['logs/facewinunlock.log', 'facewinunlock.log']);
-				const allLogs = parseDllLogs(res);
-				total.value = allLogs.length;
-				logData = allLogs.reverse();;
-			} else if (logsType.value === 'service') {
-				// 读取文件并解析
-				const res = await readText('logs/unlock.log');
-				const allLogs = parseDllLogs(res, 'SERVICE');
-				total.value = allLogs.length;
-				logData = allLogs.reverse();;
-			}
-			logs.value = logData;
-		} catch (error) {
-			const message = error?.message || String(error || '未知错误');
-			ElMessage.error(`获取日志失败：${message}`);
-			logs.value = [];
-			total.value = 0;
-		} finally {
-			loading.value = false;
-		}
-	};
+		const cachedData = ref({});
+		const lastLogsType = ref('');
 
-	// 监听日志类型/分页参数变化，重新获取日志
-	watch([logsType, currentPage, pageSize, filterLevel, searchQuery], fetchLogs, { immediate: true });
+		const fetchLogs = async () => {
+			if (logsType.value === lastLogsType.value && cachedData.value[logsType.value]) {
+				total.value = cachedData.value[logsType.value].length;
+				logs.value = cachedData.value[logsType.value];
+				loading.value = false;
+				return;
+			}
+			loading.value = true;
+			lastLogsType.value = logsType.value;
+			try {
+				let logData = [];
+				if (logsType.value === 'unlock') {
+					const res = await queryLogsByPage(1, 99999);
+					logData = parseUnlockLogs(res.list || []);
+				} else if (logsType.value === 'soft') {
+					const res = await readText('logs/app.log');
+					logData = parseSoftLogs(res).reverse();
+				} else if (logsType.value === 'dll') {
+					const res = await readFirstExistingText(['logs/facewinunlock.log', 'facewinunlock.log']);
+					logData = parseDllLogs(res).reverse();
+				} else if (logsType.value === 'service') {
+					const res = await readText('logs/unlock.log');
+					logData = parseDllLogs(res, 'SERVICE').reverse();
+				}
+				cachedData.value[logsType.value] = logData;
+				total.value = logData.length;
+				logs.value = logData;
+			} catch (error) {
+				const message = error?.message || String(error || '未知错误');
+				ElMessage.error(`获取日志失败：${message}`);
+				logs.value = [];
+				total.value = 0;
+			} finally {
+				loading.value = false;
+			}
+		};
+
+		watch(logsType, () => { currentPage.value = 1; fetchLogs(); });
 
 	// 页面挂载时初始化加载日志
 	onMounted(() => {
-		fetchLogs();
+			nextTick(() => fetchLogs());
 	});
 
 	// 先计算所有符合筛选条件的日志（不包含分页）
@@ -182,28 +181,24 @@
 		});
 	})
 
-	const filteredLogs = computed(() => {
-		if (logsType.value === 'unlock') {
-			return allFilteredLogs.value;
-		} else {
+		const filteredLogs = computed(() => {
 			total.value = allFilteredLogs.value.length;
 			const start = (currentPage.value - 1) * pageSize.value;
 			const end = start + pageSize.value;
 			return allFilteredLogs.value.slice(start, end);
-		}
-	});
+		});
 
 	const getLevelStatus = (level) => {
 		const map = {
-			INFO: { type: 'info', icon: InfoFilled, color: '#909399' },
-			DEBUG: { type: 'primary', icon: InfoFilled, color: '#409EFF' },
-			WARN: { type: 'warning', icon: Warning, color: '#E6A23C' },
-			ERROR: { type: 'danger', icon: CircleCloseFilled, color: '#F56C6C' }
+			INFO: { type: 'info', icon: InfoFilled, color: 'var(--v7-text-dim)' },
+			DEBUG: { type: 'primary', icon: InfoFilled, color: 'var(--v7-gold-mid)' },
+			WARN: { type: 'warning', icon: Warning, color: 'var(--v7-gold-bright)' },
+			ERROR: { type: 'danger', icon: CircleCloseFilled, color: 'var(--v7-cinnabar-bright)' }
 		}
 		return map[level] || { 
 			type: 'info', 
 			icon: InfoFilled, 
-			color: '#606266' 
+			color: 'var(--v7-text-secondary)' 
 		}
 	}
 
@@ -354,25 +349,36 @@
 	}
 
 	.settings-card {
-		background: #fff;
-		border-radius: 12px;
-		box-shadow: 0 4px 16px rgba(0,0,0,0.04);
-		border: 1px solid #e4e7ed;
+		background: var(--v7-surface-card);
+		border-radius: 18px;
+		box-shadow: 0 24px 64px -42px rgba(0,0,0,0.62), var(--v7-shadow);
+		border: 1px solid var(--v7-border-subtle);
 		overflow: hidden;
 		margin: 0 auto;
 		height: 100%;
 		display: flex;
 		flex-direction: column;
+		backdrop-filter: blur(18px);
+		-webkit-backdrop-filter: blur(18px);
 	}
 
 	/* 过滤工具栏 */
 	.filter-toolbar {
 		padding: 16px 24px;
-		background: #fafafa;
+		background:
+			linear-gradient(135deg, rgba(201,166,62,0.08), transparent 42%),
+			var(--v7-ink-deep);
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
-		border-bottom: 1px solid #f2f6fc;
+		gap: 16px;
+		border-bottom: 1px solid var(--v7-border-subtle);
+	}
+
+	.filter-right {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
 	}
 
 	.search-input {
@@ -390,7 +396,7 @@
 	.time-col {
 		font-family: 'Courier New', Courier, monospace;
 		font-size: 13px;
-		color: #606266;
+		color: var(--v7-text-secondary);
 	}
 
 	.level-cell {
@@ -405,30 +411,38 @@
 	}
 
 	.level-text.info {
-		color: #909399;
+		color: var(--v7-text-dim);
 	}
 
 	.level-text.warning {
-		color: #E6A23C;
+		color: var(--v7-gold-mid);
+	}
+
+	.level-text.debug {
+		color: var(--v7-gold-bright);
 	}
 
 	.level-text.danger {
-		color: #F56C6C;
+		color: var(--v7-cinnabar-bright);
 	}
 
 	.content-code {
 		font-family: 'Consolas', monospace;
 		font-size: 13px;
-		color: #333;
+		color: var(--v7-text-primary);
+		background: rgba(201,166,62,0.05);
+		border: 1px solid var(--v7-border-subtle);
+		border-radius: 8px;
+		padding: 5px 8px;
 	}
 
 	/* 底部状态栏 */
 	.logs-footer {
 		padding: 12px 24px;
-		background: #fff;
-		border-top: 1px solid #f2f6fc;
+		background: var(--v7-surface-card);
+		border-top: 1px solid var(--v7-border-subtle);
 		font-size: 13px;
-		color: #909399;
+		color: var(--v7-text-dim);
 		display: flex;
 		justify-content: space-between;
 		align-items: center;

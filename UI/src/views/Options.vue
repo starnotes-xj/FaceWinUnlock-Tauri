@@ -28,6 +28,11 @@
 	const router = useRouter();
 
 	const activeTab = ref('app')
+	const optionTabs = [
+		{ id: 'app', label: '软件配置', icon: Operation },
+		{ id: 'dll', label: '系统集成', icon: Unlock },
+		{ id: 'maintenance', label: '维护与卸载', icon: Tools },
+	]
 
 	const cameraList = ref([]);
 	const cameraListLoading = ref(false);
@@ -140,6 +145,29 @@
 			await invoke('open_passkey_plugin_manager')
 		} catch (error) {
 			ElMessage.error(formatObjectString('打开 Passkey 插件管理器失败：', error))
+		}
+	}
+
+	async function uninstallPasskeyPlugin() {
+		try {
+			await ElMessageBox.confirm(
+				'卸载 Passkey 插件将删除所有本地保存的通行密钥，网站端使用该插件注册的凭据将失效，需要重新注册。确定卸载吗？',
+				'卸载 Passkey 插件',
+				{ type: 'warning', confirmButtonText: '确认卸载', cancelButtonText: '取消' }
+			)
+		} catch {
+			return
+		}
+
+		passkeyPlugin.loading = true
+		try {
+			const result: any = await invoke('uninstall_passkey_plugin')
+			ElMessage.success(result?.msg || 'Passkey 插件已卸载')
+			await refreshPasskeyPluginStatus()
+		} catch (error) {
+			ElMessage.error(formatObjectString('卸载 Passkey 插件失败：', error))
+		} finally {
+			passkeyPlugin.loading = false
 		}
 	}
 
@@ -387,8 +415,8 @@
 
 	const uninstallDll = () => {
 		ElMessageBox.confirm(
-			'卸载 DLL和服务 并还原注册表将导致无法在登录界面使用面容解锁。程序将强制回到初始化页面。', 
-			'危险操作', 
+			'卸载 DLL、核心服务和 Passkey 插件，并还原注册表。插件本地通行密钥会被删除，网站端使用该插件注册的凭据需要重新注册。程序将强制回到初始化页面。',
+			'危险操作',
 			{
 				confirmButtonText: '确定卸载',
 				confirmButtonClass: 'el-button--danger',
@@ -486,7 +514,7 @@
 	const livenessEnabledChange = ()=>{
 		if(config.livenessEnabled){
 			ElMessageBox.confirm(
-				'活体检测准确率低，<font color="red">误判极高，不建议开启</font><br />' +
+				'活体检测准确率低，<span style="color: var(--v7-cinnabar-bright);">误判极高，不建议开启</span><br />' +
 				'当前只影响录入页面的一致性验证，不参与锁屏解锁<br />' +
 				'是否继续开启活体检测？', 
 				'警告', 
@@ -564,27 +592,25 @@
 	<div class="options-container">
 		<div class="settings-card">
 			<div class="settings-header">
-				<div class="custom-nav">
-					<div class="nav-item" :class="{ active: activeTab === 'app' }" @click="activeTab = 'app'">
-						<el-icon>
-							<Operation />
-						</el-icon>
-						软件配置
-					</div>
-					<div class="nav-item" :class="{ active: activeTab === 'dll' }" @click="activeTab = 'dll'">
-						<el-icon>
-							<Unlock />
-						</el-icon>
-						系统集成 (DLL)
-					</div>
-					<div class="nav-item" :class="{ active: activeTab === 'maintenance' }" @click="activeTab = 'maintenance'">
-						<el-icon>
-							<Tools />
-						</el-icon>
-						维护与卸载
-					</div>
+				<div class="glass-radio-group" role="radiogroup" aria-label="配置分类">
+					<template v-for="tab in optionTabs" :key="tab.id">
+						<input
+							v-model="activeTab"
+							type="radio"
+							name="option-tab"
+							:id="`option-tab-${tab.id}`"
+							:value="tab.id"
+						/>
+						<label :for="`option-tab-${tab.id}`">
+							<el-icon>
+								<component :is="tab.icon" />
+							</el-icon>
+							<span>{{ tab.label }}</span>
+						</label>
+					</template>
+					<div class="glass-glider" :class="`is-${activeTab}`"></div>
 				</div>
-				<div>
+				<div class="header-actions">
 					<el-button type="primary" size="large" icon="Cpu"
 						@click="activeTab === 'dll' ? applyDllSettings() : saveAppConfig()">
 						{{ activeTab === 'dll' ? '同步至系统注册表' : '保存本地配置' }}
@@ -624,7 +650,7 @@
 										<el-option :value="180" label="旋转 180°"/>
 										<el-option :value="270" label="逆时针 90°"/>
 									</el-select>
-									<p style="font-size: 12px; color: #909399; margin: 6px 0 0 0;">
+									<p class="row-help">
 										适用于笔记本侧放等摄像头朝向不正的场景，保存后录入人脸时实时生效。
 									</p>
 								</el-form-item>
@@ -636,7 +662,7 @@
 										:step="10"
 										style="width: 140px;"
 									/>
-									<p style="font-size: 12px; color: #909399; margin: 6px 0 0 0;">
+									<p class="row-help">
 										面容识别期间临时提升屏幕亮度，完成后自动恢复。0 = 不调节；建议 80~100 以改善弱光下解锁成功率。仅支持笔记本内置屏（外接显示器无效）。
 									</p>
 								</el-form-item>
@@ -647,7 +673,7 @@
 										<el-option value="opencl_fp16" label="GPU - OpenCL FP16（更快，支持 FP16 的显卡）"/>
 										<el-option value="intel_npu" label="Intel NPU（需要安装 OpenVINO 运行时）"/>
 									</el-select>
-									<p style="font-size: 12px; color: #909399; margin: 6px 0 0 0;">
+									<p class="row-help">
 										保存后录入和锁屏解锁都会使用该后端；服务会在下次识别前重载模型，OpenCL/NPU 加载失败时自动回退 CPU 并写入服务日志。
 									</p>
 								</el-form-item>
@@ -782,10 +808,10 @@
 									<div class="row-text">
 										<p class="label">登录密码</p>
 										<p class="sub">设置程序的登录密码，
-											<span v-html="
-												config.loginPassword === optionsStore.getOptionValueByKey('loginPassword') ? 
-												'<font color=\'red\'>当前为密文</font>' : 
-												'<font color=\'green\'>点击保存后加密</font>'">
+											<span
+												:class="config.loginPassword === optionsStore.getOptionValueByKey('loginPassword') ? 'status-danger' : 'status-success'"
+											>
+												{{ config.loginPassword === optionsStore.getOptionValueByKey('loginPassword') ? '当前为密文' : '点击保存后加密' }}
 											</span>
 										</p>
 									</div>
@@ -843,7 +869,7 @@
 							</div>
 							<el-switch v-model="dllConfig.showTile" />
 						</div>
-						<div style="padding: 16px 0; border-bottom: 1px solid #f2f6fc;">
+						<div class="setting-block">
 							<div class="row-text" style="margin-bottom: 12px;">
 								<p class="label">面容识别场景</p>
 								<p class="sub">
@@ -864,7 +890,7 @@
 							</div>
 							<el-tag type="success">人脸优先</el-tag>
 						</div>
-						<div style="padding: 16px 0; border-bottom: 1px solid #f2f6fc;">
+						<div class="setting-block">
 							<div class="row-text">
 								<p class="label">FaceWinUnlock Passkey Provider</p>
 								<p class="sub">
@@ -872,7 +898,7 @@
 									不提取 Windows Hello 私钥，不保存 PIN，也不需要浏览器扩展；安装后会自动注册插件并打开 Windows 启用页面。
 								</p>
 							</div>
-							<div style="display:flex; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap;">
+							<div class="plugin-actions">
 								<el-tag v-if="passkeyPlugin.installed" type="success">
 									正式插件已安装{{ passkeyPlugin.version ? `（${passkeyPlugin.version}）` : '' }}
 								</el-tag>
@@ -896,9 +922,19 @@
 									@click="openPasskeyPluginManager"
 								>打开管理器</el-button>
 								<el-button size="small" :loading="passkeyPlugin.loading" @click="refreshPasskeyPluginStatus">刷新</el-button>
+								<el-button
+									v-if="passkeyPlugin.installed || passkeyPlugin.sampleInstalled"
+									size="small"
+									type="danger"
+									:loading="passkeyPlugin.loading"
+									@click="uninstallPasskeyPlugin"
+								>卸载插件</el-button>
 							</div>
 							<p v-if="passkeyPlugin.sampleInstalled && !passkeyPlugin.installed" class="sub" style="margin-top:10px;">
 								迁移会删除测试插件本地凭据，网站端需使用正式插件重新注册通行密钥。
+							</p>
+							<p class="sub muted">
+								Passkey 插件依赖主程序的人脸识别服务（Unlock.exe）完成用户验证。卸载主程序或核心组件会同步卸载插件并删除插件本地通行密钥；普通更新会保留密钥，检测到新插件版本时只更新 MSIX 包体。
 							</p>
 						</div>
 
@@ -965,63 +1001,141 @@
 <style scoped>
 	.options-container {
 		height: 100%;
+		color: var(--v7-text-primary);
+		font-family: var(--v7-font-body);
 	}
 
 	.settings-card {
-		background: #fff;
-		border-radius: 12px;
-		box-shadow: 0 4px 16px rgba(0,0,0,0.04);
-		border: 1px solid #e4e7ed;
+		background: var(--v7-surface-card);
+		border-radius: 16px;
+		box-shadow:
+			0 24px 70px -48px rgba(0, 0, 0, 0.55),
+			var(--v7-shadow);
+		border: 1px solid var(--v7-border-subtle);
 		overflow: hidden;
 		margin: 0 auto;
 		display: flex;
 		flex-direction: column;
 		height: 100%;
+		backdrop-filter: blur(24px);
+		-webkit-backdrop-filter: blur(24px);
 	}
 
 	.settings-header {
-		padding: 0 30px;
-		height: 70px;
+		padding: 14px 28px;
+		min-height: 76px;
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
-		border-bottom: 1px solid #f2f6fc;
+		gap: 16px;
+		border-bottom: 1px solid var(--v7-border-subtle);
 		flex-shrink: 0;
 	}
 
-	.custom-nav {
+	.glass-radio-group {
+		--bg: rgba(184, 149, 56, 0.08);
+		--text: var(--v7-text-secondary);
+
 		display: flex;
-		background: #f0f2f5;
-		padding: 4px;
-		border-radius: 8px;
-		gap: 4px;
+		position: relative;
+		background: var(--bg);
+		border: 1px solid var(--v7-border-subtle);
+		border-radius: 1rem;
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
+		box-shadow:
+			inset 1px 1px 4px rgba(255, 255, 255, 0.16),
+			inset -1px -1px 6px rgba(0, 0, 0, 0.16),
+			0 4px 12px rgba(0, 0, 0, 0.08);
+		overflow: hidden;
+		width: fit-content;
+		max-width: 100%;
 	}
 
-	.nav-item {
-		padding: 8px 20px;
-		border-radius: 6px;
-		font-size: 14px;
-		cursor: pointer;
+	:global(html.dark) .glass-radio-group {
+		--bg: rgba(255, 255, 255, 0.06);
+	}
+
+	.glass-radio-group input {
+		display: none;
+	}
+
+	.glass-radio-group label {
+		flex: 1 1 0;
 		display: flex;
 		align-items: center;
+		justify-content: center;
+		min-width: 118px;
+		font-size: 14px;
+		padding: 0.8rem 1.25rem;
+		cursor: pointer;
 		gap: 8px;
-		transition: all 0.2s;
-		color: #606266;
-	}
-
-	.nav-item:hover {
-		color: #409EFF;
-	}
-
-	.nav-item.active {
-		background: #fff;
-		color: #409EFF;
-		box-shadow: 0 2px 6px rgba(0,0,0,0.08);
 		font-weight: 600;
+		color: var(--text);
+		position: relative;
+		z-index: 2;
+		white-space: nowrap;
+		transition: color 0.3s ease-in-out, text-shadow 0.3s ease-in-out;
+	}
+
+	.glass-radio-group label:hover {
+		color: var(--v7-text-primary);
+	}
+
+	.glass-radio-group input:checked + label {
+		color: #fff;
+		text-shadow: 0 1px 8px rgba(0, 0, 0, 0.28);
+	}
+
+	.glass-glider {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: 0;
+		width: calc(100% / 3);
+		border-radius: 1rem;
+		z-index: 1;
+		pointer-events: none;
+		transition:
+			transform 0.5s cubic-bezier(0.37, 1.45, 0.66, 1),
+			background 0.4s ease-in-out,
+			box-shadow 0.4s ease-in-out;
+	}
+
+	.glass-glider.is-app {
+		transform: translateX(0%);
+		background: linear-gradient(135deg, rgba(184, 149, 56, 0.42), var(--v7-gold-mid));
+		box-shadow:
+			0 0 18px rgba(184, 149, 56, 0.42),
+			0 0 10px rgba(245, 230, 184, 0.35) inset;
+	}
+
+	.glass-glider.is-dll {
+		transform: translateX(100%);
+		background: linear-gradient(135deg, rgba(30, 58, 95, 0.38), var(--v7-gold-bright));
+		box-shadow:
+			0 0 18px rgba(201, 166, 62, 0.42),
+			0 0 10px rgba(214, 228, 240, 0.32) inset;
+	}
+
+	.glass-glider.is-maintenance {
+		transform: translateX(200%);
+		background: linear-gradient(135deg, rgba(184, 40, 40, 0.35), var(--v7-cinnabar));
+		box-shadow:
+			0 0 18px rgba(184, 40, 40, 0.4),
+			0 0 10px rgba(232, 85, 74, 0.32) inset;
+	}
+
+	.header-actions {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 10px;
+		flex-wrap: wrap;
 	}
 
 	.options-content {
-		padding: 0px 30px;
+		padding: 0 28px 28px;
 		min-height: 450px;
 		flex-grow: 1;
 		overflow-y: auto;
@@ -1031,7 +1145,7 @@
 		font-size: 15px;
 		font-weight: 600;
 		margin-bottom: 10px;
-		color: #303133;
+		color: var(--v7-text-primary);
 		display: flex;
 		align-items: center;
 	}
@@ -1047,29 +1161,84 @@
 		margin-left: 10px;
 	}
 
+	:deep(.el-collapse) {
+		border-top: none;
+		border-bottom: none;
+	}
+
+	:deep(.el-collapse-item__header) {
+		height: 54px;
+		font-weight: 600;
+		letter-spacing: 0;
+	}
+
+	:deep(.el-collapse-item__content) {
+		padding-bottom: 12px;
+	}
+
+	:deep(.el-form-item__label) {
+		color: var(--v7-text-secondary);
+		font-weight: 600;
+	}
+
 	.config-group {
 		margin-bottom: 35px;
 	}
 
+	.setting-block,
 	.option-row {
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
 		padding: 16px 0;
-		border-bottom: 1px solid #f2f6fc;
+		border-bottom: 1px solid var(--v7-border-subtle);
+		gap: 18px;
+	}
+
+	.setting-block {
+		display: block;
 	}
 
 	.row-text .label {
 		font-size: 14px;
-		font-weight: 500;
+		font-weight: 600;
 		margin: 0;
-		color: #2c3e50;
+		color: var(--v7-text-primary);
 	}
 
 	.row-text .sub {
 		font-size: 12px;
-		color: #909399;
+		color: var(--v7-text-dim);
 		margin: 4px 0 0 0;
+		line-height: 1.55;
+	}
+
+	.row-help {
+		font-size: 12px;
+		color: var(--v7-text-dim);
+		margin: 6px 0 0 0;
+		line-height: 1.55;
+	}
+
+	.plugin-actions {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		margin-top: 12px;
+		flex-wrap: wrap;
+	}
+
+	.muted {
+		margin-top: 8px;
+		color: var(--v7-text-dim) !important;
+	}
+
+	.status-danger {
+		color: var(--v7-cinnabar-bright);
+	}
+
+	.status-success {
+		color: var(--v7-jade-bright);
 	}
 
 	.slider-info {
@@ -1080,20 +1249,20 @@
 	}
 
 	.slider-info .val {
-		color: #409EFF;
+		color: var(--v7-gold-mid);
 		font-weight: bold;
 	}
 
 	.slider-info .desc {
 		font-size: 12px;
-		color: #909399;
+		color: var(--v7-text-dim);
 	}
 
 	.danger-box {
-		background: #fef0f0;
-		border-radius: 10px;
+		background: var(--v7-danger-bg);
+		border-radius: 12px;
 		padding: 20px;
-		border: 1px solid #fde2e2;
+		border: 1px solid rgba(184, 40, 40, 0.2);
 	}
 
 	.danger-item {
@@ -1101,20 +1270,21 @@
 		justify-content: space-between;
 		align-items: center;
 		font-size: 13px;
-		color: #606266;
+		color: var(--v7-text-secondary);
+		gap: 16px;
 	}
 
 	.danger-footer {
 		margin-top: 5px;
 		font-size: 12px;
-		color: #f56c6c;
+		color: var(--v7-cinnabar-bright);
 		display: flex;
 		align-items: center;
 		gap: 5px;
 	}
 
 	.red-text {
-		color: #f56c6c;
+		color: var(--v7-cinnabar-bright);
 	}
 
 	.fade-in {
@@ -1122,8 +1292,9 @@
 	}
 
 	.option-desc {
-		background: #f4f4f5;
-		border-radius: 8px;
+		background: var(--v7-primary-bg);
+		border: 1px solid var(--v7-border-subtle);
+		border-radius: 10px;
 		padding: 16px;
 		margin-top: 20px;
 	}
@@ -1131,19 +1302,63 @@
 	.option-desc p {
 		margin: 6px 0;
 		font-size: 13px;
-		color: #606266;
+		color: var(--v7-text-secondary);
 	}
 
 	.option-desc code {
-		background: #e6a23c;
-		color: #fff;
+		background: var(--v7-ink-deep);
+		color: var(--v7-gold-pale);
 		padding: 2px 6px;
 		border-radius: 4px;
 		font-size: 12px;
 	}
 
+	:deep(.el-alert) {
+		border: 1px solid var(--v7-border-subtle);
+	}
+
+	:deep(.el-checkbox-group) {
+		color: var(--v7-text-secondary);
+	}
+
 	@keyframes fadeIn {
 		from { opacity: 0; transform: translateY(5px); }
 		to { opacity: 1; transform: translateY(0); }
+	}
+
+	@media (max-width: 900px) {
+		.settings-header {
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.glass-radio-group {
+			width: 100%;
+		}
+
+		.glass-radio-group label {
+			min-width: 0;
+			padding: 0.72rem 0.75rem;
+		}
+
+		.header-actions {
+			justify-content: flex-start;
+		}
+	}
+
+	@media (max-width: 640px) {
+		.options-content {
+			padding: 0 18px 22px;
+		}
+
+		.settings-header {
+			padding: 14px 18px;
+		}
+
+		.option-row,
+		.danger-item {
+			align-items: flex-start;
+			flex-direction: column;
+		}
 	}
 </style>

@@ -1,188 +1,203 @@
-<script setup>
-    import { ref, reactive } from 'vue';
-    import { useRouter } from 'vue-router';
-    import { ElMessage } from 'element-plus';
-    import { useOptionsStore } from "../stores/options";
-    import { hashMessage } from "../utils/function"
+<script setup lang="ts">
+import { ref, reactive } from 'vue';
+import { useRouter } from 'vue-router';
+import { ElMessage } from 'element-plus';
+import { useOptionsStore } from "../stores/options";
+import { hashMessage } from "../utils/function";
 
-    const router = useRouter();
-    const optionsStore = useOptionsStore();
+const router = useRouter();
+const optionsStore = useOptionsStore();
 
-    const version = ref(localStorage.getItem("version") || 'unknown');
-    const isLoading = ref(false);
-    const errorMessage = ref('');
+const version = ref(localStorage.getItem("version") || 'unknown');
+const isLoading = ref(false);
+const errorMessage = ref('');
 
-    const loginForm = reactive({
-        password: ''
-    });
+const loginForm = reactive({
+  password: ''
+});
 
-    const handleLogin = async () => {
-        if (!loginForm.password) {
-            errorMessage.value = '请输入密码';
-            return;
-        }
+const handleLogin = async () => {
+  if (!loginForm.password) {
+    errorMessage.value = '请输入密码';
+    return;
+  }
+  errorMessage.value = '';
+  isLoading.value = true;
+  try {
+    if (optionsStore.getOptionValueByKey('loginPassword') === await hashMessage(loginForm.password)) {
+      ElMessage.success('登录成功');
+      localStorage.setItem('lastLoginTime', Date.now().toString());
+      router.replace('/');
+    } else {
+      throw '密码错误，请重试';
+    }
+  } catch (error) {
+    errorMessage.value = typeof error === 'string' ? error : '登录失败，请重试';
+  } finally {
+    isLoading.value = false;
+  }
+};
 
-        errorMessage.value = '';
-        isLoading.value = true;
-
-        try {
-            if (optionsStore.getOptionValueByKey('loginPassword') === await hashMessage(loginForm.password)) {
-                ElMessage.success('登录成功');
-                // 记录登录时间
-                localStorage.setItem('lastLoginTime', Date.now().toString());
-                router.replace('/');
-            } else {
-                throw '密码错误，请重试';
-            }
-        } catch (error) {
-            errorMessage.value = typeof error === 'string' ? error : '登录失败，请重试';
-        } finally {
-            isLoading.value = false;
-        }
-    };
-
-    // 回车登录
-    const handleKeyDown = (e) => {
-        if (e.key === 'Enter') {
-            handleLogin();
-        }
-    };
+const handleKeyDown = (e: KeyboardEvent) => {
+  if (e.key === 'Enter') handleLogin();
+};
 </script>
 
 <template>
-    <div class="login-container">
-        <div class="login-box">
-            <div class="login-header">
-                <div class="logo">
-                    <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor">
-                        <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
-                    </svg>
-                </div>
-                <h1>FaceWinUnlock</h1>
-                <p class="subtitle">面容解锁助手</p>
-            </div>
-
-            <div class="login-form">
-                <div class="welcome-text">
-                    请输入应用登录密码
-                </div>
-
-                <el-input
-                    v-model="loginForm.password"
-                    type="password"
-                    placeholder="请输入密码"
-                    show-password
-                    @keydown="handleKeyDown"
-                    :disabled="isLoading"
-                    size="large"
-                />
-
-                <div v-if="errorMessage" class="error-message">
-                    {{ errorMessage }}
-                </div>
-
-                <el-button
-                    type="primary"
-                    size="large"
-                    :loading="isLoading"
-                    @click="handleLogin"
-                    class="login-btn"
-                >
-                    登录
-                </el-button>
-
-            </div>
-
-            <div class="login-footer">
-                <span>v {{ version }}</span>
-            </div>
+  <div class="login-container">
+    <div class="login-card">
+      <!-- 品牌标识 -->
+      <div class="login-emblem">
+        <div class="v7-emblem" style="width:64px;height:64px">
+          <span class="r1"></span>
+          <span class="r2"></span>
+          <span class="r3"></span>
         </div>
+      </div>
+
+      <h1 class="login-title">面容解锁</h1>
+      <p class="login-sub">FaceWinUnlock · 墨韵星枢</p>
+
+      <div class="login-form">
+        <p class="form-label">请输入应用登录密码</p>
+
+        <el-input
+          v-model="loginForm.password"
+          type="password"
+          placeholder="请输入密码"
+          show-password
+          @keydown="handleKeyDown"
+          :disabled="isLoading"
+          size="large"
+        />
+
+        <div v-if="errorMessage" class="error-message">
+          <span class="v7-tag v7-tag-red">{{ errorMessage }}</span>
+        </div>
+
+        <el-button
+          type="primary"
+          size="large"
+          :loading="isLoading"
+          @click="handleLogin"
+          class="login-btn"
+        >
+          解锁进入
+        </el-button>
+      </div>
+
+      <div class="login-footer">
+        <span class="version">v {{ version }}</span>
+        <span class="divider">|</span>
+        <span class="seal-text">面容守护</span>
+      </div>
     </div>
+  </div>
 </template>
 
 <style scoped>
 .login-container {
-    height: 100vh;
-    width: 100vw;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    background: #f0f2f7;
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  position: relative;
+  z-index: 2;
 }
 
-.login-box {
-    width: 100%;
-    max-width: 420px;
-    background: white;
-    border-radius: 12px;
-    padding: 36px;
-    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+.login-card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--v7-surface-card);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid var(--v7-border-subtle);
+  border-radius: 24px;
+  padding: 42px 38px;
+  box-shadow:
+    0 0 0 1px rgba(201,166,62,.06),
+    0 30px 60px -24px rgba(0,0,0,.55),
+    var(--v7-glow-gold);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  animation: cardRise .8s cubic-bezier(.16,1,.3,1) both;
 }
 
-.login-header {
-    text-align: center;
-    margin-bottom: 24px;
+@keyframes cardRise {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
-.logo {
-    color: #6c63ff;
-    margin-bottom: 12px;
+.login-emblem {
+  margin-bottom: 16px;
 }
 
-.login-header h1 {
-    font-size: 24px;
-    font-weight: 600;
-    color: #222;
-    margin: 0 0 8px 0;
+.login-title {
+  font: 400 28px/1.2 var(--v7-font-display);
+  color: var(--v7-text-primary);
+  margin: 0 0 4px;
 }
 
-.subtitle {
-    color: #888;
-    font-size: 14px;
-    margin: 0;
+.login-sub {
+  font: 600 10px/1 var(--v7-font-en);
+  letter-spacing: .28em;
+  color: var(--v7-gold-mid);
+  text-transform: uppercase;
+  margin: 0 0 28px;
 }
 
-.welcome-text {
-    font-size: 16px;
-    color: #333;
-    margin-bottom: 16px;
-    text-align: center;
+.login-form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.form-label {
+  font-size: 14px;
+  color: var(--v7-text-secondary);
+  text-align: center;
+  margin: 0;
 }
 
 .error-message {
-    color: #f56c6c;
-    font-size: 14px; 
-    margin: 8px 0;
-    text-align: center;
+  text-align: center;
 }
 
 .login-btn {
-    width: 100%;
-    margin-top: 16px; 
-    height: 44px;
-    font-size: 16px;
-    border-radius: 8px; 
-}
-
-.tips {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    margin-top: 16px; 
-    padding: 12px;
-    background: #e6f7ff; 
-    border-radius: 8px;
-    font-size: 13px; 
-    color: #1890ff; 
-    line-height: 1.6;
+  width: 100%;
+  height: 46px;
+  font-size: 16px;
+  font-weight: 600;
+  border-radius: 12px;
+  margin-top: 4px;
 }
 
 .login-footer {
-    text-align: center;
-    margin-top: 20px; 
-    padding-top: 16px;
-    border-top: 1px solid #eee;
-    color: #777;
-    font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--v7-border-subtle);
+  width: 100%;
+  justify-content: center;
+}
+
+.version {
+  font-size: 12px;
+  color: var(--v7-text-dim);
+}
+
+.divider {
+  color: var(--v7-text-muted);
+  font-size: 12px;
+}
+
+.seal-text {
+  font: 400 13px/1 var(--v7-font-seal);
+  color: var(--v7-gold-mid);
 }
 </style>

@@ -5,12 +5,18 @@ import router from "./router";
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css'
+import './styles/v7-theme.css'
 import { createPinia } from 'pinia'
 import { useFile } from "./hook/useFile";
 import { warn } from "@tauri-apps/plugin-log";
 import { formatObjectString } from "./utils/function";
 import i18n from "./i18n";
 import { useTheme } from "./hook/useTheme";
+
+/* v7 墨韵星枢 — 字体说明：
+   Google Fonts (Ma Shan Zheng, Noto Serif SC, ZCOOL XiaoWei) 在国内网络不可用，
+   已改为系统自带中文字体优先 (Microsoft YaHei, KaiTi, STKaiti)。
+   字体定义见 styles/v7-theme.css 的 --v7-font-* 变量。 */
 
 const pinia = createPinia()
 const app = createApp(App)

@@ -553,7 +553,7 @@
                             </div>
                             <!-- 26-01-04 感觉tip占用空间点有大，尽量让内容在一屏中 -->
                             <!-- <div class="tip">
-                                当前阈值: <b style="color: #606266; margin: 0 4px;">{{ threshold }}%</b>
+                                当前阈值: <b style="color: var(--v7-text-secondary); margin: 0 4px;">{{ threshold }}%</b>
                                 <span @click="openUrl('https://docs.opencv.org/4.x/d0/dd4/tutorial_dnn_face.html')">
                                     OpenCV 官网建议 ≥ 0.363 (约 36%)
                                 </span>
@@ -561,7 +561,7 @@
                         </el-form-item>
 
                         <el-divider>关联系统账户</el-divider>
-                        <AccountAuthForm v-model="authForm" :small="true" :customTips="'请输入系统密码或微软账号密码，<font color=\'red\'>程序不支持Pin</font><br/>此密码仅用于 DLL 调起 WinLogon 认证<br />不会上传至任何云端<br />注意：<strong>当前使用明文存储</strong>'"/>
+                        <AccountAuthForm v-model="authForm" :small="true" :customTips="'请输入系统密码或微软账号密码，<span style=&quot;color: var(--v7-cinnabar-bright);&quot;>程序不支持 PIN</span><br/>此密码仅用于 DLL 调起 WinLogon 认证<br />不会上传至任何云端<br />注意：<strong>当前使用明文存储</strong>'"/>
 
                         <div class="footer-btns">
                             <el-button type="success" size="large" @click="handleSave" :disabled="!capturedImage || isCameraStreaming" :loading="isProcessing">
@@ -576,14 +576,19 @@
 </template>
 
 <style scoped>
+    /* ====== 整体容器 ====== */
+    .face-add-container { font-family: var(--v7-font-body); }
+
+    /* ====== 显示容器 ====== */
     .display-container {
         display: flex;
         gap: 10px;
         height: 320px;
-        background: #000;
-        border-radius: 8px;
+        background: var(--v7-ink-char);
+        border-radius: 12px;
         overflow: hidden;
         transition: all 0.3s ease;
+        border: 1px solid var(--v7-border-subtle);
     }
 
     .screen-box {
@@ -592,28 +597,32 @@
         display: flex;
         justify-content: center;
         align-items: center;
-        background: #1a1a1a;
-        border: 1px solid #333;
+        background:
+          radial-gradient(ellipse at center, rgba(201,166,62,.04) 0%, transparent 70%),
+          var(--v7-ink-deep);
+        border: 1px solid var(--v7-border-subtle);
+        border-radius: 8px;
     }
 
     .screen-label {
         position: absolute;
         top: 10px;
         left: 10px;
-        background: rgba(0, 0, 0, 0.6);
-        color: #fff;
-        padding: 2px 8px;
+        background: rgba(10,10,12,0.8);
+        color: var(--v7-gold-bright);
+        padding: 3px 10px;
         font-size: 12px;
-        border-radius: 4px;
+        border-radius: 6px;
         z-index: 5;
+        border: 1px solid var(--v7-border-subtle);
+        font-weight: 600;
     }
 
     .result-img {
         max-width: 100%;
         max-height: 100%;
         object-fit: contain;
-        filter: drop-shadow(0 0 8px rgba(0, 242, 255, 0.2));
-        border: 1px solid #333;
+        filter: drop-shadow(0 0 10px rgba(201,166,62,0.15));
     }
 
     .mirrored {
@@ -621,11 +630,14 @@
     }
 
     .placeholder-content {
-        color: #444;
+        color: var(--v7-text-dim);
         text-align: center;
     }
+    .placeholder-content .el-icon {
+        color: var(--v7-text-muted);
+    }
 
-    /* 验证模式下的分割线效果 */
+    /* ====== 验证模式 ====== */
     .split-view .screen-box {
         flex: 0 0 calc(50% - 5px);
     }
@@ -636,56 +648,62 @@
         display: flex;
         justify-content: center;
         align-items: center;
-        color: #409eff;
+        color: var(--v7-gold-bright);
     }
 
     .scanner-line {
         position: absolute;
         width: 100%;
         height: 2px;
-        background: rgba(64, 158, 255, 0.5);
-        box-shadow: 0 0 10px #409eff;
+        background: linear-gradient(90deg, transparent, rgba(201,166,62,.5), var(--v7-gold-bright), rgba(201,166,62,.5), transparent);
+        box-shadow: 0 0 16px rgba(201,166,62,.4);
         animation: scan 2s infinite ease-in-out;
         z-index: 2;
     }
 
     .confidence-tag {
         position: absolute;
-        bottom: 20px;
-        padding: 5px 15px;
+        bottom: 16px;
+        padding: 6px 16px;
         border-radius: 20px;
-        font-weight: bold;
-        font-size: 14px;
+        font-weight: 700;
+        font-size: 13px;
+        backdrop-filter: blur(8px);
     }
 
     .match {
-        background: #67c23a;
-        color: white;
+        background: rgba(91,140,90,.7);
+        color: #e8f5e9;
+        border: 1px solid rgba(123,198,126,.4);
     }
 
     .mismatch {
-        background: #f56c6c;
-        color: white;
+        background: rgba(194,53,49,.7);
+        color: #fde8e8;
+        border: 1px solid rgba(194,53,49,.4);
     }
 
+    /* ====== 控制栏 ====== */
     .detection-config {
         display: flex;
         align-items: center;
-        background: #f0f2f5;
-        padding: 5px 12px;
-        border-radius: 4px;
+        background: var(--v7-surface-card);
+        padding: 8px 14px;
+        border-radius: 10px;
         gap: 10px;
         width: 100%;
+        border: 1px solid var(--v7-border-subtle);
     }
 
     .detection-config .label {
         font-size: 12px;
-        color: #606266;
+        color: var(--v7-text-secondary);
         white-space: nowrap;
+        font-weight: 600;
     }
 
     .action-bar {
-        margin-top: 20px;
+        margin-top: 18px;
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -697,9 +715,33 @@
         margin-top: 20px;
     }
 
+    /* ====== 表单卡片 ====== */
+    :deep(.visual-card), :deep(.el-card) {
+        background: var(--v7-surface-card) !important;
+        border: 1px solid var(--v7-border-subtle) !important;
+        border-radius: 16px !important;
+    }
+
+    :deep(.el-card__header) {
+        color: var(--v7-text-primary) !important;
+        font-weight: 600 !important;
+        border-bottom: 1px solid var(--v7-border-subtle) !important;
+    }
+
+    :deep(.el-form-item__label) {
+        color: var(--v7-text-secondary) !important;
+        font-weight: 600;
+    }
+
+    :deep(.el-divider__text) {
+        color: var(--v7-text-dim);
+        background: var(--v7-surface-card);
+    }
+
+    /* ====== 提示 ====== */
     .tip {
         font-size: 13px;
-        color: #909399;
+        color: var(--v7-text-dim);
         margin-top: 8px;
         display: flex;
         align-items: center;
@@ -707,7 +749,7 @@
 
     .tip span {
         margin-left: 8px;
-        color: #409eff;
+        color: var(--v7-gold-bright);
         cursor: pointer;
         text-decoration: underline;
         transition: color 0.2s ease;
@@ -715,7 +757,7 @@
     }
 
     .tip span:hover {
-        color: #66b1ff;
+        color: var(--v7-gold-pale);
         text-decoration: none;
     }
 
@@ -729,19 +771,15 @@
         margin-left: 10px;
         font-size: 16px;
         cursor: pointer;
+        color: var(--v7-gold-mid);
     }
 
+    /* ====== 动画 ====== */
     @keyframes scan {
-        0% {
-            top: 10%;
-        }
-
-        50% {
-            top: 90%;
-        }
-
-        100% {
-            top: 10%;
-        }
+        0% { top: 10%; opacity: .4; }
+        25% { top: 90%; opacity: .9; }
+        50% { top: 50%; opacity: .3; }
+        75% { top: 30%; opacity: .7; }
+        100% { top: 10%; opacity: .4; }
     }
 </style>

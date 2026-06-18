@@ -23,9 +23,8 @@ export function useTheme() {
         } else if (saved === 'light') {
             applyTheme(false);
         } else {
-            // 跟随系统
-            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-            applyTheme(prefersDark);
+            // 默认使用亮色主题（宣纸暖白），用户可手动切换暗色
+            applyTheme(false);
         }
 
         // 监听系统主题变化（用户未手动设置时生效）
