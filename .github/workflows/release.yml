@@ -341,15 +341,27 @@ jobs:
       - name: Install UWP build tools for Passkey plugin
         shell: pwsh
         run: |
-          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
-          if (Test-Path $vsInstaller) {
-            & $vsInstaller modify --installPath "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise" `
-              --add Microsoft.VisualStudio.Workload.Universal `
-              --quiet --norestart --wait | Out-Null
-            Write-Host "UWP build tools installed."
-          } else {
-            Write-Host "VS Installer not found, assuming UWP tools already present."
+          $ErrorActionPreference = "Stop"
+          # 快速检查 UWP 工具是否已安装
+          $vctargets = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170\Microsoft.Cpp.UWP.user.props"
+          if (Test-Path $vctargets) {
+            Write-Host "UWP build tools already present."
+            exit 0
           }
+          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          if (-not (Test-Path $vsInstaller)) {
+            throw "VS Installer not found at $vsInstaller"
+          }
+          Write-Host "Installing UWP VC++ build tools..."
+          $proc = Start-Process -FilePath $vsInstaller -ArgumentList @(
+            'modify',
+            '--installPath', "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise",
+            '--add', 'Microsoft.VisualStudio.ComponentGroup.UWP.VC'
+          ) -Wait -PassThru -NoNewWindow
+          if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+            throw "vs_installer exited with code $($proc.ExitCode)"
+          }
+          Write-Host "UWP build tools installed (exit code: $($proc.ExitCode))."
 
       - name: Build Passkey plugin MSIX
         shell: pwsh
