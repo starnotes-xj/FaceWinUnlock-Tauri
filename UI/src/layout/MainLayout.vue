@@ -204,9 +204,11 @@ function resetScroll() {
 
       <!-- 主内容 -->
       <main class="main-content">
-        <router-view v-slot="{ Component }">
+        <router-view v-slot="{ Component, route: r }">
           <transition name="fade-transform" mode="out-in" @before-enter="resetScroll">
-            <component :is="Component" :key="$route.path" />
+            <keep-alive>
+              <component :is="Component" :key="r.path" />
+            </keep-alive>
           </transition>
         </router-view>
       </main>
