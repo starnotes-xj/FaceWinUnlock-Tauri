@@ -61,7 +61,12 @@ Import-Certificate -FilePath $cerPath -CertStoreLocation Cert:\CurrentUser\Trust
 
 Push-Location $projectDir
 try {
-    & $msbuild $solution /t:Restore /p:RestorePackagesConfig=true /v:minimal
+    $msbuildPlatformProps = @(
+        "/p:TargetPlatformIdentifier=Windows",
+        "/p:TargetPlatformVersion=10.0.26100.0"
+    )
+
+    & $msbuild $solution /t:Restore /p:RestorePackagesConfig=true $msbuildPlatformProps /v:minimal
     if ($LASTEXITCODE -ne 0) {
         throw "NuGet restore failed."
     }
@@ -78,6 +83,7 @@ try {
         /p:UapAppxPackageBuildMode=SideloadOnly `
         /p:DebugInformationFormat=OldStyle `
         /p:RunCodeAnalysis=false `
+        $msbuildPlatformProps `
         /v:minimal
     if ($LASTEXITCODE -ne 0) {
         throw "Passkey plugin build failed."
