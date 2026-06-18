@@ -40,7 +40,7 @@
             message: () => h('div', null, [
                 h('p', null, [
                     h('span', null, '账户类型和用户名是自动识别的， '),
-                    h('b', { style: 'color: red' }, '一般情况下无需修改。'),
+                    h('b', { style: 'color: var(--v7-cinnabar-bright)' }, '一般情况下无需修改。'),
                     h('br', null, ''),
                     h('span', null, '除非你完全清楚修改此信息的后果并确认需要调整，否则请保持默认值。 '),
                 ]),
@@ -120,7 +120,7 @@
             <el-form-item v-if="formData.accountType === 'domain'" label="域名称">
                 <el-input v-model="formData.domain" placeholder="例如: CORP">
                     <template #prefix>
-                        <span style="padding-left: 5px; color: #409EFF; font-weight: bold;">\</span>
+                        <span class="account-prefix">\</span>
                     </template>
                 </el-input>
             </el-form-item>
@@ -128,7 +128,7 @@
             <el-form-item :label="formData.accountType === 'local' ? 'Windows 用户名' : formData.accountType === 'domain' ? '域用户名' : '微软账号 Email'">
                 <el-input v-model="formData.username" :placeholder="formData.accountType === 'local' ? '例如: Administrator' : formData.accountType === 'domain' ? '例如: jdoe' : '例如: user@outlook.com'" @focus="handleFocus" @blur="handleBlur('username')">
                     <template v-if="formData.accountType === 'local' || formData.accountType === 'domain'" #prefix>
-                        <span style="padding-left: 5px; color: #409EFF; font-weight: bold;">{{ formData.accountType === 'domain' && formData.domain ? formData.domain + '\\' : '.\\' }}</span>
+                        <span class="account-prefix">{{ formData.accountType === 'domain' && formData.domain ? formData.domain + '\\' : '.\\' }}</span>
                     </template>
                 </el-input>
             </el-form-item>
@@ -170,14 +170,23 @@
         padding-bottom: 4px;
     }
 
+    .account-prefix {
+        padding-left: 5px;
+        color: var(--v7-gold-bright);
+        font-weight: 700;
+        font-family: var(--v7-font-body);
+    }
+
     .auth-tips {
         margin-top: 15px;
         padding: 12px;
-        background-color: #f4f4f5;
-        border-left: 4px solid #909399;
-        border-radius: 4px;
+        background:
+            linear-gradient(135deg, rgba(201,166,62,0.08), transparent 70%),
+            var(--v7-primary-bg);
+        border-left: 4px solid var(--v7-gold-mid);
+        border-radius: 8px;
         font-size: 12px;
-        color: #606266;
+        color: var(--v7-text-secondary);
         display: flex;
         align-items: flex-start;
         gap: 8px;
@@ -188,6 +197,12 @@
     .auth-tips .el-icon {
         margin-top: 2px;
         flex-shrink: 0;
+        color: var(--v7-gold-mid);
+    }
+
+    .auth-tips :deep(font[color="red"]),
+    .auth-tips :deep(.danger-text) {
+        color: var(--v7-cinnabar-bright) !important;
     }
 
     .label-box{

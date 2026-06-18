@@ -51,8 +51,15 @@ fn artifact_path(file_name: &str) -> PathBuf {
 }
 
 fn query_package(package_name: &str) -> Result<Option<Value>, String> {
+    // 两步查询：先查当前用户，查不到再加 -AllUsers 兜底。
+    // 主程序以 RUNASADMIN 提权运行时，Get-AppxPackage 在部分 Windows 版本
+    // /UAC 配置下可能找不到按用户安装的 MSIX 包，-AllUsers 可消除此类误报"未安装"。
+    let name_literal = powershell_string_literal(package_name);
     let script = format!(
-        "$pkg = Get-AppxPackage -Name '{package_name}' | Sort-Object Version -Descending | Select-Object -First 1; \
+        "$pkg = Get-AppxPackage -Name {name_literal} | Sort-Object Version -Descending | Select-Object -First 1; \
+         if ($null -eq $pkg) {{ \
+           $pkg = Get-AppxPackage -AllUsers -Name {name_literal} | Sort-Object Version -Descending | Select-Object -First 1; \
+         }}; \
          if ($null -ne $pkg) {{ \
            [pscustomobject]@{{ \
              name = $pkg.Name; \
@@ -72,13 +79,125 @@ fn query_package(package_name: &str) -> Result<Option<Value>, String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stdout = stdout.trim();
-    if stdout.is_empty() {
-        return Ok(None);
+    if !stdout.is_empty() {
+        return serde_json::from_str(stdout)
+            .map(Some)
+            .map_err(|e| format!("解析插件状态失败: {e}"));
     }
 
-    serde_json::from_str(stdout)
-        .map(Some)
-        .map_err(|e| format!("解析插件状态失败: {e}"))
+    // PowerShell 查询为空时，用文件系统兜底：
+    // 提权进程的 Get-AppxPackage 可能完全找不到 per-user MSIX 包（已知 Windows 行为），
+    // 但 MSIX 安装后必然在 %LOCALAPPDATA%\Packages\ 下创建包家族名目录。
+    // 从目录名提取 FamilyName，再尝试从注册表读取版本号。
+    if let Some(info) = detect_package_via_local_appdata(package_name) {
+        return Ok(Some(info));
+    }
+
+    Ok(None)
+}
+
+/// 文件系统兜底：检查 `%LOCALAPPDATA%\Packages\` 是否存在以 `{package_name}_` 开头的目录。
+///
+/// MSIX 安装时会在 `LocalAppData\Packages` 下创建名为 `{FamilyName}` 的目录，
+/// 其中 `FamilyName` 格式为 `{PackageName}_{PublisherId}`。该目录对提权进程同样可见，
+/// 因此在 `Get-AppxPackage` 不可靠时作为最后的检测手段。
+///
+/// 返回的 `Value` 包含 `name`、`package_family_name`，以及从注册表读取的 `version`（若读取失败
+/// 则为 `"0.0.0.0"`）。`package_full_name` 设为与 `package_family_name` 相同（文件系统无法获得完整名）。
+fn detect_package_via_local_appdata(package_name: &str) -> Option<Value> {
+    let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
+    let packages_dir = Path::new(&local_app_data).join("Packages");
+
+    for entry in std::fs::read_dir(&packages_dir).ok()?.flatten() {
+        let dir_name = entry.file_name();
+        let dir_str = dir_name.to_str()?;
+        // MSIX 包目录格式: {PackageName}_{PublisherId}
+        if !dir_str.starts_with(&format!("{package_name}_")) {
+            continue;
+        }
+
+        let package_family_name = dir_str.to_string();
+        // 从注册表 AppxAllUserStore 读取版本号；读取失败则标记 "0.0.0.0"
+        // （0.0.0.0 会使 compare_versions 判定为可更新，用户可在 UI 手动触发更新）
+        let version = read_appx_version_from_registry(&package_family_name)
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+
+        return Some(json!({
+            "name": package_name,
+            "package_full_name": package_family_name,
+            "package_family_name": package_family_name,
+            "version": version,
+        }));
+    }
+
+    None
+}
+
+/// 从注册表读取已安装 MSIX 包的版本号。
+///
+/// 查找路径：`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\`
+/// 下各级子键中匹配 `{package_family_name}` 的包全名键，从键名提取版本。
+///
+/// MSIX 包全名格式为 `{FamilyName}_{Version}_{Architecture}__{PublisherId}`，
+/// 但在 AppxAllUserStore 中键名即包全名，其中嵌入版本号。
+fn read_appx_version_from_registry(package_family_name: &str) -> Option<String> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let store_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore";
+    let store_key = hklm.open_subkey_with_flags(store_path, KEY_READ).ok()?;
+
+    // 遍历所有子键（每个子键是用户 SID 或 Installed、Staged 等特殊键）
+    for sid_key in store_key.enum_keys().flatten() {
+        let sid_subkey = match store_key.open_subkey_with_flags(&sid_key, KEY_READ) {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+        // 遍历该用户下注册的包全名
+        for pkg_full_name in sid_subkey.enum_keys().flatten() {
+            if pkg_full_name.starts_with(package_family_name) {
+                // 包全名格式: {FamilyName}_{Major}_{Minor}_{Build}_{Rev}_{Arch}__{PublisherId}
+                // 或: {FamilyName}_{Version}_{Arch}__{PublisherId}
+                // 从 FamilyName 之后、Architecture 之前的下划线段提取版本
+                let suffix = &pkg_full_name[package_family_name.len()..];
+                let version = extract_version_from_pkg_full_name(suffix);
+                if version.is_some() {
+                    return version;
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// 从包全名的后缀（FamilyName 之后的 `_1_0_0_0_x64__PublisherId` 部分）提取版本号。
+/// 返回格式: "1.0.0.0"
+fn extract_version_from_pkg_full_name(suffix: &str) -> Option<String> {
+    // suffix 形如 "_1_0_0_0_x64__8wekyb3d8bbwe" 或 "_1.0.0.0_x64__PublisherId"
+    let trimmed = suffix.trim_start_matches('_');
+    // 按 "__" 分离出版本+架构和发布者 ID
+    let before_publisher = trimmed.split("__").next()?;
+    // 按 "_" 分离版本段和架构；版本段在前，架构（x64/arm64/neutral 等）在后
+    let parts: Vec<&str> = before_publisher.split('_').collect();
+    if parts.len() < 5 {
+        // 可能是圆点分隔的版本: "1.0.0.0_x64"
+        if let Some(v) = parts.first() {
+            let v_parts: Vec<&str> = v.split('.').collect();
+            if v_parts.len() == 4 && v_parts.iter().all(|p| p.parse::<u64>().is_ok()) {
+                return Some(v.to_string());
+            }
+        }
+        return None;
+    }
+    // 下划线分隔: _1_0_0_0_x64 → parts = ["1","0","0","0","x64"]
+    // 取前 4 段作为版本号
+    let version_parts: Vec<&str> = parts.iter().take(4).copied().collect();
+    if version_parts.iter().all(|p| p.parse::<u64>().is_ok()) {
+        return Some(version_parts.join("."));
+    }
+    None
 }
 
 fn query_msix_version(package_path: &Path) -> Result<Option<String>, String> {
@@ -171,6 +290,77 @@ fn status_value() -> Result<Value, String> {
     }))
 }
 
+fn install_or_update_package(
+    package_path: &Path,
+    certificate_path: &Path,
+    is_update: bool,
+) -> Result<(), String> {
+    let appx_command = if is_update {
+        format!(
+            "Add-AppxPackage -Update -Path {} -ForceApplicationShutdown -ForceUpdateFromAnyVersion -ErrorAction Stop;",
+            powershell_literal(package_path),
+        )
+    } else {
+        format!(
+            "Add-AppxPackage -Path {} -ForceApplicationShutdown -ForceUpdateFromAnyVersion -ErrorAction Stop;",
+            powershell_literal(package_path),
+        )
+    };
+
+    let script = format!(
+        "$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); \
+         if ($isAdmin) {{ \
+           Import-Certificate -FilePath {} -CertStoreLocation 'Cert:\\LocalMachine\\TrustedPeople' -ErrorAction Stop | Out-Null; \
+           Import-Certificate -FilePath {} -CertStoreLocation 'Cert:\\LocalMachine\\Root' -ErrorAction Stop | Out-Null; \
+         }} else {{ \
+           Import-Certificate -FilePath {} -CertStoreLocation 'Cert:\\CurrentUser\\TrustedPeople' -ErrorAction Stop | Out-Null; \
+         }}; \
+         Get-Process -Name 'PasskeyManager' -ErrorAction SilentlyContinue | Stop-Process -Force; \
+         {appx_command}",
+        powershell_literal(certificate_path),
+        powershell_literal(certificate_path),
+        powershell_literal(certificate_path),
+    );
+    let output = run_powershell(&script).map_err(|e| format!("启动插件安装失败: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "安装 FaceWinUnlock Passkey 失败: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// 更新已安装的正式 Passkey MSIX 包。
+///
+/// 只调用 `Add-AppxPackage -Update/-ForceUpdateFromAnyVersion`，不移除包，因此 MSIX
+/// `LocalState` 中的本地通行密钥库、HKCU 插件设置和 Windows 插件索引都会保留。
+/// 返回 `Ok(None)` 表示未安装或无需更新。
+pub(crate) fn update_bundled_passkey_plugin_preserving_data() -> Result<Option<String>, String> {
+    let Some(formal) = query_package(FORMAL_PACKAGE_NAME)? else {
+        return Ok(None);
+    };
+
+    let package_path = artifact_path("FaceWinUnlock-Passkey.msix");
+    let certificate_path = artifact_path("FaceWinUnlock-Passkey.cer");
+    if !package_path.exists() || !certificate_path.exists() {
+        return Err("安装目录中缺少 FaceWinUnlock Passkey 的 MSIX 或签名证书".to_string());
+    }
+
+    let Some(bundled_version) = query_msix_version(&package_path)? else {
+        return Err("无法读取 FaceWinUnlock Passkey MSIX 版本".to_string());
+    };
+    let installed_version = package_version(&formal).unwrap_or("0.0.0.0");
+    if compare_versions(installed_version, &bundled_version).is_ge() {
+        return Ok(None);
+    }
+
+    install_or_update_package(&package_path, &certificate_path, true)?;
+    Ok(Some(format!(
+        "FaceWinUnlock Passkey 已从 {installed_version} 更新到 {bundled_version}，本地通行密钥已保留"
+    )))
+}
+
 #[tauri::command]
 pub fn get_passkey_plugin_status() -> Result<CustomResult, CustomResult> {
     status_value()
@@ -227,49 +417,29 @@ pub fn install_passkey_plugin(replace_sample: bool) -> Result<CustomResult, Cust
 
     let replace_script = if should_remove_sample {
         format!(
-            "Get-AppxPackage -Name '{SAMPLE_PACKAGE_NAME}' | Remove-AppxPackage -ErrorAction Stop;"
+            "Get-Process -Name 'PasskeyManager' -ErrorAction SilentlyContinue | Stop-Process -Force; \
+             Get-AppxPackage -Name '{SAMPLE_PACKAGE_NAME}' | Remove-AppxPackage -ErrorAction Stop;"
         )
     } else {
         String::new()
     };
-    let install_script = if !needs_install {
-        String::new()
-    } else if formal.is_some() {
-        format!(
-            "Add-AppxPackage -Update -Path {} -ForceApplicationShutdown -ForceUpdateFromAnyVersion -ErrorAction Stop;",
-            powershell_literal(&package_path),
-        )
-    } else {
-        format!(
-            "Add-AppxPackage -Path {} -ForceApplicationShutdown -ForceUpdateFromAnyVersion -ErrorAction Stop;",
-            powershell_literal(&package_path),
-        )
-    };
-    let script = format!(
-        "$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); \
-         if ($isAdmin) {{ \
-           Import-Certificate -FilePath {} -CertStoreLocation 'Cert:\\LocalMachine\\TrustedPeople' -ErrorAction Stop | Out-Null; \
-           Import-Certificate -FilePath {} -CertStoreLocation 'Cert:\\LocalMachine\\Root' -ErrorAction Stop | Out-Null; \
-         }} else {{ \
-           Import-Certificate -FilePath {} -CertStoreLocation 'Cert:\\CurrentUser\\TrustedPeople' -ErrorAction Stop | Out-Null; \
-         }}; \
-         Get-Process -Name 'PasskeyManager' -ErrorAction SilentlyContinue | Stop-Process -Force; \
-         {replace_script} \
-         {install_script}",
-        powershell_literal(&certificate_path),
-        powershell_literal(&certificate_path),
-        powershell_literal(&certificate_path),
-    );
-    let output = run_powershell(&script)
-        .map_err(|e| CustomResult::error(Some(format!("启动插件安装失败: {e}")), None))?;
-    if !output.status.success() {
-        return Err(CustomResult::error(
-            Some(format!(
-                "安装 FaceWinUnlock Passkey 失败: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )),
-            None,
-        ));
+    if !replace_script.is_empty() {
+        let output = run_powershell(&replace_script)
+            .map_err(|e| CustomResult::error(Some(format!("启动测试插件清理失败: {e}")), None))?;
+        if !output.status.success() {
+            return Err(CustomResult::error(
+                Some(format!(
+                    "清理 Contoso 测试插件失败: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+                None,
+            ));
+        }
+    }
+
+    if needs_install {
+        install_or_update_package(&package_path, &certificate_path, formal.is_some())
+            .map_err(|e| CustomResult::error(Some(e), None))?;
     }
 
     let status = status_value().map_err(|e| CustomResult::error(Some(e), None))?;
@@ -381,4 +551,88 @@ pub fn open_passkey_plugin_manager() -> Result<CustomResult, CustomResult> {
         .map_err(|e| CustomResult::error(Some(format!("打开插件管理器失败: {e}")), None))?;
 
     Ok(CustomResult::success(None, None))
+}
+
+fn uninstall_passkey_plugin_impl(ignore_missing: bool) -> Result<(bool, Value), String> {
+    let formal = query_package(FORMAL_PACKAGE_NAME)
+        .map_err(|e| format!("查询正式 Passkey 插件失败: {e}"))?;
+    let sample = query_package(SAMPLE_PACKAGE_NAME)
+        .map_err(|e| format!("查询测试 Passkey 插件失败: {e}"))?;
+
+    if formal.is_none() && sample.is_none() {
+        if ignore_missing {
+            return Ok((false, status_value()?));
+        }
+        return Err("没有检测到已安装的 Passkey 插件，无需卸载".to_string());
+    }
+
+    let certificate_path = artifact_path("FaceWinUnlock-Passkey.cer");
+
+    // 如果卸载脚本存在就用它（处理证书清理等完整流程），否则内联 Remove-AppxPackage
+    let uninstall_script_path = ROOT_DIR
+        .join("scripts")
+        .join("uninstall-passkey-plugin.ps1");
+    if uninstall_script_path.exists() {
+        let script = format!(
+            "& {} -CertificatePath {} -ErrorAction Stop",
+            powershell_literal(&uninstall_script_path),
+            powershell_literal(&certificate_path),
+        );
+        let output = run_powershell(&script).map_err(|e| format!("启动插件卸载失败: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "卸载 Passkey 插件失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    } else {
+        // 内联卸载：停止进程 → Remove-AppxPackage（-AllUsers 兜底提权上下文）→ 清理用户证书
+        let script = format!(
+            "Get-Process -Name 'PasskeyManager' -ErrorAction SilentlyContinue | Stop-Process -Force; \
+             $ErrorActionPreference = 'Stop'; \
+             foreach ($name in @('{FORMAL_PACKAGE_NAME}', '{SAMPLE_PACKAGE_NAME}')) {{ \
+               $pkgs = Get-AppxPackage -Name $name -ErrorAction SilentlyContinue; \
+               if ($null -eq $pkgs) {{ $pkgs = Get-AppxPackage -AllUsers -Name $name -ErrorAction SilentlyContinue }}; \
+               $pkgs | Remove-AppxPackage -ErrorAction Stop; \
+             }}; \
+             if (Test-Path {cert_path}) {{ \
+               $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new({cert_path}); \
+               @('Cert:\\CurrentUser\\TrustedPeople','Cert:\\CurrentUser\\Root') | ForEach-Object {{ \
+                 Get-ChildItem $_ -ErrorAction SilentlyContinue | Where-Object Thumbprint -eq $cert.Thumbprint | Remove-Item -Force \
+               }} \
+             }}",
+            cert_path = powershell_literal(&certificate_path),
+        );
+        let output = run_powershell(&script).map_err(|e| format!("启动插件卸载失败: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "卸载 Passkey 插件失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+
+    Ok((true, status_value()?))
+}
+
+/// 主程序/核心卸载时调用：同步卸载 Passkey 插件并清理其本地通行密钥。
+pub(crate) fn uninstall_passkey_plugin_for_core_uninstall() -> Result<Option<String>, String> {
+    let (removed, _) = uninstall_passkey_plugin_impl(true)?;
+    Ok(removed.then(|| "Passkey 插件已随核心组件卸载，本地通行密钥已删除".to_string()))
+}
+
+/// 手动卸载 Passkey 插件（仅在用户明确确认后调用）。
+///
+/// 卸载会删除 MSIX 包及其本地存储的通行密钥，无法恢复。主程序更新不会触发此操作；
+/// 更新路径只执行 `Add-AppxPackage -Update`，保留已有通行密钥。
+#[tauri::command]
+pub fn uninstall_passkey_plugin() -> Result<CustomResult, CustomResult> {
+    let (removed, status) =
+        uninstall_passkey_plugin_impl(false).map_err(|e| CustomResult::error(Some(e), None))?;
+    let msg = if removed {
+        "Passkey 插件已卸载，所有本地存储的通行密钥已删除"
+    } else {
+        "没有检测到已安装的 Passkey 插件，无需卸载"
+    };
+    Ok(CustomResult::success(Some(msg.to_string()), Some(status)))
 }

@@ -86,12 +86,29 @@
   nsExec::ExecToStack 'taskkill /F /IM "FaceWinUnlock-Server.exe"'
   Sleep 1000
 
-  IfFileExists "$INSTDIR\scripts\uninstall-passkey-plugin.ps1" 0 done_passkey_uninstall
-    DetailPrint "正在卸载 FaceWinUnlock Passkey 插件..."
+  ; ── Passkey 插件卸载策略 ────────────────────────────────────────
+  ; 卸载主程序 = 完整清理：同步卸载官方 Passkey MSIX，并删除插件 LocalState 中
+  ; 的本地通行密钥。普通更新不走这里；更新只替换 MSIX 包体并保留密钥。
+  ; ──────────────────────────────────────────────────────────────
+  DetailPrint "正在卸载 FaceWinUnlock Passkey 插件..."
+  IfFileExists "$INSTDIR\scripts\uninstall-passkey-plugin.ps1" 0 passkey_uninstall_inline
     nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\scripts\uninstall-passkey-plugin.ps1" -CertificatePath "$INSTDIR\FaceWinUnlock-Passkey.cer"'
     Pop $0
-    Pop $1
-  done_passkey_uninstall:
+    ${If} $0 == 0
+      DetailPrint "FaceWinUnlock Passkey 插件已卸载。"
+    ${Else}
+      DetailPrint "FaceWinUnlock Passkey 插件卸载脚本返回非零状态，继续卸载主程序。"
+    ${EndIf}
+    Goto passkey_uninstall_done
+  passkey_uninstall_inline:
+    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-Process -Name PasskeyManager -ErrorAction SilentlyContinue | Stop-Process -Force; Get-AppxPackage -Name FaceWinUnlock.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage; Get-AppxPackage -Name Contoso.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage"'
+    Pop $0
+    ${If} $0 == 0
+      DetailPrint "FaceWinUnlock Passkey 插件已卸载。"
+    ${Else}
+      DetailPrint "FaceWinUnlock Passkey 插件内联卸载返回非零状态，继续卸载主程序。"
+    ${EndIf}
+  passkey_uninstall_done:
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

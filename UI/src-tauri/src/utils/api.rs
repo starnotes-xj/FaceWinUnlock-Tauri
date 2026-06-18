@@ -694,6 +694,8 @@ fn apply_downloaded_update() {
     if server_running {
         stop_unlock_service();
     }
+    let passkey_package_updated = update_dir.join("FaceWinUnlock-Passkey.msix").exists()
+        || update_dir.join("FaceWinUnlock-Passkey.cer").exists();
 
     let entries = match std::fs::read_dir(&update_dir) {
         Ok(e) => e,
@@ -714,6 +716,17 @@ fn apply_downloaded_update() {
             let _ = std::fs::copy(&src, ROOT_DIR.join(format!("{name}.new")));
         }
     }
+
+    if passkey_package_updated {
+        match crate::modules::passkey_plugin::update_bundled_passkey_plugin_preserving_data() {
+            Ok(Some(message)) => info!("apply_downloaded_update: {message}"),
+            Ok(None) => {
+                info!("apply_downloaded_update: Passkey 插件未安装或已是最新版本，跳过 MSIX 更新")
+            }
+            Err(e) => warn!("apply_downloaded_update: Passkey 插件更新失败: {e}"),
+        }
+    }
+
     let _ = std::fs::remove_dir_all(&update_dir);
 
     // 服务已被我们停掉 → 通过计划任务重新拉起新版本（任务自带 1 分钟 TimeTrigger 兜底重启）。

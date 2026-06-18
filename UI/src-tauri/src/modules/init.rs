@@ -287,14 +287,18 @@ pub fn uninstall_init() -> Result<CustomResult, CustomResult> {
         let _ = run_hidden("schtasks", &["/Delete", "/TN", tn, "/F"]);
     }
 
-    // 3. 删除注册表：CP 列表项（磁贴来源）、CLSID、应用设置键
+    // 3. 卸载官方 Passkey 插件。卸载是完整清理；只有更新流程会保留插件密钥。
+    crate::modules::passkey_plugin::uninstall_passkey_plugin_for_core_uninstall()
+        .map_err(|e| CustomResult::error(Some(format!("卸载 Passkey 插件失败: {e}")), None))?;
+
+    // 4. 删除注册表：CP 列表项（磁贴来源）、CLSID、应用设置键
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let _ = hklm.delete_subkey_all(format!(r"{}\{}", CP_REG_PATH, CP_GUID));
     let _ = hklm.delete_subkey_all(r"SOFTWARE\facewinunlock-tauri");
     let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
     let _ = hkcr.delete_subkey_all(format!(r"{}\{}", CLSID_ROOT, CP_GUID));
 
-    // 4. 删除 System32 文件（主 DLL + 已废弃的 UIA-Helper），best-effort 不因占用而中断
+    // 5. 删除 System32 文件（主 DLL + 已废弃的 UIA-Helper），best-effort 不因占用而中断
     for f in [DLL_NAME, "FaceWinUnlock-UIA-Helper.exe"] {
         let p = Path::new(SYSTEM32).join(f);
         if p.exists() {
@@ -302,7 +306,7 @@ pub fn uninstall_init() -> Result<CustomResult, CustomResult> {
         }
     }
 
-    // 5. 删除 WebView2 缓存（%ProgramData%\facewinunlock-tauri）
+    // 6. 删除 WebView2 缓存（%ProgramData%\facewinunlock-tauri）
     if let Ok(pd) = std::env::var("ProgramData") {
         let cache = Path::new(&pd).join("facewinunlock-tauri");
         if cache.exists() {
