@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <defs>
+    <!-- Calm night palette from zerosoul/chinese-colors:
+      玄青 #3d3b4f, 黛蓝 #425066, 墨色 #50616d, 月白 #d6ecf0,
+      靛蓝 #065279, 金色 #eacd76, 胭脂 #9d2933, 鸭卵青 #e0eee8
+    -->
+    <linearGradient id="nightBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3d3b4f"/>
+      <stop offset=".45" stop-color="#425066"/>
+      <stop offset="1" stop-color="#1f2733"/>
+    </linearGradient>
+    <radialGradient id="moonGlow" cx="70%" cy="16%" r="56%">
+      <stop offset="0" stop-color="#d6ecf0" stop-opacity=".18"/>
+      <stop offset=".5" stop-color="#50616d" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#263747"/>
+      <stop offset="1" stop-color="#182534"/>
+    </linearGradient>
+    <linearGradient id="panel2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2e4e7e"/>
+      <stop offset="1" stop-color="#243449"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#eacd76"/>
+      <stop offset=".5" stop-color="#f2be45"/>
+      <stop offset="1" stop-color="#eacd76"/>
+    </linearGradient>
+    <pattern id="brocade" width="128" height="128" patternUnits="userSpaceOnUse">
+      <path d="M64 12 C84 32 104 42 116 64 C104 86 84 96 64 116 C44 96 24 86 12 64 C24 42 44 32 64 12Z" fill="none" stroke="#eacd76" stroke-width="1.2" opacity=".16"/>
+      <path d="M64 36 C78 46 88 54 92 64 C88 74 78 82 64 92 C50 82 40 74 36 64 C40 54 50 46 64 36Z" fill="none" stroke="#d6ecf0" stroke-width="1" opacity=".12"/>
+    </pattern>
+    <pattern id="ruyiCloud" width="190" height="118" patternUnits="userSpaceOnUse">
+      <path d="M16 74 C42 50 78 58 86 86 C112 48 168 56 176 96 L34 96 C12 96 0 86 16 74Z" fill="none" stroke="#eacd76" stroke-width="1.8" opacity=".28"/>
+      <path d="M58 72 C72 50 112 50 126 76 M92 90 C114 70 146 76 158 94" fill="none" stroke="#d6ecf0" stroke-width="1.2" opacity=".18"/>
+      <circle cx="42" cy="84" r="8" fill="none" stroke="#eacd76" stroke-width="1" opacity=".2"/>
+    </pattern>
+    <pattern id="water" width="160" height="76" patternUnits="userSpaceOnUse">
+      <path d="M0 58 C20 28 60 28 80 58 C100 28 140 28 160 58" fill="none" stroke="#d6ecf0" stroke-width="2" opacity=".22"/>
+      <path d="M0 68 C20 44 60 44 80 68 C100 44 140 44 160 68" fill="none" stroke="#eacd76" stroke-width="1.3" opacity=".2"/>
+    </pattern>
+    <pattern id="beads" width="64" height="64" patternUnits="userSpaceOnUse">
+      <circle cx="16" cy="16" r="3" fill="#eacd76" opacity=".22"/>
+      <circle cx="48" cy="48" r="3" fill="#d6ecf0" opacity=".18"/>
+    </pattern>
+    <pattern id="lattice" width="92" height="92" patternUnits="userSpaceOnUse">
+      <path d="M0 46 H92 M46 0 V92 M18 18 L74 74 M74 18 L18 74" stroke="#eacd76" stroke-width="1" opacity=".16"/>
+      <circle cx="46" cy="46" r="14" fill="none" stroke="#d6ecf0" stroke-width="1" opacity=".12"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#000" flood-opacity=".42"/>
+    </filter>
+    <style>
+      .font{font-family:"Microsoft YaHei UI","Noto Sans CJK SC","Segoe UI",sans-serif}
+      .title{fill:#e0eee8;font-size:40px;font-weight:860;letter-spacing:2px}
+      .sub{fill:#b9c9cc;font-size:18px}
+      .tiny{fill:#eacd76;font-size:12px;font-weight:850;letter-spacing:4px}
+      .h2{fill:#e0eee8;font-size:25px;font-weight:820}
+      .body{fill:#d6ecf0;font-size:18px}
+      .muted{fill:#9fb1b5;font-size:14px}
+      .label{fill:#1f2733;font-size:16px;font-weight:850}
+      .num{fill:#e0eee8;font-size:46px;font-weight:900}
+      .seal{fill:#e0eee8;font-size:17px;font-weight:850;writing-mode:tb;letter-spacing:4px}
+    </style>
+  </defs>
+  <rect width="1800" height="1120" fill="url(#nightBg)"/>
+  <rect width="1800" height="1120" fill="url(#moonGlow)"/>
+  <rect width="1800" height="1120" fill="url(#brocade)" opacity=".9"/>
+  <rect y="874" width="1800" height="246" fill="url(#water)" opacity=".9"/>
+  <path d="M0 930 C180 890 290 960 462 920 C660 872 820 944 1028 900 C1240 856 1400 930 1800 840 L1800 1120 L0 1120Z" fill="#1b2a38" opacity=".72"/>
+  <path d="M0 982 C210 938 350 1010 548 970 C760 928 920 996 1130 954 C1360 908 1510 968 1800 900" fill="none" stroke="#eacd76" stroke-width="2" opacity=".24"/>
+
+  <rect x="48" y="42" width="1704" height="1034" rx="44" fill="#182534" opacity=".9" filter="url(#shadow)"/>
+  <rect x="48" y="42" width="1704" height="1034" rx="44" fill="none" stroke="url(#gold)" stroke-width="1.4"/>
+  <rect x="76" y="70" width="1648" height="978" rx="34" fill="url(#beads)" opacity=".45"/>
+
+  <g class="font">
+    <rect x="84" y="78" width="292" height="966" rx="30" fill="#263747" stroke="#50616d"/>
+    <rect x="84" y="78" width="292" height="966" rx="30" fill="url(#ruyiCloud)" opacity=".36"/>
+    <text x="132" y="144" class="tiny">FACE GUARD</text>
+    <text x="132" y="188" class="title" font-size="28">面容解锁</text>
+    <rect x="126" y="252" width="208" height="58" rx="18" fill="#eacd76"/>
+    <text x="178" y="289" class="label">仪表盘</text>
+    <text x="146" y="386" class="sub">面容管理</text>
+    <text x="146" y="462" class="sub">通行密钥</text>
+    <text x="146" y="538" class="sub">安全场景</text>
+    <text x="146" y="614" class="sub">日志审计</text>
+    <rect x="132" y="710" width="214" height="86" rx="22" fill="#2e4e7e"/>
+    <rect x="132" y="710" width="214" height="86" rx="22" fill="url(#water)" opacity=".46"/>
+    <text x="158" y="748" class="body" font-size="16">守护状态</text>
+    <text x="158" y="776" fill="#eacd76" font-size="18" font-weight="850">已就绪</text>
+    <rect x="138" y="850" width="76" height="118" rx="9" fill="#9d2933" transform="rotate(-4 176 909)"/>
+    <text x="164" y="872" class="seal">守护中</text>
+
+    <rect x="420" y="86" width="1248" height="120" rx="30" fill="#243449" stroke="#eacd76"/>
+    <rect x="420" y="86" width="1248" height="120" rx="30" fill="url(#ruyiCloud)" opacity=".42"/>
+    <text x="462" y="130" class="tiny">CALM NIGHT · NO SHARP TRIANGLES</text>
+    <text x="462" y="180" class="title">面容与通行密钥安全中枢</text>
+    <text x="1160" y="132" class="muted">玄青 / 黛蓝 / 墨色 / 月白 / 金色</text>
+
+    <rect x="420" y="246" width="580" height="360" rx="34" fill="url(#panel)" stroke="#d6ecf0" stroke-opacity=".36"/>
+    <rect x="420" y="246" width="580" height="360" rx="34" fill="url(#lattice)" opacity=".46"/>
+    <text x="464" y="302" class="h2">身份识别核</text>
+    <text x="464" y="336" class="muted">圆形识别仪表，替代尖角山形。</text>
+    <circle cx="710" cy="432" r="118" fill="#1c2d3c" stroke="#eacd76" stroke-width="2.4"/>
+    <circle cx="710" cy="432" r="86" fill="#263747" stroke="#d6ecf0" stroke-width="2"/>
+    <path d="M672 432 C680 384 740 384 748 432 C740 488 680 488 672 432Z" fill="#d6ecf0" opacity=".82"/>
+    <circle cx="710" cy="432" r="10" fill="#243449"/>
+    <path d="M568 432 H480 M852 432 H940 M710 288 V232 M710 576 V628" stroke="#eacd76" stroke-width="2" opacity=".38"/>
+
+    <rect x="1040" y="246" width="300" height="168" rx="30" fill="url(#panel2)" stroke="#eacd76" stroke-opacity=".62"/>
+    <rect x="1040" y="246" width="300" height="168" rx="30" fill="url(#beads)" opacity=".58"/>
+    <text x="1078" y="300" class="h2">服务</text>
+    <text x="1078" y="356" class="body">后台已就绪</text>
+    <rect x="1218" y="320" width="82" height="36" rx="14" fill="#eacd76"/>
+    <text x="1242" y="344" class="label">正常</text>
+
+    <rect x="1370" y="246" width="298" height="168" rx="30" fill="#263747" stroke="#50616d"/>
+    <rect x="1370" y="246" width="298" height="168" rx="30" fill="url(#ruyiCloud)" opacity=".34"/>
+    <text x="1408" y="300" class="h2">夜间</text>
+    <text x="1408" y="356" class="body">统一暗色变量</text>
+
+    <rect x="1040" y="442" width="628" height="164" rx="30" fill="#273249" stroke="#eacd76" stroke-opacity=".52"/>
+    <rect x="1040" y="442" width="628" height="164" rx="30" fill="url(#ruyiCloud)" opacity=".28"/>
+    <text x="1080" y="496" class="h2">通行密钥</text>
+    <text x="1080" y="550" class="num">0.5.0.4</text>
+    <rect x="1360" y="518" width="172" height="46" rx="16" fill="#eacd76"/>
+    <text x="1394" y="547" class="label">启用流程</text>
+
+    <rect x="420" y="646" width="360" height="214" rx="32" fill="#263747" stroke="#d6ecf0" stroke-opacity=".32"/>
+    <rect x="420" y="646" width="360" height="214" rx="32" fill="url(#ruyiCloud)" opacity=".28"/>
+    <text x="464" y="702" class="h2">面容库</text>
+    <text x="464" y="778" class="num">2</text>
+    <text x="538" y="775" class="body">张已启用</text>
+    <path d="M462 820 C514 790 566 842 622 812 C678 782 724 816 758 796" fill="none" stroke="#eacd76" stroke-width="3" opacity=".36"/>
+
+    <rect x="820" y="646" width="360" height="214" rx="32" fill="#203447" stroke="#eacd76" stroke-opacity=".44"/>
+    <rect x="820" y="646" width="360" height="214" rx="32" fill="url(#water)" opacity=".58"/>
+    <text x="864" y="702" class="h2">人脸门</text>
+    <text x="864" y="752" class="body">登录前验证</text>
+    <rect x="864" y="794" width="130" height="40" rx="15" fill="#d6ecf0"/>
+    <text x="898" y="820" class="label">开启</text>
+
+    <rect x="1220" y="646" width="448" height="214" rx="32" fill="#273249" stroke="#eacd76" stroke-opacity=".44"/>
+    <rect x="1220" y="646" width="448" height="214" rx="32" fill="url(#beads)" opacity=".54"/>
+    <text x="1264" y="702" class="h2">安全场景</text>
+    <text x="1264" y="752" class="body">登录 · 解锁 · UAC · 浏览器</text>
+    <rect x="1264" y="794" width="156" height="40" rx="15" fill="#9d2933"/>
+    <text x="1302" y="820" class="body" font-weight="850">人脸优先</text>
+
+    <rect x="420" y="900" width="1248" height="94" rx="30" fill="#243449" stroke="#eacd76" stroke-opacity=".62"/>
+    <rect x="420" y="900" width="1248" height="94" rx="30" fill="url(#ruyiCloud)" opacity=".3"/>
+    <text x="464" y="956" class="body">去掉尖角图案；夜间色彩收敛为玄青、黛蓝、墨色、月白、金色，减少荧光与撞色。</text>
+  </g>
+</svg>

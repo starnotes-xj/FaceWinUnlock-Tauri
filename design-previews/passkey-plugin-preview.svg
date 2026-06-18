@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#081821"/>
+      <stop offset=".5" stop-color="#102D34"/>
+      <stop offset="1" stop-color="#0A131B"/>
+    </linearGradient>
+    <linearGradient id="jade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#54D2B5"/>
+      <stop offset="1" stop-color="#1C8D7E"/>
+    </linearGradient>
+    <linearGradient id="seal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#D56A45"/>
+      <stop offset="1" stop-color="#9A352B"/>
+    </linearGradient>
+    <pattern id="clouds" width="220" height="120" patternUnits="userSpaceOnUse">
+      <path d="M16 66 C44 66 38 40 66 40 C86 40 94 54 102 66 C124 36 166 42 170 76 C194 74 210 86 210 102 L44 102 C18 102 0 86 16 66Z" fill="none" stroke="#D8B56D" stroke-width="2" opacity=".2"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#000000" flood-opacity=".32"/>
+    </filter>
+    <style>
+      .font { font-family: "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif; }
+      .title { font-size: 34px; font-weight: 800; fill: #F5E9D0; }
+      .subtitle { font-size: 18px; fill: #AFC8C6; }
+      .h2 { font-size: 25px; font-weight: 760; fill: #F5E9D0; }
+      .body { font-size: 18px; fill: #D0DDD9; }
+      .muted { font-size: 15px; fill: #8EA8A5; }
+      .pill { font-size: 15px; font-weight: 700; fill: #06201F; }
+      .button { font-size: 17px; font-weight: 700; fill: #06201F; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1000" fill="url(#bg)"/>
+  <rect width="1600" height="1000" fill="url(#clouds)"/>
+  <circle cx="1280" cy="188" r="300" fill="#1C8D7E" opacity=".11"/>
+  <circle cx="260" cy="875" r="280" fill="#D8B56D" opacity=".08"/>
+
+  <rect x="98" y="70" width="1404" height="860" rx="34" fill="#0B2029" filter="url(#shadow)"/>
+  <rect x="98" y="70" width="1404" height="860" rx="34" fill="none" stroke="#D8B56D" stroke-opacity=".34"/>
+
+  <g class="font">
+    <circle cx="170" cy="150" r="32" fill="url(#jade)"/>
+    <path d="M158 152 C165 132 180 132 186 152 C182 170 162 170 158 152Z" fill="#082126"/>
+    <text x="225" y="144" class="title">FaceWinUnlock 通行密钥</text>
+    <text x="225" y="177" class="subtitle">精简管理器预览：默认中文，英文可切换；维护项折叠到高级。</text>
+
+    <rect x="1250" y="118" width="178" height="52" rx="18" fill="#102E36" stroke="#3D8E82"/>
+    <text x="1280" y="151" class="body">中文 / EN</text>
+
+    <rect x="150" y="230" width="1250" height="122" rx="28" fill="#102C35" stroke="#2F756F"/>
+    <text x="190" y="277" class="h2">插件状态</text>
+    <rect x="190" y="298" width="158" height="38" rx="14" fill="url(#jade)"/>
+    <text x="220" y="323" class="pill">已启用</text>
+    <text x="375" y="323" class="body">版本 0.5.0.4</text>
+    <rect x="830" y="270" width="210" height="48" rx="16" fill="url(#jade)"/>
+    <text x="858" y="301" class="button">打开 Windows 启用页</text>
+    <rect x="1060" y="270" width="170" height="48" rx="16" fill="#E4C36A"/>
+    <text x="1092" y="301" class="button">同步凭据索引</text>
+    <rect x="1250" y="270" width="112" height="48" rx="16" fill="#173A42" stroke="#3D8E82"/>
+    <text x="1287" y="301" class="body">刷新</text>
+
+    <rect x="150" y="390" width="600" height="260" rx="30" fill="#0F2A32" stroke="#D8B56D" stroke-opacity=".35"/>
+    <text x="190" y="437" class="h2">凭据</text>
+    <text x="190" y="470" class="muted">只展示用户真正需要理解的内容。</text>
+    <rect x="190" y="510" width="500" height="82" rx="22" fill="#133640"/>
+    <circle cx="230" cy="551" r="19" fill="url(#jade)"/>
+    <text x="268" y="546" class="body">facewin-test</text>
+    <text x="268" y="573" class="muted">webauthn.io · 可用于登录</text>
+    <rect x="564" y="532" width="92" height="36" rx="14" fill="#E4C36A"/>
+    <text x="588" y="556" class="pill">索引中</text>
+
+    <rect x="800" y="390" width="600" height="260" rx="30" fill="#0F2A32" stroke="#D8B56D" stroke-opacity=".35"/>
+    <text x="840" y="437" class="h2">安全模式</text>
+    <text x="840" y="470" class="muted">保留人脸门核心开关，隐藏示例插件里的低频测试项。</text>
+    <rect x="840" y="515" width="250" height="72" rx="22" fill="#133640"/>
+    <text x="874" y="545" class="body">人脸门</text>
+    <text x="874" y="572" class="muted">通行密钥操作前验证</text>
+    <rect x="1118" y="530" width="130" height="38" rx="14" fill="url(#jade)"/>
+    <text x="1154" y="555" class="pill">开启</text>
+
+    <rect x="150" y="690" width="1250" height="132" rx="30" fill="#102C35" stroke="#2F756F"/>
+    <text x="190" y="738" class="h2">高级维护</text>
+    <text x="190" y="773" class="muted">删除缓存、重建本地库、开发日志等不再占据默认视图；需要时展开。</text>
+    <rect x="1190" y="730" width="170" height="48" rx="16" fill="#173A42" stroke="#3D8E82"/>
+    <text x="1245" y="761" class="body">展开</text>
+
+    <text x="150" y="884" class="muted">视觉语言：墨青底、玉色主按钮、朱砂提醒、低对比祥云纹；深色模式全局无白色卡片。</text>
+  </g>
+</svg>

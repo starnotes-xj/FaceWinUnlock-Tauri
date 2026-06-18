@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>面容解锁 · 安全中枢 · v6 宫廷未来主义</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@400;500;600;700;900&family=Cinzel:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   v6 · Imperial Futurism · 宫廷未来主义
+   中国色 (zerosoul/chinese-colors) + 八种传统纹样 + 3D 视差/令牌动效
+   仅预览稿，不接入产品代码
+   ============================================================ */
+:root{
+  --bg1:#fffbf0; --bg2:#f6ead0; --bg3:#efe2cb;
+  --frame:#fffbf0; --card:#fffbf0; --card2:#fdf4df; --cool:#e9f2f4;
+  --sidebar1:#9d2933; --sidebar2:#6f1f29;
+  --ink:#1a3a47; --ink2:#33484b; --muted:#8a6f4a;
+  --gold:#eacd76; --gold2:#f2be45; --indigo:#065279; --red:#9d2933; --jade:#7bcfa6;
+  --moon:#d6ecf0; --ivory:#fffbf0;
+  --pat-a:#065279; --pat-b:#eacd76; --pat-c:#9d2933;     /* pattern strokes */
+  --shadow:0 22px 50px -18px rgba(122,34,48,.34);
+  --chip-ink:#1a3a47;
+  --grain:.05;
+}
+[data-theme="dark"]{
+  --bg1:#3d3b4f; --bg2:#3a4759; --bg3:#1c2530;
+  --frame:#172430; --card:#223247; --card2:#1b2836; --cool:#1c3344;
+  --sidebar1:#3a3550; --sidebar2:#2a2740;
+  --ink:#e6f0ec; --ink2:#cfe2e6; --muted:#9fb1b5;
+  --gold:#eacd76; --gold2:#f2be45; --indigo:#0a4a6e; --red:#9d2933; --jade:#6fb39a;
+  --moon:#d6ecf0; --ivory:#e6f0ec;
+  --pat-a:#d6ecf0; --pat-b:#eacd76; --pat-c:#9d2933;
+  --shadow:0 26px 60px -16px rgba(0,0,0,.6);
+  --chip-ink:#1a2530;
+  --grain:.04;
+}
+*{box-sizing:border-box; margin:0; padding:0}
+html,body{height:100%}
+body{
+  font-family:"Noto Serif SC","Source Han Serif SC","Songti SC",serif;
+  background:
+    radial-gradient(60% 50% at 86% 8%, color-mix(in srgb,var(--moon) 55%, transparent), transparent 70%),
+    linear-gradient(135deg,var(--bg1) 0%, var(--bg2) 52%, var(--bg3) 100%);
+  color:var(--ink); min-height:100vh; overflow-x:hidden;
+  transition:background .8s ease, color .8s ease;
+  -webkit-font-smoothing:antialiased;
+}
+.cn-serif{font-family:"Noto Serif SC",serif}
+.brush{font-family:"Ma Shan Zheng",cursive}
+.latin{font-family:"Cinzel",serif; letter-spacing:.22em}
+
+/* ---- atmospheric layers ---- */
+.atmos{position:fixed; inset:0; pointer-events:none; z-index:0; overflow:hidden}
+.atmos svg{position:absolute}
+.clouds{inset:-10% -20%; width:140%; height:120%; opacity:.5;
+  animation:drift 46s linear infinite; will-change:transform}
+[data-theme="dark"] .clouds{opacity:.4}
+.waves{left:-10%; bottom:-4%; width:120%; height:280px; opacity:.7;
+  animation:bob 9s ease-in-out infinite alternate; will-change:transform}
+.brocade-bg{inset:0; width:100%; height:100%; opacity:.5}
+.grain{position:fixed; inset:0; z-index:60; pointer-events:none; opacity:var(--grain);
+  mix-blend-mode:multiply}
+[data-theme="dark"] .grain{mix-blend-mode:overlay; opacity:.07}
+/* floating gold motes */
+.motes{position:fixed; inset:0; z-index:1; pointer-events:none; overflow:hidden}
+.mote{position:absolute; bottom:-12px; width:5px; height:5px; border-radius:50%;
+  background:radial-gradient(circle,var(--gold),transparent 70%);
+  filter:blur(.4px); opacity:0; animation:rise linear infinite; will-change:transform,opacity}
+
+@keyframes drift{from{transform:translateX(0)}to{transform:translateX(-190px)}}
+@keyframes bob{from{transform:translateY(10px)}to{transform:translateY(-14px)}}
+@keyframes rise{
+  0%{transform:translateY(0) translateX(0); opacity:0}
+  12%{opacity:.9}
+  88%{opacity:.7}
+  100%{transform:translateY(-104vh) translateX(40px); opacity:0}}
+
+/* ---- frame + shell ---- */
+.stage{position:relative; z-index:2; max-width:1720px; margin:0 auto; padding:40px clamp(20px,3vw,56px);
+  perspective:1800px; perspective-origin:50% 42%}
+.frame{position:relative; border-radius:42px; background:color-mix(in srgb,var(--frame) 94%, transparent);
+  box-shadow:var(--shadow); transition:background .8s ease;
+  display:grid; grid-template-columns:296px 1fr; overflow:hidden;
+  transform-style:preserve-3d;
+  transform:rotateX(var(--tilt-x,0deg)) rotateY(var(--tilt-y,0deg));
+  animation:frameIn 1s cubic-bezier(.16,1,.3,1) both}
+.frame::before{content:""; position:absolute; inset:0; border-radius:42px; padding:1.5px;
+  background:linear-gradient(120deg,var(--gold2),var(--gold),var(--gold2));
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor; mask-composite:exclude; pointer-events:none;
+  opacity:0; animation:borderGlow 1.4s ease .3s forwards}
+@keyframes frameIn{
+  from{opacity:0; transform:translateY(26px) scale(.985) rotateX(var(--tilt-x,0deg)) rotateY(var(--tilt-y,0deg))}
+  to{opacity:1; transform:rotateX(var(--tilt-x,0deg)) rotateY(var(--tilt-y,0deg))}}
+@keyframes borderGlow{to{opacity:1}}
+
+/* ---- sidebar ---- */
+.side{position:relative; margin:26px 0 26px 26px; border-radius:30px; overflow:hidden;
+  background:linear-gradient(160deg,var(--sidebar1),var(--sidebar2));
+  padding:30px 26px; color:#fdeecf; transition:background .8s ease;
+  animation:slideL .9s cubic-bezier(.16,1,.3,1) .15s both}
+@keyframes slideL{from{opacity:0; transform:translateX(-34px)}to{opacity:1; transform:none}}
+.side .ruyi-layer{position:absolute; inset:0; opacity:.4; pointer-events:none}
+.brand{display:flex; align-items:center; gap:13px; position:relative; z-index:2}
+.brand .mark{width:48px; height:48px; border-radius:50%; background:#eedeb0; display:grid; place-items:center; flex:none;
+  box-shadow:inset 0 0 0 1.5px var(--gold)}
+.brand .mark svg{width:26px; height:26px}
+.brand .en{font:600 10px/1 "Cinzel",serif; letter-spacing:.34em; color:var(--gold)}
+.brand .zh{font:700 23px/1.1 "Ma Shan Zheng",cursive; color:#fffbf0; margin-top:3px}
+.nav{position:relative; z-index:2; margin-top:38px; display:flex; flex-direction:column; gap:5px}
+.nav a{position:relative; display:flex; align-items:center; gap:12px; padding:14px 16px; border-radius:15px;
+  color:#f4e3bd; font-size:17px; text-decoration:none; cursor:pointer; overflow:hidden;
+  transition:color .35s, transform .35s}
+.nav a .ico{width:9px; height:9px; border-radius:2px; background:currentColor; opacity:.5; transform:rotate(45deg); transition:.35s}
+.nav a::before{content:""; position:absolute; inset:0; border-radius:15px; background:#eedeb0;
+  transform:scaleX(0); transform-origin:left; transition:transform .4s cubic-bezier(.16,1,.3,1); z-index:-1}
+.nav a:hover{color:#7a1f29; transform:translateX(3px)}
+.nav a:hover::before{transform:scaleX(1)}
+.nav a:hover .ico{opacity:1; transform:rotate(135deg)}
+.nav a.active{color:#9d2933; font-weight:700}
+.nav a.active::before{transform:scaleX(1)}
+.nav a.active .ico{background:#9d2933; opacity:1}
+.guard{position:relative; z-index:2; margin-top:32px; border-radius:20px; padding:16px 18px; overflow:hidden;
+  background:linear-gradient(135deg,var(--indigo),#0a3a59); box-shadow:inset 0 0 0 1px rgba(234,205,118,.4)}
+.guard .wave-layer{position:absolute; inset:0; opacity:.5}
+.guard .lab{position:relative; font-size:14px; color:#cfe6ef}
+.guard .val{position:relative; font-size:21px; font-weight:700; color:var(--gold); margin-top:4px; display:flex; align-items:center; gap:9px}
+.dot{width:10px; height:10px; border-radius:50%; background:var(--jade); box-shadow:0 0 0 0 var(--jade);
+  animation:pulse 2.4s ease-out infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--jade) 70%,transparent)}70%{box-shadow:0 0 0 11px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.seal{position:absolute; left:30px; bottom:26px; z-index:3; width:78px; height:118px; border-radius:9px;
+  background:linear-gradient(160deg,#a82c37,#82222c); box-shadow:inset 0 0 0 1.5px var(--gold), 0 8px 18px -8px #000;
+  display:grid; place-items:center; transform:rotate(-5deg) scale(.4); opacity:0;
+  animation:stamp .7s cubic-bezier(.34,1.56,.64,1) 1.5s forwards}
+.seal span{writing-mode:vertical-rl; font:700 17px/1 "Ma Shan Zheng",cursive; color:#fdeecf; letter-spacing:7px}
+.seal::after{content:""; position:absolute; inset:0; border-radius:9px; box-shadow:0 0 26px 4px rgba(157,41,51,.5);
+  opacity:0; animation:ink .7s ease 1.6s forwards}
+@keyframes stamp{0%{transform:rotate(14deg) scale(.4); opacity:0}60%{transform:rotate(-7deg) scale(1.06); opacity:1}100%{transform:rotate(-5deg) scale(1); opacity:1}}
+@keyframes ink{0%{opacity:.9}100%{opacity:0}}
+
+/* ---- main ---- */
+.main{padding:30px 30px 30px 24px; display:flex; flex-direction:column; gap:18px}
+.topbar{position:relative; border-radius:26px; background:var(--card2); overflow:hidden;
+  padding:22px 30px; box-shadow:inset 0 0 0 1px var(--gold);
+  animation:rise .0001s, riseIn .8s cubic-bezier(.16,1,.3,1) .35s both}
+.topbar .meander{position:absolute; left:24px; right:24px; height:13px; opacity:.7}
+.topbar .meander.t{top:8px} .topbar .meander.b{bottom:8px}
+.kicker{font:600 12px/1 "Cinzel",serif; letter-spacing:.28em; color:var(--indigo)}
+[data-theme="dark"] .kicker{color:var(--gold)}
+.h1{font-family:"Ma Shan Zheng",cursive; font-size:40px; line-height:1.1; margin-top:8px; color:var(--ink);
+  background:linear-gradient(100deg,var(--ink) 30%, var(--gold2) 50%, var(--ink) 70%);
+  background-size:220% 100%; -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;
+  animation:shimmer 6s ease-in-out 1.2s infinite}
+@keyframes shimmer{0%,100%{background-position:120% 0}50%{background-position:-20% 0}}
+.topbar .medallion{position:absolute; right:26px; top:50%; transform:translateY(-50%); width:66px; height:66px; opacity:.85;
+  animation:spin 60s linear infinite}
+.holo{position:absolute; right:116px; top:50%; width:92px; height:92px; transform:translateY(-50%) translateZ(64px);
+  perspective:720px; pointer-events:none}
+.holo::after{content:""; position:absolute; left:18px; right:18px; bottom:-15px; height:18px; border-radius:50%;
+  background:radial-gradient(ellipse, color-mix(in srgb,var(--indigo) 36%,transparent), transparent 72%);
+  filter:blur(6px); opacity:.7; transform:rotateX(72deg)}
+.cube{position:absolute; inset:18px; transform-style:preserve-3d;
+  animation:cubeOrbit 8.5s cubic-bezier(.45,0,.55,1) infinite}
+.cube span{position:absolute; inset:0; display:grid; place-items:center; border:1px solid color-mix(in srgb,var(--gold) 78%,transparent);
+  background:linear-gradient(145deg,color-mix(in srgb,var(--moon) 62%,transparent),color-mix(in srgb,var(--indigo) 42%,transparent));
+  box-shadow:inset 0 0 18px color-mix(in srgb,var(--gold) 28%,transparent),0 0 18px color-mix(in srgb,var(--jade) 18%,transparent)}
+.cube span::before{content:""; width:18px; height:18px; border-radius:4px; transform:rotate(45deg);
+  background:var(--gold); box-shadow:0 0 18px color-mix(in srgb,var(--gold) 70%,transparent)}
+.cube .front{transform:translateZ(28px)} .cube .back{transform:rotateY(180deg) translateZ(28px)}
+.cube .right{transform:rotateY(90deg) translateZ(28px)} .cube .left{transform:rotateY(-90deg) translateZ(28px)}
+.cube .top{transform:rotateX(90deg) translateZ(28px)} .cube .bottom{transform:rotateX(-90deg) translateZ(28px)}
+@keyframes cubeOrbit{
+  0%{transform:rotateX(-18deg) rotateY(0deg) rotateZ(0deg)}
+  50%{transform:rotateX(18deg) rotateY(188deg) rotateZ(8deg)}
+  100%{transform:rotateX(-18deg) rotateY(360deg) rotateZ(0deg)}}
+
+.grid{display:grid; gap:18px; grid-template-columns:repeat(4,1fr);
+  grid-template-areas:"id id svc night" "id id ver ver" "fl fg sec sec";}
+.card{position:relative; border-radius:26px; padding:26px 28px; overflow:hidden; background:var(--card);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--gold) 70%, transparent);
+  transition:transform .5s cubic-bezier(.16,1,.3,1), box-shadow .5s, background .8s ease;
+  opacity:0; transform:translateY(26px); animation:riseIn .8s cubic-bezier(.16,1,.3,1) forwards; will-change:transform;
+  transform-style:preserve-3d}
+@keyframes riseIn{to{opacity:1; transform:none}}
+.card:hover{transform:translateY(-7px) translateZ(24px) rotateX(1.4deg) rotateY(-1.2deg);
+  box-shadow:inset 0 0 0 1.5px var(--gold), 0 22px 40px -22px rgba(122,34,48,.4)}
+[data-theme="dark"] .card:hover{box-shadow:inset 0 0 0 1.5px var(--gold), 0 26px 50px -22px rgba(0,0,0,.7)}
+.card .pat{position:absolute; inset:0; pointer-events:none; transition:opacity .5s}
+.card:hover .pat{opacity:.9 !important}
+.card h2{font-size:25px; font-weight:700; color:var(--ink); position:relative}
+.card .desc{font-size:15px; color:var(--muted); margin-top:8px; position:relative; line-height:1.6}
+.tag{position:relative; z-index:2; display:inline-grid; place-items:center; padding:9px 18px; border-radius:14px;
+  font-size:15px; font-weight:700; color:var(--chip-ink)}
+.tag.jade{background:var(--jade)} .tag.gold{background:var(--gold)} .tag.moon{background:var(--moon)} .tag.red{background:var(--red); color:#fdeecf}
+.num{font-size:62px; font-weight:900; color:var(--ink); position:relative; font-family:"Noto Serif SC",serif}
+
+/* identity core */
+.c-id{grid-area:id; min-height:374px; background:var(--card)}
+.core-wrap{position:relative; display:grid; place-items:center; margin-top:6px; height:264px; perspective:900px}
+.core{width:248px; height:248px; transform-style:preserve-3d;
+  filter:drop-shadow(0 18px 22px color-mix(in srgb,var(--indigo) 18%,transparent))}
+.ring-dash{transform-origin:center; animation:spin 24s linear infinite}
+.ring-dash-r{transform-origin:center; animation:spin 38s linear infinite reverse}
+.scan-arc{transform-origin:center; animation:spin 4.6s cubic-bezier(.45,0,.55,1) infinite}
+.sweep{transform-origin:center; animation:sweep 4.6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes sweep{0%{opacity:0}10%{opacity:.85}50%{opacity:.2}100%{opacity:0; transform:rotate(180deg)}}
+.core .breathe{transform-origin:center; animation:breathe 3.6s ease-in-out infinite}
+@keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
+/* 火眼金睛 */
+.eye{filter:drop-shadow(0 0 7px color-mix(in srgb,var(--gold) 60%,transparent))}
+.iris{transform-box:fill-box; transform-origin:center; animation:spin 16s linear infinite}
+.iris-r{transform-box:fill-box; transform-origin:center; animation:spin 26s linear infinite reverse}
+.pupil{transform-box:fill-box; transform-origin:center; animation:focus 3.6s cubic-bezier(.4,0,.2,1) infinite}
+@keyframes focus{0%,100%{transform:scale(1)}46%{transform:scale(1.18)}54%{transform:scale(1.18)}}
+
+.c-svc{grid-area:svc} .c-night{grid-area:night} .c-ver{grid-area:ver}
+.c-fl{grid-area:fl} .c-fg{grid-area:fg} .c-sec{grid-area:sec}
+.c-night{background:var(--cool)} .c-fg{background:var(--cool)}
+.ver-num{font-family:"Cinzel",serif; font-size:42px; font-weight:700; letter-spacing:.04em; color:var(--ink); position:relative}
+.btn{position:relative; z-index:2; display:inline-flex; align-items:center; gap:9px; padding:14px 24px; border-radius:16px;
+  background:linear-gradient(135deg,var(--indigo),#0a3a59); color:#fffbf0; font-size:16px; font-weight:700; border:none; cursor:pointer;
+  box-shadow:inset 0 0 0 1px rgba(234,205,118,.7); overflow:hidden; transition:transform .35s}
+[data-theme="dark"] .btn{background:var(--gold); color:#1a2530; box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
+.btn::after{content:""; position:absolute; inset:0; background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.4),transparent 70%);
+  transform:translateX(-130%); transition:transform .7s}
+.btn:hover{transform:translateY(-2px)} .btn:hover::after{transform:translateX(130%)}
+.fl-medal{position:absolute; right:-8px; top:50%; transform:translateY(-50%); width:170px; height:170px; opacity:.5}
+
+.botbar{position:relative; border-radius:24px; overflow:hidden; padding:20px 28px; margin-top:2px;
+  background:linear-gradient(120deg,var(--indigo),#0a3a59); color:#eef6f8;
+  box-shadow:inset 0 0 0 1px var(--gold2);
+  opacity:0; transform:translateY(20px); animation:riseIn .8s cubic-bezier(.16,1,.3,1) 1s forwards}
+[data-theme="dark"] .botbar{background:linear-gradient(120deg,#0a4a6e,#13324a)}
+.botbar .ruyi-layer{position:absolute; inset:0; opacity:.28}
+.botbar p{position:relative; font-size:16px; font-weight:600}
+.botbar .pal{position:relative; font-size:14px; color:var(--gold); margin-top:5px}
+
+/* theme toggle */
+.toggle{position:fixed; top:30px; right:34px; z-index:70; width:58px; height:58px; border-radius:50%;
+  border:1.5px solid var(--gold); background:color-mix(in srgb,var(--frame) 85%, transparent); cursor:pointer;
+  display:grid; place-items:center; box-shadow:var(--shadow); transition:transform .5s, background .8s}
+.toggle:hover{transform:rotate(28deg) scale(1.07)}
+.toggle svg{width:26px; height:26px; fill:var(--gold)}
+.toggle .sun{display:none} [data-theme="dark"] .toggle .sun{display:block} [data-theme="dark"] .toggle .moon{display:none}
+
+/* stagger delays */
+.c-id{animation-delay:.45s}.c-svc{animation-delay:.55s}.c-night{animation-delay:.62s}
+.c-ver{animation-delay:.7s}.c-fl{animation-delay:.78s}.c-fg{animation-delay:.86s}.c-sec{animation-delay:.94s}
+
+.flex{display:flex} .between{justify-content:space-between} .center{align-items:center}
+.mt-auto{margin-top:auto} .gap{gap:14px} .col{flex-direction:column}
+
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important}
+  .card,.botbar,.seal{opacity:1 !important; transform:none !important}}
+@media (max-width:980px){.frame{grid-template-columns:1fr}.side{margin:20px}.grid{grid-template-columns:1fr 1fr;
+  grid-template-areas:"id id" "svc night" "ver ver" "fl fg" "sec sec"}.h1{font-size:32px}}
+</style>
+</head>
+<body>
+
+<!-- ============ shared pattern defs (referenced across SVGs) ============ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <pattern id="p-ruyi" width="190" height="118" patternUnits="userSpaceOnUse">
+    <path d="M16 78 C42 54 78 62 86 90 C112 52 168 60 176 100 L34 100 C12 100 0 90 16 78Z" fill="none" stroke-width="1.8" opacity=".5" style="stroke:var(--pat-b)"/>
+    <path d="M58 76 C72 54 112 54 126 80" fill="none" stroke-width="1.1" opacity=".3" style="stroke:var(--pat-a)"/></pattern>
+  <pattern id="p-water" width="168" height="80" patternUnits="userSpaceOnUse">
+    <path d="M0 60 C21 30 63 30 84 60 C105 30 147 30 168 60" fill="none" stroke-width="2" opacity=".32" style="stroke:var(--pat-a)"/>
+    <path d="M0 70 C21 46 63 46 84 70 C105 46 147 46 168 70" fill="none" stroke-width="1.4" opacity=".34" style="stroke:var(--pat-b)"/></pattern>
+  <pattern id="p-lattice" width="90" height="90" patternUnits="userSpaceOnUse">
+    <path d="M0 45 H90 M45 0 V90 M0 0 L90 90 M90 0 L0 90" stroke-width="1" opacity=".18" style="stroke:var(--pat-a)"/>
+    <rect x="33" y="33" width="24" height="24" fill="none" stroke-width="1" opacity=".22" transform="rotate(45 45 45)" style="stroke:var(--pat-c)"/></pattern>
+  <pattern id="p-beads" width="56" height="56" patternUnits="userSpaceOnUse">
+    <circle cx="14" cy="14" r="3" opacity=".22" style="fill:var(--pat-c)"/><circle cx="42" cy="42" r="3" opacity=".22" style="fill:var(--pat-a)"/>
+    <circle cx="42" cy="14" r="2" opacity=".34" style="fill:var(--pat-b)"/><circle cx="14" cy="42" r="2" opacity=".34" style="fill:var(--pat-b)"/></pattern>
+  <pattern id="p-brocade" width="86" height="86" patternUnits="userSpaceOnUse">
+    <path d="M43 5 L81 43 L43 81 L5 43Z" fill="none" stroke-width="1" opacity=".1" style="stroke:var(--pat-a)"/>
+    <circle cx="43" cy="43" r="3.2" opacity=".12" style="fill:var(--pat-c)"/>
+    <circle cx="5" cy="5" r="2" opacity=".24" style="fill:var(--pat-b)"/><circle cx="81" cy="5" r="2" opacity=".24" style="fill:var(--pat-b)"/>
+    <circle cx="5" cy="81" r="2" opacity=".24" style="fill:var(--pat-b)"/><circle cx="81" cy="81" r="2" opacity=".24" style="fill:var(--pat-b)"/></pattern>
+  <pattern id="p-meander" width="40" height="20" patternUnits="userSpaceOnUse">
+    <path d="M3 17 V3 H37 M3 17 H29 V9 H15 V13" fill="none" stroke-width="1.6" opacity=".75" style="stroke:var(--pat-b)"/></pattern>
+  <pattern id="p-ice" width="120" height="120" patternUnits="userSpaceOnUse">
+    <path d="M0 34 L40 52 L30 92 L72 112 M40 52 L82 30 L120 58 M82 30 L74 0 M30 92 L0 104 M72 112 L120 102 M82 30 L104 72 L72 112" fill="none" stroke-width="1" opacity=".24" style="stroke:var(--pat-a)"/></pattern>
+  <g id="baoxiang">
+    <g id="bx-p"><path d="M0 -13 C11 -24 11 -46 0 -55 C-11 -46 -11 -24 0 -13Z" fill="none" stroke-width="1.5" style="stroke:var(--pat-b)"/></g>
+    <use href="#bx-p" transform="rotate(45)"/><use href="#bx-p" transform="rotate(90)"/><use href="#bx-p" transform="rotate(135)"/>
+    <use href="#bx-p" transform="rotate(180)"/><use href="#bx-p" transform="rotate(225)"/><use href="#bx-p" transform="rotate(270)"/><use href="#bx-p" transform="rotate(315)"/>
+    <circle r="17" fill="none" stroke-width="1.5" opacity=".7" style="stroke:var(--pat-c)"/><circle r="7" opacity=".5" style="fill:var(--pat-c)"/></g>
+  <clipPath id="eyeClip"><path d="M-52 0 C-32 -30 32 -30 52 0 C32 30 -32 30 -52 0Z"/></clipPath>
+  <radialGradient id="irisGrad" cx="42%" cy="38%" r="70%">
+    <stop offset="0" stop-color="#fff1c4"/><stop offset=".34" stop-color="#f2be45"/>
+    <stop offset=".72" stop-color="#eacd76"/><stop offset="1" stop-color="#9d2933"/></radialGradient>
+  <filter id="grainf"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
+</defs></svg>
+
+<!-- ============ atmosphere ============ -->
+<div class="atmos">
+  <svg class="brocade-bg"><rect width="100%" height="100%" fill="url(#p-brocade)"/></svg>
+  <svg class="clouds"><rect width="100%" height="100%" fill="url(#p-ruyi)"/></svg>
+  <svg class="waves"><rect width="100%" height="100%" fill="url(#p-water)"/></svg>
+</div>
+<div class="motes" id="motes"></div>
+<svg class="grain"><rect width="100%" height="100%" filter="url(#grainf)"/></svg>
+
+<button class="toggle" id="themeBtn" title="日 / 夜">
+  <svg class="moon" viewBox="0 0 24 24"><path d="M12 2a9 9 0 1 0 9 9c0-.5 0-1-.1-1.5a6.5 6.5 0 0 1-8.4-8.4C12.5 2 12 2 12 2Z"/></svg>
+  <svg class="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M1 12h3M20 12h3M4 4l2 2M18 18l2 2M4 20l2-2M18 6l2-2" stroke-width="2" fill="none" stroke-linecap="round" style="stroke:var(--gold)"/></svg>
+</button>
+
+<!-- ============ stage ============ -->
+<div class="stage">
+ <div class="frame">
+
+  <!-- sidebar -->
+  <aside class="side">
+    <svg class="ruyi-layer"><rect width="100%" height="100%" fill="url(#p-ruyi)"/></svg>
+    <div class="brand">
+      <span class="mark"><svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="18" fill="none" stroke="#9d2933" stroke-width="1.5"/><path d="M11 20 C13 11 27 11 29 20 C27 29 13 29 11 20Z" fill="#9d2933"/><circle cx="20" cy="20" r="3" fill="#eedeb0"/></svg></span>
+      <div><div class="en">FACE GUARD</div><div class="zh">面容解锁</div></div>
+    </div>
+    <nav class="nav">
+      <a class="active"><span class="ico"></span>仪表盘</a>
+      <a><span class="ico"></span>面容管理</a>
+      <a><span class="ico"></span>通行密钥</a>
+      <a><span class="ico"></span>安全场景</a>
+      <a><span class="ico"></span>日志审计</a>
+    </nav>
+    <div class="guard">
+      <svg class="wave-layer"><rect width="100%" height="100%" fill="url(#p-water)"/></svg>
+      <div class="lab">守护状态</div>
+      <div class="val"><span class="dot"></span>已就绪</div>
+    </div>
+    <div class="seal"><span>面容守护</span></div>
+  </aside>
+
+  <!-- main -->
+  <section class="main">
+    <div class="topbar">
+      <svg class="meander t"><rect width="100%" height="100%" fill="url(#p-meander)"/></svg>
+      <svg class="meander b"><rect width="100%" height="100%" fill="url(#p-meander)"/></svg>
+      <div class="kicker">RUYI · BROCADE · IMPERIAL FUTURISM</div>
+      <div class="h1">面容与通行密钥安全中枢</div>
+      <div class="holo" aria-hidden="true">
+        <div class="cube">
+          <span class="front"></span><span class="back"></span><span class="right"></span>
+          <span class="left"></span><span class="top"></span><span class="bottom"></span>
+        </div>
+      </div>
+      <svg class="medallion" viewBox="-60 -60 120 120"><use href="#baoxiang"/></svg>
+    </div>
+
+    <div class="grid">
+      <!-- identity core -->
+      <div class="card c-id">
+        <svg class="pat" style="opacity:.5"><rect width="100%" height="100%" fill="url(#p-lattice)"/></svg>
+        <div class="flex between center">
+          <div><h2>身份识别核</h2><div class="desc">同心扫描环 · 圆融如意 · 无尖角山形</div></div>
+        </div>
+        <div class="core-wrap">
+          <svg class="core" viewBox="-130 -130 260 260">
+            <circle class="ring-dash" r="120" fill="none" stroke-width="2.2" stroke-dasharray="10 11" opacity=".9" style="stroke:var(--gold)"/>
+            <circle class="ring-dash-r" r="106" fill="none" stroke-width="1" stroke-dasharray="3 16" opacity=".5" style="stroke:var(--indigo)"/>
+            <circle class="breathe" r="90" stroke-width="2" style="fill:color-mix(in srgb,var(--card2) 80%,transparent);stroke:var(--indigo)"/>
+            <g class="breathe" opacity=".55"><circle r="90" fill="url(#p-beads)"/></g>
+            <path class="scan-arc" d="M0 -120 A120 120 0 0 1 104 -60" fill="none" stroke-width="5" stroke-linecap="round" style="stroke:var(--jade)"/>
+            <line class="sweep" x1="0" y1="0" x2="0" y2="-118" stroke-width="2.5" opacity=".7" style="stroke:var(--jade)"/>
+            <!-- 火眼金睛 (Journey to the West) -->
+            <g class="eye">
+              <path d="M-52 0 C-32 -30 32 -30 52 0 C32 30 -32 30 -52 0Z" stroke-width="2.6" style="fill:#0e1b26;stroke:var(--gold)"/>
+              <g clip-path="url(#eyeClip)">
+                <g class="iris">
+                  <circle r="23" fill="url(#irisGrad)"/>
+                  <circle class="iris-r" r="16" fill="none" stroke-width="5" stroke-dasharray="1.6 6" opacity=".5" style="stroke:var(--red)"/>
+                  <circle r="23" fill="none" stroke-width="4" stroke-dasharray="2 8.6" style="stroke:var(--gold2)"/>
+                </g>
+                <circle class="pupil" r="9" style="fill:#0a141c"/>
+                <circle r="3" cx="-3.6" cy="-3.6" style="fill:#fff1c4"/>
+              </g>
+              <path d="M-52 0 C-32 -30 32 -30 52 0" fill="none" stroke-width="2.6" style="stroke:var(--gold)"/>
+              <path d="M52 -2 c12 -5 15 -16 6 -24 c11 11 6 23 -7 27Z" opacity=".9" style="fill:var(--gold2)"/>
+              <path d="M-52 -2 c-12 -5 -15 -16 -6 -24 c-11 11 -6 23 7 27Z" opacity=".9" style="fill:var(--gold2)"/>
+            </g>
+            <path d="M0 -132 V-104 M0 132 V104 M-132 0 H-104 M132 0 H104" stroke-width="2.4" opacity=".5" style="stroke:var(--red)"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- service -->
+      <div class="card c-svc">
+        <svg class="pat" style="opacity:.75"><rect width="100%" height="100%" fill="url(#p-beads)"/></svg>
+        <h2>核心服务</h2><div class="desc">后台守护进程已就绪</div>
+        <div style="margin-top:24px"><span class="tag jade">运行正常</span></div>
+      </div>
+
+      <!-- night -->
+      <div class="card c-night">
+        <svg class="pat" style="opacity:.7"><rect width="100%" height="100%" fill="url(#p-ice)"/></svg>
+        <h2>夜间模式</h2><div class="desc">深色语义已统一<br>无残留白底</div>
+      </div>
+
+      <!-- version / passkey -->
+      <div class="card c-ver">
+        <svg class="pat" style="opacity:.42"><rect width="100%" height="100%" fill="url(#p-ruyi)"/></svg>
+        <div class="flex between center" style="height:100%">
+          <div><h2>通行密钥插件</h2><div class="ver-num">0.5.0.5</div></div>
+          <button class="btn">打开注册 / 启用流程</button>
+        </div>
+      </div>
+
+      <!-- face library -->
+      <div class="card c-fl">
+        <svg class="fl-medal" viewBox="-60 -60 120 120"><use href="#baoxiang"/></svg>
+        <h2>面容库</h2>
+        <div class="flex center gap" style="margin-top:14px"><span class="num">2</span><span class="desc" style="margin-top:0">张已启用</span></div>
+      </div>
+
+      <!-- face gate -->
+      <div class="card c-fg">
+        <svg class="pat" style="opacity:.62"><rect width="100%" height="100%" fill="url(#p-water)"/></svg>
+        <h2>人脸门</h2><div class="desc">登录前人脸用户验证</div>
+        <div style="margin-top:22px"><span class="tag jade">已开启</span></div>
+      </div>
+
+      <!-- security scenarios -->
+      <div class="card c-sec">
+        <svg class="pat" style="opacity:.9"><rect width="100%" height="100%" fill="url(#p-brocade)"/></svg>
+        <div class="flex between center">
+          <div><h2>安全场景</h2><div class="desc">登录 · 解锁 · UAC · 浏览器查看密码</div></div>
+          <span class="tag red">人脸优先</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="botbar">
+      <svg class="ruyi-layer"><rect width="100%" height="100%" fill="url(#p-ruyi)"/></svg>
+      <p>八纹分区 · 锦纹底 / 回纹栏 / 窗棂识别核 / 连珠服务 / 冰裂夜间 / 宝相花面容库 / 海水人脸门 / 如意云</p>
+      <div class="pal">象牙白 · 牙色 · 月白 · 胭脂 · 靛蓝 · 金 · 石青　|　日夜双主题 · 3D 视差与令牌动效</div>
+    </div>
+  </section>
+
+ </div>
+</div>
+
+<script>
+// 主题切换：平滑色彩过渡（CSS 变量 + transition）
+const root=document.documentElement, btn=document.getElementById('themeBtn');
+btn.addEventListener('click',()=>{root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';});
+
+// 金粉浮动：随机生成 motes
+const m=document.getElementById('motes');
+for(let i=0;i<16;i++){const s=document.createElement('span');s.className='mote';
+  s.style.left=(Math.random()*100)+'%';
+  const d=9+Math.random()*12; s.style.animationDuration=d+'s'; s.style.animationDelay=(-Math.random()*d)+'s';
+  const sc=.5+Math.random()*1.6; s.style.transform='scale('+sc+')'; m.appendChild(s);}
+
+// 3D 视差：整张安全中枢面板随指针产生轻微透视倾斜
+const reduced=window.matchMedia('(prefers-reduced-motion: reduce)');
+const frame=document.querySelector('.frame');
+if(!reduced.matches){
+  frame.addEventListener('pointermove',e=>{
+    const r=frame.getBoundingClientRect();
+    const x=(e.clientX-r.left)/r.width-.5, y=(e.clientY-r.top)/r.height-.5;
+    root.style.setProperty('--tilt-x',(-y*3.4).toFixed(2)+'deg');
+    root.style.setProperty('--tilt-y',(x*4.6).toFixed(2)+'deg');
+  });
+  frame.addEventListener('pointerleave',()=>{
+    root.style.setProperty('--tilt-x','0deg');
+    root.style.setProperty('--tilt-y','0deg');
+  });
+}
+
+// 指针视差：识别核随鼠标轻微偏移（高级、克制）
+const core=document.querySelector('.core'), idc=document.querySelector('.c-id');
+if(!reduced.matches){
+  idc.addEventListener('pointermove',e=>{const r=idc.getBoundingClientRect();
+    const x=(e.clientX-r.left)/r.width-.5, y=(e.clientY-r.top)/r.height-.5;
+    core.style.transition='transform .2s ease';
+    core.style.transform='translate3d('+(x*16)+'px,'+(y*16)+'px,34px) rotateX('+(-y*10)+'deg) rotateY('+(x*14)+'deg)';});
+  idc.addEventListener('pointerleave',()=>{core.style.transform='translate3d(0,0,0) rotateX(0) rotateY(0)';});
+}
+</script>
+</body>
+</html>

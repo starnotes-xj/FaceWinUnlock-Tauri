@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F7F0DF"/>
+      <stop offset=".48" stop-color="#E7F1EA"/>
+      <stop offset="1" stop-color="#D9E5DD"/>
+    </linearGradient>
+    <radialGradient id="celadon" cx="72%" cy="20%" r="65%">
+      <stop offset="0" stop-color="#A7DED3" stop-opacity=".75"/>
+      <stop offset=".46" stop-color="#D8E9DF" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ink" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#143942"/>
+      <stop offset="1" stop-color="#061C24"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#B88A36"/>
+      <stop offset=".5" stop-color="#E2C575"/>
+      <stop offset="1" stop-color="#9C6B25"/>
+    </linearGradient>
+    <pattern id="crackle" width="150" height="130" patternUnits="userSpaceOnUse">
+      <path d="M8 36 L44 18 L72 48 L108 24 L142 54 M30 104 L66 78 L110 104 L146 82 M72 48 L66 78 M108 24 L110 104" fill="none" stroke="#316A68" stroke-width="1" opacity=".12"/>
+    </pattern>
+    <pattern id="lattice" width="96" height="96" patternUnits="userSpaceOnUse">
+      <path d="M0 48 H96 M48 0 V96 M16 16 L80 80 M80 16 L16 80" stroke="#A77B36" stroke-width="1.2" opacity=".16"/>
+      <circle cx="48" cy="48" r="14" fill="none" stroke="#1E756A" stroke-width="1" opacity=".14"/>
+    </pattern>
+    <style>
+      .font { font-family: "Microsoft YaHei UI", "Noto Sans CJK SC", "Segoe UI", sans-serif; }
+      .title { fill:#173139; font-size:42px; font-weight:820; letter-spacing:2px; }
+      .body { fill:#334A4C; font-size:19px; }
+      .muted { fill:#71807A; font-size:15px; }
+      .h2 { fill:#173139; font-size:26px; font-weight:760; }
+      .num { fill:#173139; font-size:56px; font-weight:860; }
+      .label { fill:#F9F3E5; font-size:17px; font-weight:800; }
+      .tiny { fill:#1E756A; font-size:13px; letter-spacing:4px; font-weight:800; }
+    </style>
+  </defs>
+  <rect width="1800" height="1120" fill="url(#paper)"/>
+  <rect width="1800" height="1120" fill="url(#celadon)"/>
+  <rect width="1800" height="1120" fill="url(#crackle)"/>
+  <path d="M0 850 C220 800 326 920 530 850 C720 784 850 890 1040 820 C1280 730 1440 800 1800 700 L1800 1120 L0 1120Z" fill="#D3E4DA" opacity=".78"/>
+  <path d="M1220 934 L1292 760 L1370 934Z M1310 934 L1400 710 L1490 934Z" fill="#BFD8D1" stroke="#A77B36" stroke-opacity=".42"/>
+  <rect x="0" y="882" width="1800" height="238" fill="url(#lattice)" opacity=".38"/>
+
+  <rect x="70" y="58" width="1660" height="960" rx="48" fill="#FFF9EB" opacity=".78"/>
+  <rect x="70" y="58" width="1660" height="960" rx="48" fill="none" stroke="url(#gold)" stroke-width="1.4"/>
+
+  <g class="font">
+    <text x="130" y="130" class="tiny">SONG · CELADON · BIOMETRIC SYSTEM</text>
+    <text x="130" y="186" class="title">面容解锁中枢</text>
+    <text x="130" y="220" class="body">宋式留白 + 汝窑天青 + 几何窗棂，将传统器物气质转译为安全产品界面。</text>
+
+    <rect x="130" y="290" width="260" height="62" rx="20" fill="url(#ink)"/>
+    <text x="205" y="329" class="label">仪表盘</text>
+    <text x="156" y="430" class="body">面容管理</text>
+    <text x="156" y="506" class="body">通行密钥</text>
+    <text x="156" y="582" class="body">安全场景</text>
+    <text x="156" y="658" class="body">日志</text>
+
+    <rect x="490" y="300" width="820" height="360" rx="42" fill="#EAF3ED" stroke="#8ABBB0"/>
+    <rect x="490" y="300" width="820" height="360" rx="42" fill="url(#crackle)" opacity=".8"/>
+    <circle cx="900" cy="480" r="122" fill="#D9EDE6" stroke="url(#gold)" stroke-width="2"/>
+    <path d="M860 480 C870 420 930 420 940 480 C930 548 870 548 860 480Z" fill="#1E756A" opacity=".8"/>
+    <circle cx="900" cy="480" r="12" fill="#FFF9EB"/>
+    <text x="548" y="370" class="h2">人脸安全态势</text>
+    <text x="548" y="414" class="body">识别、人脸门、系统服务整合显示。</text>
+    <rect x="548" y="510" width="178" height="44" rx="16" fill="#B73A2C"/>
+    <text x="592" y="538" class="label">人脸优先</text>
+    <rect x="744" y="510" width="178" height="44" rx="16" fill="url(#ink)"/>
+    <text x="786" y="538" class="label">通行密钥</text>
+
+    <rect x="490" y="720" width="300" height="180" rx="30" fill="#FFFDF4" stroke="#D1B46A"/>
+    <text x="530" y="770" class="h2">面容库</text>
+    <text x="530" y="838" class="num">2</text>
+    <text x="622" y="834" class="body">张</text>
+
+    <rect x="828" y="720" width="300" height="180" rx="30" fill="#FFFDF4" stroke="#D1B46A"/>
+    <text x="868" y="770" class="h2">通行密钥</text>
+    <text x="868" y="835" class="num">0.5</text>
+    <text x="978" y="834" class="body">系列</text>
+
+    <rect x="1166" y="720" width="300" height="180" rx="30" fill="#FFFDF4" stroke="#D1B46A"/>
+    <text x="1206" y="770" class="h2">夜间修复</text>
+    <text x="1206" y="820" class="body">统一语义变量</text>
+    <text x="1206" y="858" class="muted">菜单、卡片、表单无白块。</text>
+  </g>
+</svg>

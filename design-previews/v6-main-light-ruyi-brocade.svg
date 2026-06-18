@@ -1,0 +1,199 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <!-- v6 主软件 · 日间 · 温润象牙 + 锦纹/回纹/宝相花/冰裂/如意云/海水/窗棂/连珠
+       中国色：象牙白#fffbf0 牙色#eedeb0 月白#d6ecf0 胭脂#9d2933 靛蓝#065279 金#eacd76 赤金#f2be45 石青#7bcfa6
+       去掉 v5 浑浊褐(#955539)与石青大面积铺底，纹样统一金/靛/胭脂线条，避免灰绿发脏 -->
+  <defs>
+    <linearGradient id="dayBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fffbf0"/>
+      <stop offset=".5" stop-color="#f6ead0"/>
+      <stop offset="1" stop-color="#efe2cb"/>
+    </linearGradient>
+    <radialGradient id="moonCorner" cx="86%" cy="10%" r="46%">
+      <stop offset="0" stop-color="#d6ecf0" stop-opacity=".5"/>
+      <stop offset="1" stop-color="#d6ecf0" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="redPanel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9d2933"/>
+      <stop offset="1" stop-color="#6f1f29"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f2be45"/><stop offset=".5" stop-color="#eacd76"/><stop offset="1" stop-color="#f2be45"/>
+    </linearGradient>
+    <linearGradient id="indigoBar" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#065279"/><stop offset="1" stop-color="#0a3a59"/>
+    </linearGradient>
+    <!-- 锦纹：菱格连珠（背景统一底纹） -->
+    <pattern id="brocade" width="86" height="86" patternUnits="userSpaceOnUse">
+      <path d="M43 5 L81 43 L43 81 L5 43Z" fill="none" stroke="#065279" stroke-width="1" opacity=".09"/>
+      <circle cx="43" cy="43" r="3.2" fill="#9d2933" opacity=".1"/>
+      <circle cx="5" cy="5" r="2" fill="#eacd76" opacity=".22"/><circle cx="81" cy="5" r="2" fill="#eacd76" opacity=".22"/>
+      <circle cx="5" cy="81" r="2" fill="#eacd76" opacity=".22"/><circle cx="81" cy="81" r="2" fill="#eacd76" opacity=".22"/>
+    </pattern>
+    <!-- 如意云纹 -->
+    <pattern id="ruyi" width="190" height="118" patternUnits="userSpaceOnUse">
+      <path d="M16 78 C42 54 78 62 86 90 C112 52 168 60 176 100 L34 100 C12 100 0 90 16 78Z" fill="none" stroke="#eacd76" stroke-width="1.8" opacity=".5"/>
+      <path d="M58 76 C72 54 112 54 126 80" fill="none" stroke="#fffbf0" stroke-width="1.1" opacity=".3"/>
+    </pattern>
+    <!-- 海水江崖纹 -->
+    <pattern id="water" width="168" height="80" patternUnits="userSpaceOnUse">
+      <path d="M0 60 C21 30 63 30 84 60 C105 30 147 30 168 60" fill="none" stroke="#065279" stroke-width="2" opacity=".3"/>
+      <path d="M0 70 C21 46 63 46 84 70 C105 46 147 46 168 70" fill="none" stroke="#f2be45" stroke-width="1.4" opacity=".34"/>
+    </pattern>
+    <!-- 窗棂纹 -->
+    <pattern id="lattice" width="90" height="90" patternUnits="userSpaceOnUse">
+      <path d="M0 45 H90 M45 0 V90 M0 0 L90 90 M90 0 L0 90" stroke="#065279" stroke-width="1" opacity=".16"/>
+      <rect x="33" y="33" width="24" height="24" fill="none" stroke="#9d2933" stroke-width="1" opacity=".2" transform="rotate(45 45 45)"/>
+    </pattern>
+    <!-- 连珠纹 -->
+    <pattern id="beads" width="56" height="56" patternUnits="userSpaceOnUse">
+      <circle cx="14" cy="14" r="3" fill="#9d2933" opacity=".2"/><circle cx="42" cy="42" r="3" fill="#065279" opacity=".2"/>
+      <circle cx="42" cy="14" r="2" fill="#eacd76" opacity=".3"/><circle cx="14" cy="42" r="2" fill="#eacd76" opacity=".3"/>
+    </pattern>
+    <!-- 回纹（顶栏边框） -->
+    <pattern id="meander" width="40" height="20" patternUnits="userSpaceOnUse">
+      <path d="M3 17 V3 H37 M3 17 H29 V9 H15 V13" fill="none" stroke="#eacd76" stroke-width="1.6" opacity=".7"/>
+    </pattern>
+    <!-- 冰裂纹（夜间卡） -->
+    <pattern id="icecrack" width="120" height="120" patternUnits="userSpaceOnUse">
+      <path d="M0 34 L40 52 L30 92 L72 112 M40 52 L82 30 L120 58 M82 30 L74 0 M30 92 L0 104 M72 112 L120 102 M82 30 L104 72 L72 112" fill="none" stroke="#065279" stroke-width="1" opacity=".22"/>
+    </pattern>
+    <!-- 宝相花徽章 -->
+    <g id="baoxiang">
+      <g opacity=".9">
+        <g id="bxpetals">
+          <path d="M0 -14 C12 -26 12 -50 0 -60 C-12 -50 -12 -26 0 -14Z" fill="none" stroke="#eacd76" stroke-width="1.6"/>
+        </g>
+        <use href="#bxpetals" transform="rotate(45)"/><use href="#bxpetals" transform="rotate(90)"/>
+        <use href="#bxpetals" transform="rotate(135)"/><use href="#bxpetals" transform="rotate(180)"/>
+        <use href="#bxpetals" transform="rotate(225)"/><use href="#bxpetals" transform="rotate(270)"/>
+        <use href="#bxpetals" transform="rotate(315)"/>
+        <circle r="18" fill="none" stroke="#9d2933" stroke-width="1.6"/>
+        <circle r="8" fill="#9d2933" opacity=".5"/>
+      </g>
+    </g>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="16" flood-color="#7a2230" flood-opacity=".16"/>
+    </filter>
+    <style>
+      .font{font-family:"Microsoft YaHei UI","Noto Sans CJK SC","Segoe UI",sans-serif}
+      .title{fill:#1a3a47;font-size:40px;font-weight:860;letter-spacing:2px}
+      .tiny{fill:#065279;font-size:12px;font-weight:850;letter-spacing:4px}
+      .h2{fill:#1a3a47;font-size:25px;font-weight:820}
+      .body{fill:#33484b;font-size:18px}
+      .muted{fill:#8a6f4a;font-size:14px}
+      .label{fill:#1a3a47;font-size:16px;font-weight:850}
+      .white{fill:#fffbf0}
+      .num{fill:#1a3a47;font-size:46px;font-weight:900}
+      .seal{fill:#fffbf0;font-size:17px;font-weight:850;writing-mode:tb;letter-spacing:6px}
+    </style>
+  </defs>
+
+  <rect width="1800" height="1120" fill="url(#dayBg)"/>
+  <rect width="1800" height="1120" fill="url(#brocade)"/>
+  <rect width="1800" height="1120" fill="url(#moonCorner)"/>
+  <!-- 底部海水纹，填满下方避免空白 -->
+  <rect y="892" width="1800" height="228" fill="url(#water)" opacity=".8"/>
+  <path d="M0 946 C190 906 300 968 470 932 C672 888 832 956 1034 914 C1246 872 1404 938 1800 858 L1800 1120 L0 1120Z" fill="#efe2cb" opacity=".66"/>
+
+  <rect x="48" y="42" width="1704" height="1034" rx="44" fill="#fffbf0" opacity=".94" filter="url(#shadow)"/>
+  <rect x="48" y="42" width="1704" height="1034" rx="44" fill="none" stroke="url(#gold)" stroke-width="1.6"/>
+
+  <g class="font">
+    <!-- 侧栏：胭脂 + 如意云 -->
+    <rect x="84" y="78" width="292" height="966" rx="30" fill="url(#redPanel)"/>
+    <rect x="84" y="78" width="292" height="966" rx="30" fill="url(#ruyi)" opacity=".4"/>
+    <rect x="84" y="78" width="292" height="966" rx="30" fill="none" stroke="url(#gold)" stroke-width="1" opacity=".6"/>
+    <circle cx="148" cy="150" r="22" fill="#eedeb0"/>
+    <path d="M138 150 C142 134 154 134 158 150 C154 166 142 166 138 150Z" fill="#9d2933"/>
+    <text x="184" y="142" fill="#eacd76" font-size="11" letter-spacing="3" font-weight="850">FACE GUARD</text>
+    <text x="184" y="166" class="white" font-size="22" font-weight="860">面容解锁</text>
+    <rect x="120" y="232" width="220" height="56" rx="18" fill="#eedeb0"/>
+    <text x="168" y="268" fill="#9d2933" font-size="18" font-weight="850">仪表盘</text>
+    <text x="138" y="356" fill="#f4e3bd" font-size="18">面容管理</text>
+    <text x="138" y="424" fill="#f4e3bd" font-size="18">通行密钥</text>
+    <text x="138" y="492" fill="#f4e3bd" font-size="18">安全场景</text>
+    <text x="138" y="560" fill="#f4e3bd" font-size="18">日志审计</text>
+    <rect x="120" y="640" width="220" height="92" rx="22" fill="#065279" opacity=".82"/>
+    <rect x="120" y="640" width="220" height="92" rx="22" fill="url(#water)" opacity=".5"/>
+    <text x="146" y="680" class="white" font-size="15">守护状态</text>
+    <text x="146" y="712" fill="#eacd76" font-size="20" font-weight="850">已就绪</text>
+    <!-- 朱砂印 -->
+    <rect x="132" y="800" width="86" height="132" rx="10" fill="#9d2933" stroke="#eacd76" stroke-width="1.5" transform="rotate(-4 175 866)"/>
+    <text x="162" y="826" class="seal">面容守护</text>
+
+    <!-- 顶栏：牙色 + 回纹边框 -->
+    <rect x="420" y="86" width="1248" height="120" rx="28" fill="#f7ecd2" stroke="#eacd76"/>
+    <rect x="430" y="92" width="1228" height="14" fill="url(#meander)" opacity=".8"/>
+    <rect x="430" y="186" width="1228" height="14" fill="url(#meander)" opacity=".8"/>
+    <text x="460" y="150" class="tiny">RUYI · BROCADE · 温润象牙 · 无尖三角</text>
+    <text x="460" y="184" class="title" font-size="34">面容与通行密钥安全中枢</text>
+    <circle cx="1600" cy="146" r="30" fill="none" stroke="#9d2933" stroke-width="1.4" opacity=".7"/>
+    <use href="#baoxiang" transform="translate(1600 146) scale(.5)"/>
+
+    <!-- 身份识别核：窗棂 + 同心扫描环（HUD） -->
+    <rect x="420" y="246" width="580" height="360" rx="32" fill="#fffbf0" stroke="#eacd76"/>
+    <rect x="420" y="246" width="580" height="360" rx="32" fill="url(#lattice)" opacity=".5"/>
+    <text x="462" y="300" class="h2">身份识别核</text>
+    <text x="462" y="332" class="muted">同心扫描环替代尖角山形 · 圆融如意</text>
+    <circle cx="712" cy="438" r="122" fill="none" stroke="#065279" stroke-width="1.2" opacity=".5"/>
+    <circle cx="712" cy="438" r="122" fill="none" stroke="url(#gold)" stroke-width="2.4" stroke-dasharray="10 10" opacity=".9"/>
+    <circle cx="712" cy="438" r="92" fill="#fdf4df" stroke="#065279" stroke-width="2"/>
+    <circle cx="712" cy="438" r="92" fill="url(#beads)" opacity=".7"/>
+    <path d="M672 438 C682 392 742 392 752 438 C742 492 682 492 672 438Z" fill="#065279"/>
+    <circle cx="712" cy="438" r="9" fill="#eedeb0"/>
+    <path d="M712 306 V336 M712 540 V570 M580 438 H610 M814 438 H844" stroke="#9d2933" stroke-width="2.4" opacity=".5"/>
+    <path d="M712 316 A122 122 0 0 1 834 438" fill="none" stroke="#7bcfa6" stroke-width="4" stroke-linecap="round" opacity=".85"/>
+
+    <!-- 服务：连珠 + 石青正常chip -->
+    <rect x="1040" y="246" width="300" height="168" rx="28" fill="#fffbf0" stroke="#eacd76"/>
+    <rect x="1040" y="246" width="300" height="168" rx="28" fill="url(#beads)" opacity=".8"/>
+    <text x="1076" y="300" class="h2">核心服务</text>
+    <text x="1076" y="352" class="body">后台已就绪</text>
+    <rect x="1212" y="322" width="92" height="40" rx="14" fill="#7bcfa6"/>
+    <text x="1238" y="349" class="label">正常</text>
+
+    <!-- 夜间卡：月白 + 冰裂纹 -->
+    <rect x="1370" y="246" width="298" height="168" rx="28" fill="#e7f1f3" stroke="#065279" stroke-opacity=".5"/>
+    <rect x="1370" y="246" width="298" height="168" rx="28" fill="url(#icecrack)" opacity=".7"/>
+    <text x="1406" y="300" class="h2">夜间模式</text>
+    <text x="1406" y="352" class="body">统一暗色语义变量</text>
+
+    <!-- 通行密钥/版本 + 启用流程 -->
+    <rect x="1040" y="442" width="628" height="164" rx="28" fill="#f7ecd2" stroke="#eacd76"/>
+    <rect x="1040" y="442" width="628" height="164" rx="28" fill="url(#ruyi)" opacity=".42"/>
+    <text x="1076" y="496" class="h2">通行密钥插件</text>
+    <text x="1076" y="556" class="num">0.5.0.5</text>
+    <rect x="1380" y="510" width="252" height="56" rx="18" fill="url(#indigoBar)"/>
+    <rect x="1380" y="510" width="252" height="56" rx="18" fill="none" stroke="#eacd76" stroke-opacity=".7"/>
+    <text x="1418" y="546" class="white" font-size="17" font-weight="850">打开注册 / 启用流程</text>
+
+    <!-- 面容库：宝相花徽章背景 + 数字 -->
+    <rect x="420" y="646" width="360" height="214" rx="30" fill="#fffbf0" stroke="#eacd76"/>
+    <use href="#baoxiang" transform="translate(690 760) scale(1.7)" opacity=".5"/>
+    <text x="460" y="702" class="h2">面容库</text>
+    <text x="460" y="800" class="num" font-size="64">2</text>
+    <text x="520" y="800" class="body">张已启用</text>
+
+    <!-- 人脸门：海水 + 开启 -->
+    <rect x="820" y="646" width="360" height="214" rx="30" fill="#e7f1f3" stroke="#065279" stroke-opacity=".5"/>
+    <rect x="820" y="646" width="360" height="214" rx="30" fill="url(#water)" opacity=".62"/>
+    <text x="860" y="702" class="h2">人脸门</text>
+    <text x="860" y="752" class="body">登录前人脸用户验证</text>
+    <rect x="860" y="792" width="120" height="42" rx="15" fill="#7bcfa6"/>
+    <text x="894" y="819" class="label">已开启</text>
+
+    <!-- 安全场景：锦纹 + 人脸优先 -->
+    <rect x="1220" y="646" width="448" height="214" rx="30" fill="#f7ecd2" stroke="#9d2933" stroke-opacity=".6"/>
+    <rect x="1220" y="646" width="448" height="214" rx="30" fill="url(#brocade)" opacity=".9"/>
+    <text x="1260" y="702" class="h2">安全场景</text>
+    <text x="1260" y="752" class="body">登录 · 解锁 · UAC · 浏览器</text>
+    <rect x="1260" y="792" width="156" height="42" rx="15" fill="#9d2933"/>
+    <text x="1298" y="819" class="white" font-size="16" font-weight="850">人脸优先</text>
+
+    <!-- 底部说明条：靛蓝 + 如意云 -->
+    <rect x="420" y="900" width="1248" height="94" rx="28" fill="url(#indigoBar)" stroke="#f2be45"/>
+    <rect x="420" y="900" width="1248" height="94" rx="28" fill="url(#ruyi)" opacity=".3"/>
+    <text x="460" y="942" class="white" font-size="17" font-weight="800">v6 · 八种纹样分区：锦纹底 / 回纹栏 / 窗棂识别 / 连珠服务 / 冰裂夜间 / 宝相花面容库 / 海水人脸门 / 如意云</text>
+    <text x="460" y="972" fill="#eacd76" font-size="15">象牙白 · 牙色 · 月白 · 胭脂 · 靛蓝 · 金 · 石青（success点缀）</text>
+  </g>
+</svg>

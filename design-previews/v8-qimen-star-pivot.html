@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>面容解锁 · 安全中枢 · v8 奇门星枢</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@300;400;500;600;700;900&family=ZCOOL+XiaoWei&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   v8 · QiMen Star Pivot · 奇门星枢
+   奇门遁甲 × 阴阳八卦 × 十天干十二地支 × 二十四山 × 罗盘
+   中国传统宇宙观 3D 轨道眼
+   ============================================================ */
+
+:root {
+  /* 青铜古器色系 */
+  --bronze-dark: #1a1410;
+  --bronze-mid: #3d3025;
+  --bronze-light: #6b5a45;
+  --bronze-patina: #4a7c6e;
+
+  /* 金 */
+  --gold-dark: #7d5e10;
+  --gold-mid: #c9a63e;
+  --gold-bright: #e8d07a;
+  --gold-pale: #f5e6b8;
+
+  /* 朱砂 · 印泥色 */
+  --cinnabar-dark: #7a1a1a;
+  --cinnabar: #c23531;
+  --cinnabar-bright: #e8554a;
+
+  /* 青黛 · 墨色 */
+  --ink-deep: #0a0a0e;
+  --ink-mid: #151820;
+  --ink-surface: rgba(21, 24, 32, 0.88);
+
+  /* 翡翠 · 玉石 */
+  --jade-dark: #2d5a3a;
+  --jade: #5b8c5a;
+  --jade-bright: #7bc67e;
+
+  --text-primary: #e8e0d0;
+  --text-secondary: #a09888;
+  --text-dim: #6a6258;
+  --border-gold: rgba(201, 166, 62, 0.25);
+  --glow-gold: 0 0 40px rgba(201,166,62,0.25), 0 0 100px rgba(201,166,62,0.08);
+  --glow-cinnabar: 0 0 30px rgba(194,53,49,0.3);
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+
+body {
+  font-family:"Noto Serif SC","Source Han Serif SC",serif;
+  background:var(--ink-deep);
+  color:var(--text-primary);
+  -webkit-font-smoothing:antialiased;
+  cursor:default;
+}
+
+/* ============================================
+   BACKGROUND — 青铜星图
+   ============================================ */
+.bg-layer{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+
+/* 九宫格底纹 */
+.bg-grid{
+  position:absolute;inset:-5%;
+  background:
+    linear-gradient(rgba(201,166,62,0.03) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(201,166,62,0.03) 1px,transparent 1px);
+  background-size:60px 60px;
+  transform:perspective(1200px) rotateX(55deg) scale(2.2);
+  animation:gridDrift 60s linear infinite;
+  opacity:0.6;
+}
+@keyframes gridDrift{
+  from{background-position:0 0}
+  to{background-position:60px 60px}
+}
+
+/* 星宿光晕 */
+.star-field{position:absolute;inset:0}
+.star{
+  position:absolute;width:1.5px;height:1.5px;border-radius:50%;
+  background:var(--gold-mid);
+  animation:starTwinkle 3s ease-in-out infinite;
+  will-change:opacity;
+}
+@keyframes starTwinkle{
+  0%,100%{opacity:0.2}
+  50%{opacity:0.9}
+}
+
+/* 墨晕 */
+.ink-halo{
+  position:absolute;
+  border-radius:50%;
+  filter:blur(80px);
+  animation:haloBreathe 12s ease-in-out infinite;
+  will-change:transform,opacity;
+}
+.ink-halo.h1{
+  width:600px;height:600px;top:-200px;left:-100px;
+  background:radial-gradient(circle,rgba(194,53,49,0.12),transparent 60%);
+  animation-delay:0s;
+}
+.ink-halo.h2{
+  width:500px;height:500px;bottom:-150px;right:-100px;
+  background:radial-gradient(circle,rgba(201,166,62,0.1),transparent 60%);
+  animation-delay:-4s;
+}
+.ink-halo.h3{
+  width:400px;height:400px;top:30%;left:50%;
+  background:radial-gradient(circle,rgba(30,58,95,0.15),transparent 60%);
+  animation-delay:-8s;
+}
+@keyframes haloBreathe{
+  0%,100%{transform:scale(1);opacity:0.7}
+  50%{transform:scale(1.2);opacity:1}
+}
+
+/* 宣纸纹理 */
+.paper-grain{
+  position:absolute;inset:0;opacity:0.035;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+  background-size:256px 256px;
+  mix-blend-mode:overlay;
+}
+
+/* ============================================
+   STAGE
+   ============================================ */
+.stage{
+  position:relative;z-index:1;
+  height:100vh;display:flex;align-items:center;justify-content:center;
+  perspective:1800px;perspective-origin:50% 45%;
+  padding:16px;
+}
+.frame{
+  width:100%;max-width:1600px;height:94vh;
+  border-radius:20px;display:grid;
+  grid-template-columns:260px 1fr;overflow:hidden;
+  background:var(--ink-surface);
+  backdrop-filter:blur(50px);-webkit-backdrop-filter:blur(50px);
+  border:1px solid var(--border-gold);
+  box-shadow:0 0 0 1px var(--border-gold),0 40px 100px -30px rgba(0,0,0,0.7),var(--glow-gold);
+  transform-style:preserve-3d;
+  transform:rotateX(var(--tilt-x,0deg)) rotateY(var(--tilt-y,0deg));
+  animation:frameIn 1s cubic-bezier(.16,1,.3,1) both;
+}
+.frame::before{
+  content:"";position:absolute;inset:0;border-radius:20px;z-index:0;pointer-events:none;
+  padding:1px;
+  background:linear-gradient(135deg,
+    transparent,var(--gold-dark) 10%,transparent 35%,
+    var(--gold-bright) 50%,transparent 75%,var(--gold-mid) 90%
+  );
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;mask-composite:exclude;
+  opacity:0;animation:borderOn 1.5s ease .5s forwards;
+}
+@keyframes frameIn{
+  from{opacity:0;transform:translateY(40px) scale(.96) rotateX(var(--tilt-x)) rotateY(var(--tilt-y))}
+  to{opacity:1;transform:rotateX(var(--tilt-x)) rotateY(var(--tilt-y))}
+}
+@keyframes borderOn{to{opacity:.85}}
+
+/* ============================================
+   SIDEBAR — 青铜碑
+   ============================================ */
+.sidebar{
+  position:relative;z-index:1;
+  background:rgba(18,20,28,.92);
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border-right:1px solid var(--border-gold);
+  display:flex;flex-direction:column;padding:26px 18px;
+  animation:slideL 1s cubic-bezier(.16,1,.3,1) .25s both;
+}
+@keyframes slideL{from{opacity:0;transform:translateX(-40px)}to{opacity:1;transform:none}}
+
+.brand{display:flex;align-items:center;gap:12px;padding-bottom:22px;border-bottom:1px solid var(--border-gold)}
+.brand-emblem{width:46px;height:46px;flex-shrink:0;position:relative}
+.brand-emblem svg{width:100%;height:100%;animation:emblemRotate 30s linear infinite}
+@keyframes emblemRotate{to{transform:rotate(360deg)}}
+
+.brand-text .en{font:600 10px/1 Georgia,serif;letter-spacing:.32em;color:var(--gold-mid);text-transform:uppercase}
+.brand-text .zh{font:400 20px/1.2 "ZCOOL XiaoWei","Ma Shan Zheng",cursive;color:var(--text-primary);margin-top:3px}
+
+.nav{margin-top:28px;flex:1;display:flex;flex-direction:column;gap:2px}
+.nav-item{
+  display:flex;align-items:center;gap:11px;padding:12px 15px;
+  border-radius:10px;font-size:14px;color:var(--text-secondary);
+  cursor:pointer;transition:all .4s cubic-bezier(.16,1,.3,1);
+  position:relative;overflow:hidden;
+}
+.nav-item::before{
+  content:"";position:absolute;inset:0;border-radius:10px;
+  background:linear-gradient(135deg,rgba(201,166,62,.1),rgba(201,166,62,.01));
+  transform:scaleX(0);transform-origin:left;
+  transition:transform .45s cubic-bezier(.16,1,.3,1);z-index:-1;
+}
+.nav-item:hover{color:var(--text-primary);transform:translateX(3px)}
+.nav-item:hover::before{transform:scaleX(1)}
+.nav-item.active{color:var(--gold-bright);font-weight:600;background:rgba(201,166,62,.06)}
+.nav-item .nd{width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.35;transition:all .4s}
+.nav-item:hover .nd,.nav-item.active .nd{opacity:1;box-shadow:0 0 10px currentColor;transform:scale(1.4)}
+
+/* 守护卡片 */
+.guard{margin-top:auto;border-radius:14px;padding:16px;background:linear-gradient(135deg,rgba(30,58,95,.3),rgba(12,20,35,.5));border:1px solid var(--border-gold)}
+.guard-label{font-size:12px;color:var(--text-dim)}
+.guard-val{font-size:19px;font-weight:700;color:var(--gold-bright);display:flex;align-items:center;gap:9px;margin-top:4px}
+.livedot{width:8px;height:8px;border-radius:50%;background:var(--jade-bright);box-shadow:0 0 12px rgba(123,198,126,.5);animation:livedotPulse 2.5s ease-out infinite}
+@keyframes livedotPulse{0%{box-shadow:0 0 0 0 rgba(123,198,126,.6)}70%{box-shadow:0 0 0 12px transparent}100%{box-shadow:0 0 0 0 transparent}}
+
+/* ============================================
+   MAIN CONTENT
+   ============================================ */
+.main{position:relative;z-index:1;padding:22px 26px;display:flex;flex-direction:column;gap:14px;overflow-y:auto;scroll-behavior:smooth}
+
+.topbar{
+  border-radius:16px;padding:18px 24px;
+  background:linear-gradient(135deg,rgba(21,24,32,.5),rgba(14,17,26,.7));
+  border:1px solid var(--border-gold);backdrop-filter:blur(12px);
+  display:flex;align-items:center;justify-content:space-between;
+  animation:cardUp .8s cubic-bezier(.16,1,.3,1) .45s both;
+}
+@keyframes cardUp{from{opacity:0;transform:translateY(26px)}to{opacity:1;transform:none}}
+
+.top-kicker{font:600 11px/1 Georgia,serif;letter-spacing:.28em;color:var(--gold-mid)}
+.top-title{
+  font:400 32px/1.1 "ZCOOL XiaoWei","Ma Shan Zheng",cursive;
+  background:linear-gradient(105deg,var(--text-primary) 20%,var(--gold-bright) 42%,var(--text-primary) 65%);
+  background-size:200% 100%;-webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;margin-top:4px;
+  animation:shimmer 8s ease-in-out 1.2s infinite;
+}
+@keyframes shimmer{0%,100%{background-position:140% 0}50%{background-position:-40% 0}}
+
+.top-emblem{width:60px;height:60px;flex-shrink:0;animation:slowSpin 50s linear infinite}
+@keyframes slowSpin{to{transform:rotate(360deg)}}
+
+.grid{
+  display:grid;gap:12px;flex:1;
+  grid-template-columns:repeat(4,1fr);
+  grid-template-areas:"qi qi svc night" "qi qi ver ver" "fl fg sec sec";
+}
+
+.card{
+  position:relative;border-radius:16px;padding:18px 20px;
+  background:rgba(21,24,32,.82);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border:1px solid var(--border-gold);overflow:hidden;
+  transform-style:preserve-3d;
+  animation:cardUp .8s cubic-bezier(.16,1,.3,1) backwards;
+  transition:transform .5s cubic-bezier(.16,1,.3,1),border-color .5s,box-shadow .5s;
+}
+.card:hover{
+  transform:translateY(-5px) translateZ(18px);
+  border-color:rgba(201,166,62,.5);
+  box-shadow:0 18px 35px -14px rgba(0,0,0,.5),var(--glow-gold);
+}
+
+.card-label{font-size:17px;font-weight:600;position:relative;z-index:1}
+.card-desc{font-size:12px;color:var(--text-dim);margin-top:3px;position:relative;z-index:1}
+
+.c-qi{grid-area:qi;min-height:460px}
+.c-svc{grid-area:svc;animation-delay:.55s}
+.c-night{grid-area:night;animation-delay:.62s;background:linear-gradient(135deg,rgba(30,58,95,.25),rgba(12,20,35,.4))}
+.c-ver{grid-area:ver;animation-delay:.7s}
+.c-fl{grid-area:fl;animation-delay:.78s}
+.c-fg{grid-area:fg;animation-delay:.86s;background:linear-gradient(135deg,rgba(21,24,32,.4),rgba(30,58,95,.1))}
+.c-sec{grid-area:sec;animation-delay:.94s}
+
+/* ============================================================
+   🔥 奇门星枢 · 罗盘之眼
+   层级结构（从外向内）：
+   ① 二十四山环 — 干支+八卦方向细分
+   ② 后天八卦 — 离坎震兑乾坤艮巽
+   ③ 八门 — 休生伤杜景死惊开
+   ④ 十二地支 — 子丑寅卯辰巳午未申酉戌亥
+   ⑤ 十天干 — 甲乙丙丁戊己庚辛壬癸
+   ⑥ 九宫 — 洛书数戴九履一
+   ⑦ 阴阳太极 — 内核瞳孔
+   ============================================================ */
+
+.qi-stage{
+  position:relative;width:100%;height:calc(100% - 55px);
+  display:flex;align-items:center;justify-content:center;margin-top:4px;
+}
+
+/* 整个罗盘容器 */
+.luopan{
+  position:relative;
+  width:340px;height:340px;
+  transform-style:preserve-3d;
+  animation:luopanFloat 10s ease-in-out infinite;
+}
+@keyframes luopanFloat{
+  0%,100%{transform:translateY(0) rotateX(2deg)}
+  50%{transform:translateY(-6px) rotateX(-1deg)}
+}
+
+/* ===== 各层环 — 绝对定位重叠 ===== */
+
+/* 层① · 二十四山 — 最外层 */
+.ring-24mountains{
+  position:absolute;inset:-30px;border-radius:50%;
+  border:1.5px solid rgba(201,166,62,.2);
+  animation:ringSpin 30s linear infinite;
+  box-shadow:0 0 25px rgba(201,166,62,.06);
+}
+/* 二十四山字符均匀分布在圆周上 */
+.mountain-char{
+  position:absolute;top:50%;left:50%;
+  font-size:11px;font-weight:500;color:rgba(168,148,120,.7);
+  transform-origin:0 0;
+  text-shadow:0 0 4px rgba(201,166,62,.3);
+}
+/* 通过 JS 动态生成 24 个方位标记 */
+
+/* 层② · 后天八卦 — 外层方向环 */
+.ring-bagua{
+  position:absolute;inset:-14px;border-radius:50%;
+  border:2px solid rgba(201,166,62,.25);
+  border-style:dashed;
+  animation:ringSpin 24s linear infinite reverse;
+  box-shadow:0 0 20px rgba(201,166,62,.08);
+}
+/* 八卦符号 — SVG */
+.bagua-symbols{position:absolute;inset:-18px;animation:ringSpin 24s linear infinite reverse}
+
+/* 层③ · 八门 */
+.ring-gates{
+  position:absolute;inset:4px;border-radius:50%;
+  border:1.5px solid rgba(194,53,49,.3);
+  animation:ringSpin 18s linear infinite;
+  box-shadow:0 0 15px rgba(194,53,49,.08);
+}
+.gate-char{
+  position:absolute;top:50%;left:50%;
+  font-size:13px;font-weight:600;color:rgba(194,53,49,.75);
+  transform-origin:0 0;
+  text-shadow:0 0 6px rgba(194,53,49,.3);
+}
+
+/* 层④ · 十二地支 */
+.ring-branches{
+  position:absolute;inset:22px;border-radius:50%;
+  border:2px solid rgba(91,140,90,.35);
+  border-style:solid;
+  animation:ringSpin 14s linear infinite reverse;
+  box-shadow:0 0 12px rgba(91,140,90,.06);
+}
+.branch-char{
+  position:absolute;top:50%;left:50%;
+  font-size:14px;font-weight:600;color:rgba(123,198,126,.7);
+  transform-origin:0 0;
+  text-shadow:0 0 8px rgba(123,198,126,.25);
+}
+
+/* 层⑤ · 十天干 */
+.ring-stems{
+  position:absolute;inset:38px;border-radius:50%;
+  border:1.5px solid rgba(201,166,62,.4);
+  border-style:dotted;
+  animation:ringSpin 10s linear infinite;
+}
+.stem-char{
+  position:absolute;top:50%;left:50%;
+  font-size:12px;font-weight:600;color:var(--gold-mid);
+  transform-origin:0 0;
+  text-shadow:0 0 6px rgba(201,166,62,.4);
+}
+
+/* 层⑥ · 九宫 — 数字1-9按洛书排列 */
+.ring-palaces{
+  position:absolute;inset:52px;border-radius:50%;
+  border:1px solid rgba(45,95,158,.35);
+  animation:ringSpin 28s linear infinite reverse;
+}
+.palace-num{
+  position:absolute;top:50%;left:50%;
+  font-size:16px;font-weight:800;color:rgba(45,95,158,.6);
+  transform-origin:0 0;
+  font-family:Georgia,serif;
+}
+
+/* 层⑦ · 太极阴阳眼 — 核心 */
+.taiji-core{
+  position:absolute;inset:75px;border-radius:50%;
+  overflow:hidden;
+  box-shadow:0 0 0 2px rgba(201,166,62,.5),inset 0 0 40px rgba(0,0,0,.5),var(--glow-gold);
+  animation:taijiBreathe 5s ease-in-out infinite;
+}
+@keyframes taijiBreathe{
+  0%,100%{transform:scale(1)}
+  50%{transform:scale(1.04)}
+}
+
+/* 太极 S 曲线 — 用 conic-gradient */
+.taiji{
+  position:absolute;inset:0;border-radius:50%;
+  background:conic-gradient(
+    from -90deg,
+    #e8e0d0 0deg 180deg,
+    #0a0a0e 180deg 360deg
+  );
+  animation:taijiRotate 8s linear infinite;
+}
+@keyframes taijiRotate{to{transform:rotate(360deg)}}
+
+/* 阴阳鱼眼 */
+.taiji::before{
+  content:"";position:absolute;
+  width:28%;height:28%;border-radius:50%;
+  top:15%;left:36%;
+  background:radial-gradient(circle,#0a0a0e 40%,#1a1410 70%);
+  box-shadow:0 0 20px rgba(0,0,0,.6);
+  animation:fishEyePulseA 4s ease-in-out infinite;
+}
+.taiji::after{
+  content:"";position:absolute;
+  width:28%;height:28%;border-radius:50%;
+  bottom:15%;left:36%;
+  background:radial-gradient(circle,#e8e0d0 40%,#f5e6b8 70%);
+  box-shadow:0 0 20px rgba(232,208,122,.4);
+  animation:fishEyePulseB 4s ease-in-out infinite;
+}
+@keyframes fishEyePulseA{
+  0%,100%{transform:scale(1)}
+  50%{transform:scale(1.12)}
+}
+@keyframes fishEyePulseB{
+  0%,100%{transform:scale(1)}
+  50%{transform:scale(.88)}
+}
+
+/* 太极中央的瞳孔针孔 */
+.pupil-pinhole{
+  position:absolute;inset:0;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  pointer-events:none;z-index:2;
+}
+.pupil-pinhole::after{
+  content:"";width:4px;height:4px;border-radius:50%;
+  background:var(--gold-bright);
+  box-shadow:0 0 16px rgba(232,208,122,.8),0 0 40px rgba(232,208,122,.3);
+  animation:pinGlow 3s ease-in-out infinite;
+}
+@keyframes pinGlow{
+  0%,100%{box-shadow:0 0 16px rgba(232,208,122,.8),0 0 40px rgba(232,208,122,.3)}
+  50%{box-shadow:0 0 26px rgba(232,208,122,1),0 0 60px rgba(232,208,122,.5)}
+}
+
+/* 扫描光束 */
+.scan-beam{
+  position:absolute;
+  top:50%;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(123,198,126,.4),rgba(123,198,126,.7),rgba(123,198,126,.4),transparent);
+  animation:scanSweep 3.5s ease-in-out infinite;
+  z-index:3;pointer-events:none;
+  box-shadow:0 0 24px rgba(123,198,126,.3);
+}
+@keyframes scanSweep{
+  0%,100%{top:15%;opacity:0}
+  20%{top:85%;opacity:.8}
+  40%{top:50%;opacity:.3}
+  60%{top:25%;opacity:.6}
+  80%{top:70%;opacity:.2}
+}
+
+/* 金箔粒子轨道 */
+.particle-orbit{position:absolute;inset:0;animation:ringSpin 7s linear infinite}
+.particle-dot{
+  position:absolute;top:5px;left:50%;width:3px;height:3px;border-radius:50%;
+  background:var(--gold-bright);
+  box-shadow:0 0 8px rgba(232,208,122,.7);
+  animation:dotTrail 7s ease-in-out infinite;
+}
+.particle-dot.d2{animation-delay:-2.3s;top:calc(50% + 155px)}
+.particle-dot.d3{animation-delay:-4.6s;left:5px;top:50%}
+
+@keyframes dotTrail{
+  0%{opacity:0;transform:scale(0)}
+  10%{opacity:1;transform:scale(1)}
+  90%{opacity:.4;transform:scale(.7)}
+  100%{opacity:0;transform:scale(0)}
+}
+
+@keyframes ringSpin{to{transform:rotate(360deg)}}
+
+/* ============================================
+   通用元素
+   ============================================ */
+.tag{
+  display:inline-flex;padding:5px 13px;border-radius:9px;
+  font-size:12px;font-weight:600;position:relative;z-index:1;
+}
+.tag-jade{background:rgba(91,140,90,.18);color:var(--jade-bright);border:1px solid rgba(91,140,90,.25)}
+.tag-gold{background:rgba(201,166,62,.12);color:var(--gold-bright);border:1px solid rgba(201,166,62,.25)}
+.tag-red{background:rgba(194,53,49,.18);color:var(--cinnabar-bright);border:1px solid rgba(194,53,49,.25)}
+
+.btn-main{
+  display:inline-flex;align-items:center;gap:8px;padding:11px 20px;border-radius:11px;
+  background:linear-gradient(135deg,var(--cinnabar),var(--cinnabar-dark));
+  color:var(--text-primary);font-size:14px;font-weight:600;
+  border:1px solid rgba(194,53,49,.35);cursor:pointer;overflow:hidden;
+  position:relative;z-index:1;transition:transform .3s,box-shadow .3s;
+}
+.btn-main::after{
+  content:"";position:absolute;inset:0;
+  background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.12),transparent 70%);
+  transform:translateX(-130%);transition:transform .6s;
+}
+.btn-main:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(194,53,49,.35)}
+.btn-main:hover::after{transform:translateX(130%)}
+
+.num-lg{font:900 50px/1 "Noto Serif SC",serif;position:relative;z-index:1}
+.ver-str{font:700 32px/1 Georgia,serif;letter-spacing:.03em;color:var(--gold-bright)}
+
+.botbar{
+  border-radius:14px;padding:14px 20px;
+  background:linear-gradient(120deg,rgba(30,58,95,.35),rgba(12,20,35,.5));
+  border:1px solid var(--border-gold);backdrop-filter:blur(12px);
+  display:flex;align-items:center;gap:16px;
+  animation:cardUp .8s cubic-bezier(.16,1,.3,1) 1.1s backwards;
+}
+.botbar-desc{font-size:13px;color:var(--text-dim);flex:1}
+.botbar-pal{font-size:11px;color:var(--gold-mid);display:flex;gap:10px}
+.pal-swatch{display:inline-block;width:9px;height:9px;border-radius:50%}
+
+/* 辅助 */
+.flex-r{display:flex;align-items:center;gap:10px}
+.flex-between{display:flex;align-items:center;justify-content:space-between}
+.mt-a{margin-top:auto}.mt-12{margin-top:12px}.mt-8{margin-top:8px}
+
+/* 主题切换 */
+.theme-btn{
+  position:fixed;top:22px;right:26px;z-index:100;
+  width:44px;height:44px;border-radius:50%;
+  background:rgba(21,24,32,.9);border:1px solid var(--border-gold);
+  backdrop-filter:blur(16px);cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:all .4s;box-shadow:0 8px 22px rgba(0,0,0,.3);
+}
+.theme-btn:hover{border-color:rgba(201,166,62,.55);transform:rotate(45deg);box-shadow:var(--glow-gold)}
+.theme-btn svg{width:20px;height:20px;fill:var(--gold-mid)}
+[data-theme=dark] .theme-btn .sun{display:none}
+[data-theme=light] .theme-btn .moon{display:none}
+
+@media(prefers-reduced-motion:reduce){*,::before,::after{animation:none!important;transition:none!important}}
+
+@media(max-width:1100px){
+  .frame{grid-template-columns:1fr}.sidebar{display:none}
+  .grid{grid-template-columns:1fr 1fr;grid-template-areas:"qi qi" "svc night" "ver ver" "fl fg" "sec sec"}
+  .c-qi{min-height:340px}
+}
+</style>
+</head>
+<body>
+
+<!-- BG -->
+<div class="bg-layer">
+  <div class="bg-grid"></div>
+  <div class="star-field" id="stars"></div>
+  <div class="ink-halo h1"></div><div class="ink-halo h2"></div><div class="ink-halo h3"></div>
+  <div class="paper-grain"></div>
+</div>
+
+<!-- Theme Toggle -->
+<button class="theme-btn" id="themeBtn" title="日夜">
+  <svg class="moon" viewBox="0 0 24 24"><path d="M12 2a9 9 0 1 0 9 9c0-.5 0-1-.1-1.5a6.5 6.5 0 0 1-8.4-8.4A9 9 0 0 0 12 2Z"/></svg>
+  <svg class="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M1 12h3M20 12h3M4 4l2 2M18 18l2 2M4 20l2-2M18 6l2-2" stroke-width="2" fill="none" stroke="var(--gold-mid)" stroke-linecap="round"/></svg>
+</button>
+
+<!-- STAGE -->
+<div class="stage">
+ <div class="frame">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-emblem">
+        <svg viewBox="-40 -40 80 80">
+          <circle r="36" fill="none" stroke="var(--gold-mid)" stroke-width="1.2" opacity=".5"/>
+          <path d="M0-28 L12-10 L28 0 L12 10 L0 28 L-12 10 L-28 0 L-12-10Z" fill="none" stroke="var(--cinnabar)" stroke-width="1.5"/>
+          <circle r="8" fill="var(--cinnabar)" opacity=".8"/>
+        </svg>
+      </div>
+      <div class="brand-text"><div class="en">QI-MEN GUARD</div><div class="zh">奇门星枢</div></div>
+    </div>
+    <nav class="nav">
+      <div class="nav-item active"><span class="nd"></span>仪表盘</div>
+      <div class="nav-item"><span class="nd"></span>面容管理</div>
+      <div class="nav-item"><span class="nd"></span>通行密钥</div>
+      <div class="nav-item"><span class="nd"></span>安全场景</div>
+      <div class="nav-item"><span class="nd"></span>日志审计</div>
+    </nav>
+    <div class="guard">
+      <div class="guard-label">奇门守护</div>
+      <div class="guard-val"><span class="livedot"></span>已就绪</div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <section class="main">
+    <div class="topbar">
+      <div>
+        <div class="top-kicker">QI MEN DUN JIA · STAR PIVOT</div>
+        <div class="top-title">面容与通行密钥安全中枢</div>
+      </div>
+      <svg class="top-emblem" viewBox="-60 -60 120 120">
+        <!-- 八门纹章 -->
+        <g opacity=".7">
+          <path d="M0-48 C12-34 48-10 48 0 C48 10 12 34 0 48 C-12 34-48 10-48 0 C-48-10-12-34 0-48Z" fill="none" stroke="var(--gold-mid)" stroke-width="1"/>
+          <path d="M-48 0 C-10 12 10 12 48 0 C10-12-10-12-48 0Z" fill="none" stroke="var(--cinnabar)" stroke-width=".8"/>
+          <circle r="14" fill="none" stroke="var(--jade)" stroke-width="1"/>
+          <circle r="4" fill="var(--gold-bright)"/>
+        </g>
+      </svg>
+    </div>
+
+    <div class="grid">
+      <!-- 🔥 奇门星枢 · 罗盘之眼 -->
+      <div class="card c-qi">
+        <div class="flex-between" style="position:relative;z-index:1">
+          <div>
+            <div class="card-label">奇门星枢</div>
+            <div class="card-desc">八卦 · 八门 · 天干地支 · 九宫 · 阴阳太极</div>
+          </div>
+          <span class="tag tag-red">罗盘之眼</span>
+        </div>
+        <div class="qi-stage">
+          <!-- 扫描光束 -->
+          <div class="scan-beam"></div>
+
+          <!-- 罗盘容器 -->
+          <div class="luopan">
+            <!-- 层① 二十四山 -->
+            <div class="ring-24mountains" id="ring24Mountains"></div>
+
+            <!-- 层② 后天八卦 -->
+            <div class="ring-bagua"></div>
+            <div class="bagua-symbols" id="baguaSymbols"></div>
+
+            <!-- 层③ 八门 -->
+            <div class="ring-gates" id="ringGates"></div>
+
+            <!-- 层④ 十二地支 -->
+            <div class="ring-branches" id="ringBranches"></div>
+
+            <!-- 层⑤ 十天干 -->
+            <div class="ring-stems" id="ringStems"></div>
+
+            <!-- 层⑥ 九宫 -->
+            <div class="ring-palaces" id="ringPalaces"></div>
+
+            <!-- 层⑦ 太极阴阳眼 -->
+            <div class="taiji-core">
+              <div class="taiji"></div>
+              <div class="pupil-pinhole"></div>
+            </div>
+
+            <!-- 金箔粒子轨道 -->
+            <div class="particle-orbit">
+              <span class="particle-dot d1"></span>
+              <span class="particle-dot d2"></span>
+              <span class="particle-dot d3"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 其他卡片 -->
+      <div class="card c-svc">
+        <div class="card-label">核心服务</div>
+        <div class="card-desc">后台守护进程</div>
+        <div class="mt-12"><span class="tag tag-jade">运行正常</span></div>
+      </div>
+      <div class="card c-night">
+        <div class="card-label">夜间模式</div>
+        <div class="card-desc">深色语义统一<br>无残留白底</div>
+      </div>
+      <div class="card c-ver">
+        <div class="flex-between" style="height:100%">
+          <div>
+            <div class="card-label">通行密钥插件</div>
+            <div class="ver-str mt-8">0.6.0.0</div>
+          </div>
+          <button class="btn-main">打开注册 / 启用</button>
+        </div>
+      </div>
+      <div class="card c-fl">
+        <div class="card-label">面容库</div>
+        <div class="flex-r mt-12">
+          <span class="num-lg">2</span>
+          <span class="card-desc" style="margin-top:0">张已启用</span>
+        </div>
+      </div>
+      <div class="card c-fg">
+        <div class="card-label">人脸门</div>
+        <div class="card-desc">登录前人脸验证</div>
+        <div class="mt-12"><span class="tag tag-jade">已开启</span></div>
+      </div>
+      <div class="card c-sec">
+        <div class="flex-between">
+          <div>
+            <div class="card-label">安全场景</div>
+            <div class="card-desc">登录 · 解锁 · UAC · 查看密码</div>
+          </div>
+          <span class="tag tag-red">人脸优先</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="botbar">
+      <div class="botbar-desc">
+        奇门遁甲 · 后天八卦 · 八门 · 十二地支 · 十天干 · 二十四山 · 九宫洛书 · 阴阳太极 &nbsp;|&nbsp; 青铜 · 金箔 · 朱砂 · 翡翠 · 月白
+      </div>
+      <div class="botbar-pal">
+        <span class="pal-swatch" style="background:var(--gold-mid)"></span>金
+        <span class="pal-swatch" style="background:var(--cinnabar)"></span>朱砂
+        <span class="pal-swatch" style="background:var(--bronze-patina)"></span>青铜
+        <span class="pal-swatch" style="background:var(--jade)"></span>翡翠
+        <span class="pal-swatch" style="background:var(--text-primary)"></span>月白
+      </div>
+    </div>
+  </section>
+
+ </div>
+</div>
+
+<script>
+// ============================================================
+// THEME
+// ============================================================
+const root=document.documentElement;
+document.getElementById('themeBtn').addEventListener('click',()=>{
+  root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';
+});
+
+// ============================================================
+// 星宿随机生成
+// ============================================================
+const starsEl=document.getElementById('stars');
+for(let i=0;i<40;i++){
+  const s=document.createElement('span');
+  s.className='star';
+  s.style.left=(Math.random()*96+2)+'%';
+  s.style.top=(Math.random()*96+2)+'%';
+  s.style.animationDelay=(-Math.random()*3)+'s';
+  s.style.animationDuration=(2+Math.random()*4)+'s';
+  s.style.width=(1+Math.random()*2)+'px';
+  s.style.height=s.style.width;
+  starsEl.appendChild(s);
+}
+
+// ============================================================
+// 罗盘文本布局 — 在圆周上均匀排列字符
+// ============================================================
+
+function placeChars(containerId, chars, ringRadius){
+  const c=document.getElementById(containerId);
+  if(!c)return;
+  const total=chars.length;
+  const centerOffset=ringRadius; // 字符在圆上的半径（px）
+
+  chars.forEach((ch,i)=>{
+    const angle=(i/total)*2*Math.PI - Math.PI/2; // 从顶部开始
+    const x=centerOffset*Math.cos(angle);
+    const y=centerOffset*Math.sin(angle);
+    const span=document.createElement('span');
+    // 根据容器类名设置正确的 className
+    if(containerId==='ring24Mountains') span.className='mountain-char';
+    else if(containerId==='ringGates') span.className='gate-char';
+    else if(containerId==='ringBranches') span.className='branch-char';
+    else if(containerId==='ringStems') span.className='stem-char';
+    else if(containerId==='ringPalaces') span.className='palace-num';
+    else span.className='mountain-char';
+
+    span.textContent=ch;
+    // 定位：将字符放在圆周坐标上，然后旋转以保持可读
+    span.style.position='absolute';
+    span.style.top='50%';
+    span.style.left='50%';
+    span.style.transform=`translate(${x}px,${y}px) translate(-50%,-50%) rotate(${(i/total)*360}deg)`;
+    span.style.transformOrigin='center';
+    c.appendChild(span);
+  });
+}
+
+// 后天八卦卦名（后天八卦方位顺序）
+const baguaNames=['离','巽','震','艮','坎','乾','兑','坤'];
+// 后天八卦方位：离(南,上) 巽(东南) 震(东) 艮(东北) 坎(北,下) 乾(西北) 兑(西) 坤(西南)
+// 在圆上，从顶部(南/离)顺时针排列
+placeChars('baguaSymbols',baguaNames,175);
+
+// 八门：休生伤杜景死惊开
+const eightGates=['休','生','伤','杜','景','死','惊','开'];
+placeChars('ringGates',eightGates,155);
+
+// 十二地支
+const twelveBranches=['子','丑','寅','卯','辰','巳','午','未','申','酉','戌','亥'];
+placeChars('ringBranches',twelveBranches,135);
+
+// 十天干
+const tenStems=['甲','乙','丙','丁','戊','己','庚','辛','壬','癸'];
+placeChars('ringStems',tenStems,117);
+
+// 洛书九宫数：戴九履一，左三右七，二四为肩，六八为足
+// 在圆上排列：
+//      9(南/上)
+//  3(东/右)  7(西/左)
+//      1(北/下)
+//  8(东北)   6(西北)
+//  4(东南)   2(西南)
+// 但这是九宫格布局。用圆周排列时，按方位放置。
+// 使用实际的方位：离(南)9, 巽(东南)4, 震(东)3, 艮(东北)8, 坎(北)1, 乾(西北)6, 兑(西)7, 坤(西南)2
+// 从顶部(南)顺时针：
+const palaceNums=['九','四','三','八','一','六','七','二'];
+placeChars('ringPalaces',palaceNums,100);
+
+// 二十四山（简化，用方向标记）
+const twentyFour=[
+  '壬','子','癸',  // 北(坎)
+  '丑','艮','寅',  // 东北(艮)
+  '甲','卯','乙',  // 东(震)
+  '辰','巽','巳',  // 东南(巽)
+  '丙','午','丁',  // 南(离)
+  '未','坤','申',  // 西南(坤)
+  '庚','酉','辛',  // 西(兑)
+  '戌','乾','亥'   // 西北(乾)
+];
+placeChars('ring24Mountains',twentyFour,195);
+
+// ============================================================
+// 3D 视差
+// ============================================================
+const reduced=window.matchMedia('(prefers-reduced-motion:reduce)');
+if(!reduced.matches){
+  const frame=document.querySelector('.frame');
+  frame.addEventListener('pointermove',(e)=>{
+    const r=frame.getBoundingClientRect();
+    const x=(e.clientX-r.left)/r.width-.5;
+    const y=(e.clientY-r.top)/r.height-.5;
+    root.style.setProperty('--tilt-x',(-y*2.8).toFixed(2)+'deg');
+    root.style.setProperty('--tilt-y',(x*3.6).toFixed(2)+'deg');
+  });
+  frame.addEventListener('pointerleave',()=>{
+    root.style.setProperty('--tilt-x','0deg');
+    root.style.setProperty('--tilt-y','0deg');
+  });
+}
+
+// ============================================================
+// 导航交互
+// ============================================================
+document.querySelectorAll('.nav-item').forEach(item=>{
+  item.addEventListener('click',()=>{
+    document.querySelector('.nav-item.active')?.classList.remove('active');
+    item.classList.add('active');
+  });
+});
+</script>
+</body>
+</html>

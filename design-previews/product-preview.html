@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>产品 UI 预览 — 亮色模式</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700&display=swap">
+<style>
+/* ===== Copy the actual v7-theme.css light mode variables ===== */
+:root {
+  --el-bg-color-page:   #f5f0e8;
+  --el-bg-color:        #efe9dc;
+  --el-bg-color-overlay: #faf6ee;
+  --el-text-color-primary:   #141210;
+  --el-text-color-regular:   #2d2820;
+  --el-text-color-secondary: #555048;
+  --el-text-color-placeholder: #8a8278;
+  --el-text-color-disabled: #a09890;
+  --el-color-primary:        #b89538;
+  --el-color-primary-light-9: rgba(184,149,56,0.08);
+  --el-border-color-base:    #d4c8b0;
+  --el-border-color-light:   #e0d6c0;
+  --el-border-color-lighter: #ebe2cc;
+
+  --v7-gold-mid: #b89538; --v7-gold-bright: #d4b858;
+  --v7-cinnabar: #b82828; --v7-cinnabar-bright: #d9443e;
+  --v7-jade-bright: #5c9e60;
+  --v7-text-primary: #141210; --v7-text-secondary: #3d3830; --v7-text-dim: #6a6258;
+  --v7-surface-card: rgba(245,240,232,0.9);
+  --v7-border-subtle: rgba(139,105,20,0.2);
+  --v7-border-active: rgba(139,105,20,0.5);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Noto Serif SC","Microsoft YaHei",sans-serif;background:#f5f0e8;color:#141210}
+html{background:#f5f0e8}
+
+/* Layout mirroring MainLayout.vue */
+.app{display:flex;height:100vh}
+.sidebar{width:240px;background:var(--el-bg-color);border-right:1px solid var(--el-border-color-light);display:flex;flex-direction:column;flex-shrink:0}
+.logo{padding:25px;display:flex;align-items:center;gap:12px}
+.logo svg{width:28px;height:28px;color:#b89538}
+.logo span{font-size:18px;font-weight:600;color:var(--el-text-color-primary)}
+
+/* el-menu style */
+.menu{flex:1;padding:8px 0}
+.menu-item{display:flex;align-items:center;gap:12px;padding:12px 25px;font-size:15px;color:var(--el-text-color-regular);cursor:pointer;transition:all .3s;border-left:3px solid transparent}
+.menu-item:hover{background:var(--el-color-primary-light-9);color:var(--el-color-primary)}
+.menu-item.active{color:var(--el-color-primary);border-left-color:var(--el-color-primary);background:var(--el-color-primary-light-9);font-weight:600}
+.menu-dot{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.5}
+
+.footer{padding:15px 20px;border-top:1px solid var(--el-border-color-lighter);display:flex;flex-direction:column;align-items:center;gap:10px;font-size:12px;color:var(--el-text-color-placeholder)}
+.footer .tag{display:inline-block;padding:4px 10px;border-radius:4px;font-size:12px;background:rgba(92,158,96,.15);color:#5c9e60;border:1px solid rgba(92,158,96,.2)}
+.footer .ver{font-weight:500;color:var(--el-text-color-regular)}
+
+/* Main area */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.header{height:50px;background:var(--el-bg-color);border-bottom:1px solid var(--el-border-color-light);display:flex;align-items:center;padding:0 20px;font-size:14px;font-weight:600;color:var(--el-text-color-regular)}
+.content{flex:1;padding:30px;overflow-y:auto}
+
+/* Cards */
+.card-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px}
+.card{background:var(--el-bg-color);border:1px solid var(--el-border-color-light);border-radius:14px;padding:22px;display:flex;align-items:center;gap:18px}
+.card-icon{width:52px;height:52px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px}
+.card-num{font:900 30px/1 "Noto Serif SC",serif;color:var(--el-text-color-primary)}
+.card-label{font-size:12px;color:var(--el-text-color-placeholder);margin-bottom:2px}
+
+/* Content grid */
+.content-grid{display:grid;grid-template-columns:2fr 3fr;gap:16px;flex:1;min-height:0}
+.panel{background:var(--el-bg-color);border:1px solid var(--el-border-color-light);border-radius:14px;padding:22px;overflow:hidden;display:flex;flex-direction:column}
+.panel-title{font-size:16px;font-weight:600;color:var(--el-text-color-primary);margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--el-border-color-lighter)}
+.panel-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0}
+.panel-row+.panel-row{border-top:1px solid var(--el-border-color-lighter)}
+.panel-name{font-size:14px;font-weight:500;color:var(--el-text-color-primary)}
+.panel-desc{font-size:12px;color:var(--el-text-color-secondary);margin-top:2px}
+.status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+.status-dot.on{background:#5c9e60;box-shadow:0 0 6px rgba(92,158,96,.4)}
+.status-dot.off{background:#b82828;box-shadow:0 0 6px rgba(184,40,40,.3)}
+.status-text{font-size:12px;font-weight:600;color:var(--el-text-color-secondary)}
+
+/* Init page */
+.init-wrap{max-width:700px;margin:0 auto}
+.init-card{background:var(--el-bg-color);border:1px solid var(--el-border-color-light);border-radius:16px;padding:36px}
+.step-title{font-size:20px;font-weight:600;color:var(--el-text-color-primary);margin-bottom:24px}
+.steps{display:flex;justify-content:center;gap:0;margin-bottom:32px}
+.step{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--el-text-color-placeholder)}
+.step.active{color:var(--el-color-primary);font-weight:600}
+.step-num{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--el-border-color-lighter);color:var(--el-text-color-placeholder);font-size:13px;font-weight:600}
+.step.active .step-num{background:var(--el-color-primary);color:#fff}
+.step-line{width:60px;height:1px;background:var(--el-border-color-base);margin:0 8px}
+.check-item{display:flex;align-items:center;gap:10px;padding:10px 0;font-size:15px;color:var(--el-text-color-regular)}
+.check-icon{font-size:18px}
+.check-icon.ok{color:#5c9e60}
+
+/* Options page */
+.opt-wrap{max-width:900px;margin:0 auto}
+.opt-card{background:var(--el-bg-color);border:1px solid var(--el-border-color-light);border-radius:16px;padding:28px}
+.opt-header{display:flex;align-items:center;gap:12px;margin-bottom:28px;padding-bottom:16px;border-bottom:1px solid var(--el-border-color-lighter)}
+.opt-tab{font-size:15px;padding:8px 16px;cursor:pointer;border-radius:8px;color:var(--el-text-color-secondary)}
+.opt-tab.active{background:var(--el-color-primary-light-9);color:var(--el-color-primary);font-weight:600}
+.opt-row{display:flex;align-items:center;justify-content:space-between;padding:14px 0}
+.opt-row+.opt-row{border-top:1px solid var(--el-border-color-lighter)}
+.opt-label{font-size:14px;color:var(--el-text-color-regular)}
+.opt-desc{font-size:12px;color:var(--el-text-color-placeholder);margin-top:2px}
+
+button{background:linear-gradient(135deg,#b82828,#6b1515);color:#f5efe0;border:1px solid rgba(184,40,40,.3);padding:10px 20px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer}
+
+h2{font-size:18px;color:var(--el-text-color-primary);margin:24px 0 12px}
+
+/* Tabs */
+.tabs{display:flex;gap:0;background:var(--el-bg-color);border-radius:10px;padding:4px;margin-bottom:24px;border:1px solid var(--el-border-color-light)}
+.tab{flex:1;text-align:center;padding:10px;font-size:14px;cursor:pointer;color:var(--el-text-color-secondary);border-radius:8px;transition:all .3s}
+.tab.active{background:#fff;color:var(--el-text-color-primary);font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+</style>
+</head>
+<body>
+
+<!-- ====== TABS ====== -->
+<div class="tabs" style="position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:999;max-width:600px">
+  <div class="tab active" onclick="showPage('dashboard')">仪表盘</div>
+  <div class="tab" onclick="showPage('options')">首选项</div>
+  <div class="tab" onclick="showPage('init')">初始化</div>
+  <div class="tab" onclick="showPage('login')">登录</div>
+</div>
+
+<div class="app" id="app">
+
+<!-- Sidebar -->
+<div class="sidebar">
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="4"/></svg>
+    <span>Tauri 面容解锁</span>
+  </div>
+  <div class="menu">
+    <div class="menu-item active"><span class="menu-dot"></span>仪表盘</div>
+    <div class="menu-item"><span class="menu-dot"></span>面容管理</div>
+    <div class="menu-item"><span class="menu-dot"></span>首选项</div>
+    <div class="menu-item"><span class="menu-dot"></span>日志</div>
+  </div>
+  <div class="footer">
+    <span>🌙</span>
+    <div class="ver">版本 v 0.5.0</div>
+    <div style="font-size:12px;color:var(--el-text-color-placeholder)">检查更新</div>
+    <div class="tag">系统服务已就绪</div>
+  </div>
+</div>
+
+<!-- Main Content -->
+<div class="main">
+  <div class="header">仪表盘</div>
+
+  <!-- ====== DASHBOARD PAGE ====== -->
+  <div class="content" id="page-dashboard">
+    <div style="margin-bottom:24px">
+      <div style="font-size:11px;color:#b89538;letter-spacing:.2em;text-transform:uppercase;margin-bottom:4px">DASHBOARD · 仪表盘</div>
+      <div style="font-size:28px;font-weight:400;font-family:serif;background:linear-gradient(105deg,#141210,#b89538,#141210);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px">欢迎回来，管理员</div>
+      <div style="font-size:13px;color:var(--el-text-color-secondary)">系统当前运行状态：<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:rgba(92,158,96,.15);color:#5c9e60;font-size:12px;font-weight:600">安全</span></div>
+    </div>
+
+    <div class="card-grid">
+      <div class="card"><div class="card-icon" style="background:rgba(184,149,56,.12);color:#b89538">📷</div><div><div class="card-label">面容样本</div><div class="card-num">2 <span style="font-size:13px;color:var(--el-text-color-placeholder)">个</span></div></div></div>
+      <div class="card"><div class="card-icon" style="background:rgba(92,158,96,.12);color:#5c9e60">✓</div><div><div class="card-label">今日成功</div><div class="card-num">5 <span style="font-size:13px;color:var(--el-text-color-placeholder)">次</span></div></div></div>
+      <div class="card"><div class="card-icon" style="background:rgba(184,40,40,.12);color:#d9443e">✕</div><div><div class="card-label">已拦截</div><div class="card-num">0 <span style="font-size:13px;color:var(--el-text-color-placeholder)">次</span></div></div></div>
+    </div>
+
+    <div class="content-grid">
+      <div class="panel">
+        <div class="panel-title">服务监控中心</div>
+        <div class="panel-row"><div><div class="panel-name">WinLogon 凭据提供程序</div><div class="panel-desc">系统登录对接</div></div><div><span class="status-dot on"></span><span class="status-text">就绪</span></div></div>
+        <div class="panel-row"><div><div class="panel-name">解锁核心服务</div><div class="panel-desc">面容认证服务运行中</div></div><div><span class="status-dot on"></span><span class="status-text">就绪</span></div></div>
+        <div class="panel-row"><div><div class="panel-name">摄像头传感器</div><div class="panel-desc">USB Camera</div></div><div><span class="status-dot on"></span><span class="status-text">就绪</span></div></div>
+        <div class="panel-row"><div><div class="panel-name">人脸识别模型</div><div class="panel-desc">OpenCV DNN</div></div><div><span class="status-dot on"></span><span class="status-text">就绪</span></div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title" style="display:flex;justify-content:space-between">今日登录统计 <span style="font-size:12px;color:#b89538;cursor:pointer">完整日志 →</span></div>
+        <div class="panel-row"><div style="display:flex;gap:14px"><span style="font-weight:600;color:#b89538">用户1</span><span style="color:var(--el-text-color-regular)">面容验证通过</span></div><span style="font-size:12px;color:var(--el-text-color-placeholder)">10:30</span></div>
+        <div class="panel-row"><div style="display:flex;gap:14px"><span style="font-weight:600;color:#b89538">用户2</span><span style="color:var(--el-text-color-regular)">面容验证通过</span></div><span style="font-size:12px;color:var(--el-text-color-placeholder)">10:15</span></div>
+        <div class="panel-row"><div style="display:flex;gap:14px"><span style="font-weight:600;color:var(--el-text-color-placeholder)">未知</span><span style="color:#d9443e">未知面容</span></div><span style="font-size:12px;color:var(--el-text-color-placeholder)">09:45</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== OPTIONS PAGE ====== -->
+  <div class="content" id="page-options" style="display:none">
+    <div class="opt-wrap">
+      <div class="opt-card">
+        <div class="opt-header">
+          <div class="opt-tab active">应用设置</div>
+          <div class="opt-tab">DLL 设置</div>
+          <div class="opt-tab">Passkey 插件</div>
+        </div>
+        <div class="opt-row"><div><div class="opt-label">摄像头</div><div class="opt-desc">选择用于人脸识别的摄像头</div></div><span style="font-size:14px;color:var(--el-text-color-regular)">USB Camera (0) ▾</span></div>
+        <div class="opt-row"><div><div class="opt-label">解锁亮度</div><div class="opt-desc">人脸识别时临时提高亮度（0=禁用）</div></div><span style="font-size:14px;color:var(--el-text-color-regular)">60%</span></div>
+        <div class="opt-row"><div><div class="opt-label">识别延时</div><div class="opt-desc">无脸多少秒后等待</div></div><span style="font-size:14px;color:var(--el-text-color-regular)">10 秒</span></div>
+        <div class="opt-row"><div><div class="opt-label">静默运行</div><div class="opt-desc">启动时不显示窗口</div></div><span style="display:inline-block;width:40px;height:22px;border-radius:11px;background:var(--el-border-color-base);position:relative"><span style="position:absolute;width:18px;height:18px;border-radius:50%;background:#fff;top:2px;left:2px;box-shadow:0 1px 3px rgba(0,0,0,.2)"></span></span></div>
+        <div class="opt-row"><div><div class="opt-label">开机自启</div><div class="opt-desc">系统启动时自动运行</div></div><span style="display:inline-block;width:40px;height:22px;border-radius:11px;background:#5c9e60;position:relative"><span style="position:absolute;width:18px;height:18px;border-radius:50%;background:#fff;top:2px;right:2px;box-shadow:0 1px 3px rgba(0,0,0,.2)"></span></span></div>
+        <div style="margin-top:24px;display:flex;gap:12px">
+          <button style="background:linear-gradient(135deg,#b82828,#6b1515)">同步至系统注册表</button>
+          <button style="background:var(--el-bg-color);color:var(--el-text-color-regular);border:1px solid var(--el-border-color-base)">卸载 DLL 和服务</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== INIT PAGE ====== -->
+  <div class="content" id="page-init" style="display:none">
+    <div class="init-wrap">
+      <div class="init-card">
+        <div class="step-title">初始化向导</div>
+        <div class="steps">
+          <div class="step active"><span class="step-num">1</span>环境检查</div>
+          <span class="step-line"></span>
+          <div class="step"><span class="step-num">2</span>面容录入</div>
+          <span class="step-line"></span>
+          <div class="step"><span class="step-num">3</span>完成部署</div>
+        </div>
+        <div class="check-item"><span class="check-icon ok">✓</span> 管理员权限 — 已获取</div>
+        <div class="check-item"><span class="check-icon ok">✓</span> 摄像头检测 — 可用</div>
+        <div class="check-item"><span class="check-icon ok">✓</span> DLL 部署 — 待执行</div>
+        <div style="margin-top:24px;text-align:center">
+          <button>执行部署</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== LOGIN PAGE ====== -->
+  <div class="content" id="page-login" style="display:none;justify-content:center;align-items:center">
+    <div style="width:420px;background:var(--el-bg-color);border:1px solid var(--el-border-color-light);border-radius:20px;padding:40px 36px;box-shadow:0 20px 50px -20px rgba(0,0,0,.15)">
+      <div style="text-align:center;margin-bottom:28px">
+        <div style="color:#b89538;margin-bottom:10px"><svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/></svg></div>
+        <div style="font-size:24px;font-weight:600;color:var(--el-text-color-primary)">FaceWinUnlock</div>
+        <div style="font-size:13px;color:var(--el-text-color-placeholder);margin-top:4px">面容解锁助手</div>
+      </div>
+      <div style="font-size:15px;color:var(--el-text-color-secondary);text-align:center;margin-bottom:16px">请输入应用登录密码</div>
+      <div style="padding:12px;background:var(--el-bg-color-overlay);border:1px solid var(--el-border-color-light);border-radius:8px;margin-bottom:12px;font-size:14px;color:var(--el-text-color-placeholder)">请输入密码</div>
+      <button style="width:100%;padding:12px;font-size:16px;border-radius:10px">登录</button>
+      <div style="text-align:center;margin-top:20px;padding-top:14px;border-top:1px solid var(--el-border-color-light);font-size:12px;color:var(--el-text-color-placeholder)">v 0.5.0</div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+function showPage(name) {
+  document.querySelectorAll('.content').forEach(e=>e.style.display='none');
+  document.getElementById('page-'+name).style.display=name==='login'?'flex':'block';
+  document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
+  event.target.classList.add('active');
+  // Update header
+  const titles = {dashboard:'仪表盘', options:'首选项', init:'初始化向导', login:'登录'};
+  document.querySelector('.header').textContent = titles[name];
+}
+</script>
+</body>
+</html>

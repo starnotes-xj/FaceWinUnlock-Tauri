@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <defs>
+    <!-- Palette from zerosoul/chinese-colors:
+      鸦青 #424c50, 靛蓝 #065279, 藏青 #2e4e7e, 黛 #4a4266,
+      胭脂 #9d2933, 朱红 #ff4c00, 玉色 #2edfa3, 石青 #7bcfa6,
+      赤金 #f2be45, 金色 #eacd76, 紫檀 #4c221b, 月白 #d6ecf0
+    -->
+    <linearGradient id="night" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#392f41"/>
+      <stop offset=".38" stop-color="#065279"/>
+      <stop offset=".72" stop-color="#424c50"/>
+      <stop offset="1" stop-color="#4c221b"/>
+    </linearGradient>
+    <radialGradient id="light" cx="66%" cy="20%" r="60%">
+      <stop offset="0" stop-color="#2edfa3" stop-opacity=".36"/>
+      <stop offset=".44" stop-color="#065279" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="jade" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#d6ecf0"/><stop offset=".52" stop-color="#2edfa3"/><stop offset="1" stop-color="#057748"/></linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#f2be45"/><stop offset=".5" stop-color="#eacd76"/><stop offset="1" stop-color="#f2be45"/></linearGradient>
+    <linearGradient id="red" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff4c00"/><stop offset="1" stop-color="#9d2933"/></linearGradient>
+    <pattern id="bgBrocade" width="126" height="126" patternUnits="userSpaceOnUse">
+      <path d="M63 10 C85 30 104 42 116 63 C104 84 85 96 63 116 C41 96 22 84 10 63 C22 42 41 30 63 10Z" fill="none" stroke="#eacd76" stroke-width="1.3" opacity=".22"/>
+      <path d="M63 32 C78 42 88 50 92 63 C88 76 78 84 63 94 C48 84 38 76 34 63 C38 50 48 42 63 32Z" fill="none" stroke="#2edfa3" stroke-width="1" opacity=".17"/>
+      <circle cx="63" cy="63" r="5" fill="#ff4c00" opacity=".16"/>
+    </pattern>
+    <pattern id="keyfret" width="76" height="76" patternUnits="userSpaceOnUse"><path d="M8 8 H60 V24 H24 V50 H66 V68 H8Z" fill="none" stroke="#eacd76" stroke-width="2.2" opacity=".46"/><path d="M20 20 H48 V34 H34 V46 H56" fill="none" stroke="#2edfa3" stroke-width="1.2" opacity=".26"/></pattern>
+    <pattern id="cloudCircuit" width="154" height="96" patternUnits="userSpaceOnUse"><path d="M8 58 C34 58 30 34 56 34 C75 34 84 48 93 60 C114 34 148 38 154 68 C176 66 190 78 194 92 L34 92" fill="none" stroke="#f2be45" stroke-width="1.7" opacity=".35"/><path d="M56 34 H84 V60 H118 V40 H154 M93 60 V90 M118 60 H142" fill="none" stroke="#2edfa3" stroke-width="1.1" opacity=".34"/></pattern>
+    <pattern id="waves" width="150" height="76" patternUnits="userSpaceOnUse"><path d="M0 60 C20 24 55 24 75 60 C95 24 130 24 150 60" fill="none" stroke="#2edfa3" stroke-width="2.4" opacity=".3"/><path d="M0 70 C20 42 55 42 75 70 C95 42 130 42 150 70" fill="none" stroke="#f2be45" stroke-width="1.5" opacity=".28"/></pattern>
+    <pattern id="mountain" width="128" height="96" patternUnits="userSpaceOnUse"><path d="M0 92 L26 42 L48 92 L74 24 L110 92 L128 54" fill="none" stroke="#eacd76" stroke-width="2" opacity=".26"/><path d="M8 92 L38 62 L66 92 L98 50 L126 92" fill="none" stroke="#2edfa3" stroke-width="1.4" opacity=".22"/></pattern>
+    <pattern id="crackle" width="160" height="136" patternUnits="userSpaceOnUse"><path d="M12 42 L48 20 L82 54 L124 28 L152 64 M36 118 L72 86 L116 112 L152 84 M82 54 L72 86 M124 28 L116 112" fill="none" stroke="#d6ecf0" stroke-width="1" opacity=".16"/><path d="M20 74 L56 68 L88 86 L126 76" fill="none" stroke="#2edfa3" stroke-width="1" opacity=".18"/></pattern>
+    <pattern id="lattice" width="90" height="90" patternUnits="userSpaceOnUse"><path d="M0 45 H90 M45 0 V90 M16 16 L74 74 M74 16 L16 74" stroke="#eacd76" stroke-width="1.1" opacity=".24"/><circle cx="45" cy="45" r="14" fill="none" stroke="#2edfa3" stroke-width="1" opacity=".18"/></pattern>
+    <pattern id="coin" width="86" height="86" patternUnits="userSpaceOnUse"><circle cx="43" cy="43" r="27" fill="none" stroke="#f2be45" stroke-width="1.6" opacity=".3"/><rect x="33" y="33" width="20" height="20" fill="none" stroke="#2edfa3" stroke-width="1.2" opacity=".22"/></pattern>
+    <pattern id="flower" width="112" height="112" patternUnits="userSpaceOnUse"><path d="M56 18 C66 38 88 38 94 56 C76 62 76 84 56 94 C36 84 36 62 18 56 C24 38 46 38 56 18Z" fill="none" stroke="#ff4c00" stroke-width="1.5" opacity=".28"/><circle cx="56" cy="56" r="10" fill="none" stroke="#f2be45" stroke-width="1.2" opacity=".32"/></pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#000" flood-opacity=".5"/></filter>
+    <style>
+      .font{font-family:"Microsoft YaHei UI","Noto Sans CJK SC","Segoe UI",sans-serif}
+      .title{fill:#fffbf0;font-size:40px;font-weight:880;letter-spacing:2px}
+      .sub{fill:#b8d4d0;font-size:18px}
+      .tiny{fill:#2edfa3;font-size:12px;font-weight:850;letter-spacing:4px}
+      .h2{fill:#fffbf0;font-size:25px;font-weight:820}
+      .body{fill:#d6ecf0;font-size:18px}
+      .muted{fill:#93aaa7;font-size:14px}
+      .label{fill:#062027;font-size:16px;font-weight:850}
+      .white{fill:#fffbf0}
+      .num{fill:#fffbf0;font-size:46px;font-weight:900}
+      .seal{fill:#fffbf0;font-size:17px;font-weight:850;writing-mode:tb;letter-spacing:4px}
+    </style>
+  </defs>
+  <rect width="1800" height="1120" fill="url(#night)"/>
+  <rect width="1800" height="1120" fill="url(#light)"/>
+  <rect width="1800" height="1120" fill="url(#bgBrocade)" opacity=".95"/>
+  <rect y="890" width="1800" height="230" fill="url(#waves)" opacity=".8"/>
+  <path d="M1050 1012 L1145 792 L1236 1012Z M1190 1012 L1310 720 L1438 1012Z M1394 1012 L1490 830 L1588 1012Z" fill="#0c2732" stroke="#eacd76" stroke-opacity=".45"/>
+  <rect x="48" y="42" width="1704" height="1034" rx="44" fill="#06141b" opacity=".88" filter="url(#shadow)"/>
+  <rect x="48" y="42" width="1704" height="1034" rx="44" fill="none" stroke="url(#gold)" stroke-width="1.5"/>
+  <g class="font">
+    <rect x="82" y="76" width="292" height="968" rx="30" fill="#4c221b"/>
+    <rect x="82" y="76" width="292" height="968" rx="30" fill="url(#keyfret)" opacity=".45"/>
+    <rect x="110" y="110" width="236" height="94" rx="22" fill="#065279" opacity=".5"/>
+    <text x="132" y="144" fill="#eacd76" font-size="12" letter-spacing="4" font-weight="850">FACE GUARD</text>
+    <text x="132" y="184" class="white" font-size="28" font-weight="860">面容解锁</text>
+    <rect x="126" y="248" width="206" height="58" rx="18" fill="url(#jade)"/>
+    <text x="178" y="285" class="label">仪表盘</text>
+    <text x="146" y="382" class="sub">面容管理</text>
+    <text x="146" y="458" class="sub">通行密钥</text>
+    <text x="146" y="534" class="sub">安全场景</text>
+    <text x="146" y="610" class="sub">日志审计</text>
+    <rect x="130" y="704" width="214" height="84" rx="22" fill="#065279" opacity=".76"/>
+    <rect x="130" y="704" width="214" height="84" rx="22" fill="url(#cloudCircuit)" opacity=".45"/>
+    <text x="156" y="742" class="white" font-size="16" font-weight="820">当前守护状态</text>
+    <text x="156" y="770" fill="#2edfa3" font-size="18" font-weight="850">服务已就绪</text>
+    <rect x="136" y="846" width="76" height="120" rx="8" fill="url(#red)" transform="rotate(-6 174 906)"/>
+    <text x="162" y="868" class="seal">守护中</text>
+
+    <rect x="420" y="86" width="1248" height="120" rx="30" fill="#0d2933" stroke="#eacd76"/>
+    <rect x="420" y="86" width="1248" height="120" rx="30" fill="url(#cloudCircuit)" opacity=".52"/>
+    <text x="462" y="130" class="tiny">COLORS FROM ZEROSOUL / CHINESE-COLORS</text>
+    <text x="462" y="180" class="title">面容与通行密钥安全中枢</text>
+    <g transform="translate(1040 138)">
+      <rect width="42" height="22" rx="6" fill="#424c50"/><text x="0" y="44" class="muted">鸦青</text>
+      <rect x="58" width="42" height="22" rx="6" fill="#065279"/><rect x="116" width="42" height="22" rx="6" fill="#9d2933"/><rect x="174" width="42" height="22" rx="6" fill="#2edfa3"/><rect x="232" width="42" height="22" rx="6" fill="#f2be45"/><rect x="290" width="42" height="22" rx="6" fill="#d6ecf0"/>
+    </g>
+
+    <rect x="420" y="246" width="580" height="360" rx="34" fill="#09232d" stroke="#2edfa3"/>
+    <rect x="420" y="246" width="580" height="360" rx="34" fill="url(#lattice)" opacity=".42"/>
+    <text x="464" y="302" class="h2">身份识别核</text>
+    <text x="464" y="336" class="muted">窗棂纹：面容、活体、Passkey 路径</text>
+    <circle cx="710" cy="432" r="118" fill="#07171f" stroke="#f2be45" stroke-width="2.5"/>
+    <circle cx="710" cy="432" r="86" fill="#0c2b36" stroke="#2edfa3" stroke-width="2"/>
+    <path d="M672 432 C680 382 740 382 748 432 C740 490 680 490 672 432Z" fill="url(#jade)"/>
+    <circle cx="710" cy="432" r="10" fill="#06141b"/>
+    <path d="M568 432 H480 M852 432 H940 M710 288 V232 M710 576 V628" stroke="#ff4c00" stroke-width="2" opacity=".46"/>
+
+    <rect x="1040" y="246" width="300" height="168" rx="30" fill="#0d2933" stroke="#f2be45"/>
+    <rect x="1040" y="246" width="300" height="168" rx="30" fill="url(#coin)" opacity=".58"/>
+    <text x="1078" y="300" class="h2">服务</text>
+    <text x="1078" y="356" class="body">后台已就绪</text>
+    <rect x="1218" y="320" width="82" height="36" rx="14" fill="#2edfa3"/>
+    <text x="1242" y="344" class="label">正常</text>
+
+    <rect x="1370" y="246" width="298" height="168" rx="30" fill="#111f2c" stroke="#d6ecf0"/>
+    <rect x="1370" y="246" width="298" height="168" rx="30" fill="url(#crackle)" opacity=".72"/>
+    <text x="1408" y="300" class="h2">夜间</text>
+    <text x="1408" y="356" class="body">无白块目标</text>
+    <rect x="1542" y="320" width="82" height="36" rx="14" fill="#9d2933"/>
+    <text x="1566" y="344" class="white" font-size="16" font-weight="850">修复</text>
+
+    <rect x="1040" y="442" width="628" height="164" rx="30" fill="#1e2638" stroke="#9d2933"/>
+    <rect x="1040" y="442" width="628" height="164" rx="30" fill="url(#flower)" opacity=".55"/>
+    <text x="1080" y="496" class="h2">通行密钥</text>
+    <text x="1080" y="550" class="num">0.5.0.4</text>
+    <rect x="1360" y="518" width="172" height="46" rx="16" fill="url(#jade)"/>
+    <text x="1394" y="547" class="label">启用流程</text>
+
+    <rect x="420" y="646" width="360" height="214" rx="32" fill="#0d2933" stroke="#f2be45"/>
+    <rect x="420" y="646" width="360" height="214" rx="32" fill="url(#crackle)" opacity=".72"/>
+    <text x="464" y="702" class="h2">面容库</text>
+    <text x="464" y="778" class="num">2</text>
+    <text x="538" y="775" class="body">张已启用</text>
+    <path d="M462 820 C514 790 566 842 622 812 C678 782 724 816 758 796" fill="none" stroke="#ff4c00" stroke-width="3" opacity=".45"/>
+
+    <rect x="820" y="646" width="360" height="214" rx="32" fill="#102d38" stroke="#2edfa3"/>
+    <rect x="820" y="646" width="360" height="214" rx="32" fill="url(#waves)" opacity=".58"/>
+    <text x="864" y="702" class="h2">人脸门</text>
+    <text x="864" y="752" class="body">登录前验证</text>
+    <rect x="864" y="794" width="130" height="40" rx="15" fill="url(#jade)"/>
+    <text x="898" y="820" class="label">开启</text>
+
+    <rect x="1220" y="646" width="448" height="214" rx="32" fill="#151d2b" stroke="#eacd76"/>
+    <rect x="1220" y="646" width="448" height="214" rx="32" fill="url(#mountain)" opacity=".62"/>
+    <text x="1264" y="702" class="h2">安全场景</text>
+    <text x="1264" y="752" class="body">登录 · 解锁 · UAC · 浏览器</text>
+    <rect x="1264" y="794" width="156" height="40" rx="15" fill="url(#red)"/>
+    <text x="1302" y="820" class="white" font-size="16" font-weight="850">人脸优先</text>
+
+    <rect x="420" y="900" width="1248" height="94" rx="30" fill="#0d2933" stroke="#f2be45"/>
+    <rect x="420" y="900" width="1248" height="94" rx="30" fill="url(#keyfret)" opacity=".36"/>
+    <text x="464" y="956" class="white" font-size="18">夜间版每区也使用独立纹样，后续实现需把 Element Plus 所有白底 token 替换为深色语义变量。</text>
+  </g>
+</svg>

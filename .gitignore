@@ -60,3 +60,5 @@ reverse_analysis/ghidra_project/
 reverse_analysis/*.dll
 reverse_analysis/*.bin
 C:/FaceWinUnlock/
+opencv-prebuilt/
+opencv-*.zip

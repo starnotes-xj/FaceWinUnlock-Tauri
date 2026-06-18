@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <defs>
+    <!-- Calm passkey palette from zerosoul/chinese-colors:
+      玄青 #3d3b4f, 黛蓝 #425066, 墨色 #50616d, 月白 #d6ecf0,
+      金色 #eacd76, 胭脂 #9d2933, 靛蓝 #065279
+    -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3d3b4f"/>
+      <stop offset=".5" stop-color="#425066"/>
+      <stop offset="1" stop-color="#1e2733"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="70%" cy="18%" r="62%">
+      <stop offset="0" stop-color="#d6ecf0" stop-opacity=".18"/>
+      <stop offset=".5" stop-color="#50616d" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#eacd76"/><stop offset=".5" stop-color="#f2be45"/><stop offset="1" stop-color="#eacd76"/></linearGradient>
+    <pattern id="ruyiCloud" width="190" height="118" patternUnits="userSpaceOnUse">
+      <path d="M16 74 C42 50 78 58 86 86 C112 48 168 56 176 96 L34 96 C12 96 0 86 16 74Z" fill="none" stroke="#eacd76" stroke-width="1.8" opacity=".28"/>
+      <path d="M58 72 C72 50 112 50 126 76 M92 90 C114 70 146 76 158 94" fill="none" stroke="#d6ecf0" stroke-width="1.2" opacity=".18"/>
+    </pattern>
+    <pattern id="lattice" width="92" height="92" patternUnits="userSpaceOnUse"><path d="M0 46 H92 M46 0 V92 M18 18 L74 74 M74 18 L18 74" stroke="#eacd76" stroke-width="1" opacity=".16"/><circle cx="46" cy="46" r="14" fill="none" stroke="#d6ecf0" stroke-width="1" opacity=".12"/></pattern>
+    <pattern id="beads" width="64" height="64" patternUnits="userSpaceOnUse"><circle cx="16" cy="16" r="3" fill="#eacd76" opacity=".2"/><circle cx="48" cy="48" r="3" fill="#d6ecf0" opacity=".16"/></pattern>
+    <pattern id="water" width="160" height="76" patternUnits="userSpaceOnUse"><path d="M0 58 C20 28 60 28 80 58 C100 28 140 28 160 58" fill="none" stroke="#d6ecf0" stroke-width="2" opacity=".22"/><path d="M0 68 C20 44 60 44 80 68 C100 44 140 44 160 68" fill="none" stroke="#eacd76" stroke-width="1.3" opacity=".2"/></pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#000" flood-opacity=".44"/></filter>
+    <style>
+      .font{font-family:"Microsoft YaHei UI","Noto Sans CJK SC","Segoe UI",sans-serif}
+      .title{fill:#e0eee8;font-size:40px;font-weight:860;letter-spacing:2px}
+      .tiny{fill:#eacd76;font-size:12px;font-weight:850;letter-spacing:4px}
+      .h2{fill:#e0eee8;font-size:25px;font-weight:820}
+      .body{fill:#d6ecf0;font-size:18px}
+      .muted{fill:#9fb1b5;font-size:14px}
+      .label{fill:#1f2733;font-size:16px;font-weight:850}
+      .seal{fill:#e0eee8;font-size:17px;font-weight:850;writing-mode:tb;letter-spacing:4px}
+    </style>
+  </defs>
+  <rect width="1800" height="1120" fill="url(#bg)"/>
+  <rect width="1800" height="1120" fill="url(#glow)"/>
+  <rect width="1800" height="1120" fill="url(#ruyiCloud)" opacity=".9"/>
+  <rect y="900" width="1800" height="220" fill="url(#water)" opacity=".75"/>
+  <rect x="74" y="64" width="1652" height="992" rx="44" fill="#182534" opacity=".91" filter="url(#shadow)"/>
+  <rect x="74" y="64" width="1652" height="992" rx="44" fill="none" stroke="url(#gold)" stroke-width="1.4"/>
+  <g class="font">
+    <rect x="118" y="108" width="1588" height="112" rx="30" fill="#243449" stroke="#eacd76"/>
+    <rect x="118" y="108" width="1588" height="112" rx="30" fill="url(#ruyiCloud)" opacity=".36"/>
+    <text x="160" y="150" class="tiny">PASSKEY PROVIDER · CALM NIGHT</text>
+    <text x="160" y="196" class="title">通行密钥管理器</text>
+    <rect x="1398" y="136" width="170" height="54" rx="18" fill="#263747" stroke="#50616d"/>
+    <text x="1432" y="170" class="body">中文 / EN</text>
+
+    <rect x="118" y="262" width="460" height="268" rx="34" fill="#263747" stroke="#d6ecf0" stroke-opacity=".34"/>
+    <rect x="118" y="262" width="460" height="268" rx="34" fill="url(#lattice)" opacity=".42"/>
+    <text x="166" y="322" class="h2">插件状态</text>
+    <rect x="166" y="366" width="140" height="42" rx="15" fill="#eacd76"/>
+    <text x="204" y="393" class="label">已启用</text>
+    <text x="166" y="454" class="body">0.5.0.4 · FaceWinUnlock Provider</text>
+
+    <rect x="620" y="262" width="460" height="268" rx="34" fill="#203447" stroke="#eacd76" stroke-opacity=".45"/>
+    <rect x="620" y="262" width="460" height="268" rx="34" fill="url(#beads)" opacity=".6"/>
+    <text x="668" y="322" class="h2">凭据索引</text>
+    <text x="668" y="366" class="body">本地库是源；Windows 只保存索引。</text>
+    <rect x="668" y="424" width="190" height="52" rx="18" fill="#eacd76"/>
+    <text x="706" y="457" class="label">同步索引</text>
+
+    <rect x="1122" y="262" width="460" height="268" rx="34" fill="#273249" stroke="#eacd76" stroke-opacity=".42"/>
+    <rect x="1122" y="262" width="460" height="268" rx="34" fill="url(#ruyiCloud)" opacity=".28"/>
+    <text x="1170" y="322" class="h2">人脸门</text>
+    <text x="1170" y="366" class="body">通行密钥操作前先做人脸验证。</text>
+    <rect x="1170" y="424" width="138" height="42" rx="15" fill="#d6ecf0"/>
+    <text x="1208" y="451" class="label">开启</text>
+    <text x="1170" y="494" class="muted">隐藏密码库/PRF 示例术语。</text>
+
+    <rect x="118" y="574" width="1464" height="238" rx="36" fill="#203447" stroke="#eacd76" stroke-opacity=".42"/>
+    <rect x="118" y="574" width="1464" height="238" rx="36" fill="url(#water)" opacity=".36"/>
+    <text x="166" y="634" class="h2">凭据</text>
+    <rect x="166" y="682" width="620" height="84" rx="24" fill="#263747" stroke="#d6ecf0" stroke-opacity=".3"/>
+    <circle cx="208" cy="724" r="20" fill="#d6ecf0"/>
+    <text x="248" y="718" class="body">facewin-test</text>
+    <text x="248" y="748" class="muted">webauthn.io · 已同步索引 · 可登录</text>
+    <path d="M900 718 C970 672 1038 748 1114 706 C1188 664 1248 734 1324 694 C1388 662 1440 690 1492 666" fill="none" stroke="#eacd76" stroke-width="3" opacity=".42"/>
+    <path d="M900 756 C970 718 1036 784 1118 744 C1190 708 1248 770 1324 734 C1388 704 1448 730 1492 706" fill="none" stroke="#d6ecf0" stroke-width="2" opacity=".26"/>
+
+    <rect x="118" y="850" width="930" height="96" rx="28" fill="#263747" stroke="#d6ecf0" stroke-opacity=".3"/>
+    <rect x="118" y="850" width="930" height="96" rx="28" fill="url(#ruyiCloud)" opacity=".28"/>
+    <text x="166" y="910" class="body">高级维护：删除 Windows 索引、重建本地库、调试日志。默认收起。</text>
+    <rect x="1260" y="840" width="82" height="126" rx="9" fill="#9d2933" transform="rotate(4 1301 903)"/>
+    <text x="1288" y="864" class="seal">安全</text>
+  </g>
+</svg>

@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <defs>
+    <linearGradient id="night" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#02050A"/>
+      <stop offset=".45" stop-color="#071B24"/>
+      <stop offset="1" stop-color="#120708"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="62%" cy="22%" r="58%">
+      <stop offset="0" stop-color="#62F0D8" stop-opacity=".34"/>
+      <stop offset=".48" stop-color="#0A5260" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="jade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#BFFEF3"/>
+      <stop offset=".55" stop-color="#3DD1BE"/>
+      <stop offset="1" stop-color="#0F6875"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFEAB0"/>
+      <stop offset=".55" stop-color="#B98A38"/>
+      <stop offset="1" stop-color="#FFF5CE"/>
+    </linearGradient>
+    <linearGradient id="red" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#E86148"/>
+      <stop offset="1" stop-color="#8A201D"/>
+    </linearGradient>
+    <pattern id="denseCloud" width="150" height="100" patternUnits="userSpaceOnUse">
+      <path d="M8 58 C34 58 30 34 56 34 C74 34 84 48 92 58 C112 32 144 38 148 68 C170 66 184 78 188 92 L34 92" fill="none" stroke="#D8B56D" stroke-width="1.6" opacity=".28"/>
+      <path d="M54 34 H82 V58 H116 V38 H148 M92 58 V90" fill="none" stroke="#55E8D4" stroke-width="1.1" opacity=".28"/>
+    </pattern>
+    <pattern id="waves" width="132" height="70" patternUnits="userSpaceOnUse">
+      <path d="M0 58 C18 26 48 26 66 58 C84 26 114 26 132 58" fill="none" stroke="#55E8D4" stroke-width="2.5" opacity=".32"/>
+      <path d="M0 66 C18 40 48 40 66 66 C84 40 114 40 132 66" fill="none" stroke="#E6C16D" stroke-width="1.4" opacity=".25"/>
+    </pattern>
+    <pattern id="crackle" width="160" height="140" patternUnits="userSpaceOnUse">
+      <path d="M12 42 L48 20 L82 54 L122 28 L150 64 M36 118 L70 88 L116 112 L152 86 M82 54 L70 88 M122 28 L116 112" fill="none" stroke="#BFFEF3" stroke-width="1.1" opacity=".12"/>
+    </pattern>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="22" stdDeviation="22" flood-color="#000" flood-opacity=".5"/>
+    </filter>
+    <style>
+      .font { font-family:"Microsoft YaHei UI","Noto Sans CJK SC","Segoe UI",sans-serif; }
+      .title { fill:#F9EBD1; font-size:40px; font-weight:850; letter-spacing:2px; }
+      .subtitle { fill:#B5C9C6; font-size:18px; }
+      .h2 { fill:#F9EBD1; font-size:26px; font-weight:780; }
+      .body { fill:#D8E8E5; font-size:18px; }
+      .muted { fill:#8FA8A5; font-size:15px; }
+      .label { fill:#061418; font-size:16px; font-weight:840; }
+      .num { fill:#F9EBD1; font-size:48px; font-weight:880; }
+      .nav { fill:#AEC6C2; font-size:18px; }
+      .seal { fill:#FFF2E4; font-size:17px; font-weight:850; writing-mode:tb; letter-spacing:4px; }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1120" fill="url(#night)"/>
+  <rect width="1800" height="1120" fill="url(#glow)"/>
+  <rect width="1800" height="1120" fill="url(#denseCloud)" opacity=".8"/>
+  <path d="M0 908 C200 850 340 960 520 900 C750 820 870 930 1070 860 C1280 784 1450 890 1800 770 L1800 1120 L0 1120Z" fill="#04121A"/>
+  <rect y="895" width="1800" height="225" fill="url(#waves)" opacity=".72"/>
+  <path d="M1110 990 L1200 790 L1290 990Z M1260 990 L1375 710 L1498 990Z M1438 990 L1528 830 L1610 990Z" fill="#0B2A34" stroke="#D8B56D" stroke-opacity=".45"/>
+
+  <rect x="56" y="50" width="1688" height="1018" rx="42" fill="#06131B" opacity=".9" filter="url(#shadow)"/>
+  <rect x="56" y="50" width="1688" height="1018" rx="42" fill="none" stroke="url(#gold)" stroke-width="1.4"/>
+  <rect x="92" y="86" width="1616" height="946" rx="30" fill="none" stroke="url(#jade)" stroke-width="1" opacity=".22"/>
+  <rect x="92" y="86" width="1616" height="946" rx="30" fill="url(#crackle)" opacity=".75"/>
+
+  <g class="font">
+    <rect x="92" y="86" width="296" height="946" rx="30" fill="#0C222C" stroke="#3ED3C2" stroke-opacity=".28"/>
+    <rect x="92" y="86" width="296" height="946" rx="30" fill="url(#denseCloud)" opacity=".28"/>
+    <text x="142" y="150" fill="#7AFFF0" font-size="12" letter-spacing="4" font-weight="850">FACE · GUARD</text>
+    <text x="142" y="202" class="title" font-size="30">面容解锁</text>
+    <rect x="136" y="256" width="210" height="58" rx="18" fill="url(#jade)"/>
+    <text x="190" y="293" class="label">仪表盘</text>
+    <text x="156" y="392" class="nav">面容管理</text>
+    <text x="156" y="468" class="nav">通行密钥</text>
+    <text x="156" y="544" class="nav">安全场景</text>
+    <text x="156" y="620" class="nav">日志审计</text>
+    <rect x="148" y="840" width="78" height="112" rx="8" fill="url(#red)" transform="rotate(-5 187 896)"/>
+    <text x="174" y="860" class="seal">守护中</text>
+
+    <text x="444" y="136" fill="#7AFFF0" font-size="12" letter-spacing="4" font-weight="850">PALACE FUTURISM · NIGHT THEME</text>
+    <text x="444" y="190" class="title">面容与通行密钥安全中枢</text>
+    <text x="444" y="226" class="subtitle">夜间不留白：云雷纹、电路云、冰裂面板、海水江崖同时参与信息层级。</text>
+
+    <rect x="444" y="268" width="720" height="360" rx="36" fill="#09232D" stroke="#42D9C7" stroke-opacity=".42"/>
+    <rect x="444" y="268" width="720" height="360" rx="36" fill="url(#denseCloud)" opacity=".22"/>
+    <text x="492" y="326" class="h2">身份识别核</text>
+    <text x="492" y="360" class="muted">面容授权 + 通行密钥签名路径</text>
+    <circle cx="806" cy="452" r="122" fill="#071820" stroke="url(#gold)" stroke-width="2"/>
+    <circle cx="806" cy="452" r="86" fill="none" stroke="#5CF0DB" stroke-width="2.2"/>
+    <path d="M768 452 C776 400 838 400 846 452 C838 510 776 510 768 452Z" fill="url(#jade)" opacity=".88"/>
+    <circle cx="806" cy="452" r="10" fill="#06131B"/>
+    <path d="M660 452 H538 M952 452 H1070 M806 306 V246 M806 596 V660" stroke="#5CF0DB" stroke-width="2" opacity=".48"/>
+    <rect x="514" y="430" width="120" height="42" rx="15" fill="url(#jade)"/>
+    <text x="546" y="457" class="label">面容</text>
+    <rect x="990" y="430" width="128" height="42" rx="15" fill="url(#gold)"/>
+    <text x="1020" y="457" class="label">签名</text>
+
+    <rect x="1208" y="268" width="382" height="360" rx="36" fill="#09232D" stroke="#D8B56D" stroke-opacity=".45"/>
+    <text x="1252" y="326" class="h2">状态流</text>
+    <g>
+      <rect x="1252" y="368" width="286" height="56" rx="18" fill="#0E3039" stroke="#42D9C7" stroke-opacity=".3"/>
+      <circle cx="1284" cy="396" r="12" fill="#55E8D4"/>
+      <text x="1310" y="402" class="body">Face 授权就绪</text>
+    </g>
+    <g>
+      <rect x="1252" y="446" width="286" height="56" rx="18" fill="#0E3039" stroke="#D8B56D" stroke-opacity=".3"/>
+      <circle cx="1284" cy="474" r="12" fill="#E6C16D"/>
+      <text x="1310" y="480" class="body">Passkey 索引同步</text>
+    </g>
+    <g>
+      <rect x="1252" y="524" width="286" height="56" rx="18" fill="#0E3039" stroke="#D8B56D" stroke-opacity=".3"/>
+      <circle cx="1284" cy="552" r="12" fill="#D9523F"/>
+      <text x="1310" y="558" class="body">夜间白块修复项</text>
+    </g>
+
+    <rect x="444" y="674" width="354" height="230" rx="32" fill="#0B222C" stroke="#D8B56D" stroke-opacity=".4"/>
+    <text x="488" y="732" class="h2">面容库</text>
+    <text x="488" y="808" class="num">2</text>
+    <text x="564" y="805" class="body">张已启用</text>
+    <path d="M488 852 C540 818 590 874 650 838 C700 808 744 838 778 816" fill="none" stroke="#55E8D4" stroke-width="3" opacity=".5"/>
+
+    <rect x="838" y="674" width="354" height="230" rx="32" fill="#0B222C" stroke="#D8B56D" stroke-opacity=".4"/>
+    <text x="882" y="732" class="h2">通行密钥</text>
+    <text x="882" y="808" class="num">0.5.0.4</text>
+    <rect x="882" y="846" width="160" height="42" rx="15" fill="url(#jade)"/>
+    <text x="914" y="873" class="label">启用流程</text>
+
+    <rect x="1232" y="674" width="358" height="230" rx="32" fill="#0B222C" stroke="#D8B56D" stroke-opacity=".4"/>
+    <text x="1276" y="732" class="h2">安全场景</text>
+    <text x="1276" y="784" class="body">登录 · 解锁 · UAC · 浏览器</text>
+    <text x="1276" y="826" class="muted">统一人脸门，不暴露测试型密码库术语。</text>
+    <rect x="1276" y="854" width="132" height="36" rx="14" fill="url(#red)"/>
+    <text x="1308" y="878" fill="#FFF2E4" font-size="16" font-weight="820">人脸优先</text>
+  </g>
+</svg>

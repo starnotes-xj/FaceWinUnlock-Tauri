@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <!-- v6 Passkey 插件管理器 · 夜间沉稳 · 精简主流程
+       主流程仅：插件状态 / 打开启用流程 / 凭据索引(同步凭据索引) / 人脸门 / 凭据列表 / 高级维护(折叠)
+       隐藏微软示例术语：密码库锁定 / 解锁方式 / 确认 / PRF
+       分区纹样：窗棂(状态) 连珠(索引) 如意云(人脸门) 海水(列表) 冰裂(高级维护) 锦纹(底) 回纹(顶栏) -->
+  <defs>
+    <linearGradient id="nightBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3d3b4f"/><stop offset=".45" stop-color="#3a4759"/><stop offset="1" stop-color="#1c2530"/>
+    </linearGradient>
+    <radialGradient id="moonCorner" cx="82%" cy="10%" r="50%">
+      <stop offset="0" stop-color="#d6ecf0" stop-opacity=".16"/><stop offset="1" stop-color="#d6ecf0" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#eacd76"/><stop offset=".5" stop-color="#f2be45"/><stop offset="1" stop-color="#eacd76"/></linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#283a4b"/><stop offset="1" stop-color="#1b2836"/></linearGradient>
+    <linearGradient id="indigoBar" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0a4a6e"/><stop offset="1" stop-color="#13324a"/></linearGradient>
+    <pattern id="brocade" width="86" height="86" patternUnits="userSpaceOnUse">
+      <path d="M43 5 L81 43 L43 81 L5 43Z" fill="none" stroke="#d6ecf0" stroke-width="1" opacity=".08"/>
+      <circle cx="43" cy="43" r="3.2" fill="#eacd76" opacity=".12"/>
+      <circle cx="5" cy="5" r="2" fill="#eacd76" opacity=".2"/><circle cx="81" cy="5" r="2" fill="#eacd76" opacity=".2"/>
+      <circle cx="5" cy="81" r="2" fill="#eacd76" opacity=".2"/><circle cx="81" cy="81" r="2" fill="#eacd76" opacity=".2"/>
+    </pattern>
+    <pattern id="ruyi" width="190" height="118" patternUnits="userSpaceOnUse">
+      <path d="M16 78 C42 54 78 62 86 90 C112 52 168 60 176 100 L34 100 C12 100 0 90 16 78Z" fill="none" stroke="#eacd76" stroke-width="1.8" opacity=".42"/>
+      <path d="M58 76 C72 54 112 54 126 80" fill="none" stroke="#d6ecf0" stroke-width="1.1" opacity=".28"/>
+    </pattern>
+    <pattern id="water" width="168" height="80" patternUnits="userSpaceOnUse">
+      <path d="M0 60 C21 30 63 30 84 60 C105 30 147 30 168 60" fill="none" stroke="#d6ecf0" stroke-width="2" opacity=".24"/>
+      <path d="M0 70 C21 46 63 46 84 70 C105 46 147 46 168 70" fill="none" stroke="#eacd76" stroke-width="1.4" opacity=".24"/>
+    </pattern>
+    <pattern id="lattice" width="90" height="90" patternUnits="userSpaceOnUse">
+      <path d="M0 45 H90 M45 0 V90 M0 0 L90 90 M90 0 L0 90" stroke="#eacd76" stroke-width="1" opacity=".15"/>
+      <rect x="33" y="33" width="24" height="24" fill="none" stroke="#d6ecf0" stroke-width="1" opacity=".18" transform="rotate(45 45 45)"/>
+    </pattern>
+    <pattern id="beads" width="56" height="56" patternUnits="userSpaceOnUse">
+      <circle cx="14" cy="14" r="3" fill="#eacd76" opacity=".24"/><circle cx="42" cy="42" r="3" fill="#d6ecf0" opacity=".2"/>
+      <circle cx="42" cy="14" r="2" fill="#d6ecf0" opacity=".22"/><circle cx="14" cy="42" r="2" fill="#eacd76" opacity=".26"/>
+    </pattern>
+    <pattern id="meander" width="40" height="20" patternUnits="userSpaceOnUse">
+      <path d="M3 17 V3 H37 M3 17 H29 V9 H15 V13" fill="none" stroke="#eacd76" stroke-width="1.6" opacity=".7"/>
+    </pattern>
+    <pattern id="icecrack" width="120" height="120" patternUnits="userSpaceOnUse">
+      <path d="M0 34 L40 52 L30 92 L72 112 M40 52 L82 30 L120 58 M82 30 L74 0 M30 92 L0 104 M72 112 L120 102 M82 30 L104 72 L72 112" fill="none" stroke="#d6ecf0" stroke-width="1" opacity=".22"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#000" flood-opacity=".44"/></filter>
+    <style>
+      .font{font-family:"Microsoft YaHei UI","Noto Sans CJK SC","Segoe UI",sans-serif}
+      .title{fill:#e0eee8;font-size:38px;font-weight:860;letter-spacing:2px}
+      .tiny{fill:#eacd76;font-size:12px;font-weight:850;letter-spacing:4px}
+      .h2{fill:#e6f0ec;font-size:24px;font-weight:820}
+      .body{fill:#cfe2e6;font-size:17px}
+      .muted{fill:#9fb1b5;font-size:14px}
+      .label{fill:#1c2530;font-size:16px;font-weight:850}
+      .seal{fill:#f3e2c4;font-size:16px;font-weight:850;writing-mode:tb;letter-spacing:5px}
+    </style>
+  </defs>
+
+  <rect width="1800" height="1120" fill="url(#nightBg)"/>
+  <rect width="1800" height="1120" fill="url(#brocade)"/>
+  <rect width="1800" height="1120" fill="url(#moonCorner)"/>
+  <rect y="916" width="1800" height="204" fill="url(#water)" opacity=".8"/>
+
+  <rect x="74" y="60" width="1652" height="1000" rx="42" fill="#172430" opacity=".93" filter="url(#shadow)"/>
+  <rect x="74" y="60" width="1652" height="1000" rx="42" fill="none" stroke="url(#gold)" stroke-width="1.5"/>
+
+  <g class="font">
+    <!-- 顶栏 + 回纹 + 语言切换 -->
+    <rect x="116" y="100" width="1568" height="116" rx="28" fill="#223247" stroke="#eacd76"/>
+    <rect x="126" y="106" width="1548" height="13" fill="url(#meander)" opacity=".7"/>
+    <rect x="126" y="197" width="1548" height="13" fill="url(#meander)" opacity=".7"/>
+    <text x="158" y="156" class="tiny">FACEWINUNLOCK PASSKEY · 沉稳夜间</text>
+    <text x="158" y="194" class="title">通行密钥管理器</text>
+    <rect x="1404" y="132" width="92" height="52" rx="16" fill="#eacd76"/>
+    <text x="1424" y="166" class="label">中文</text>
+    <rect x="1504" y="132" width="92" height="52" rx="16" fill="#22303f" stroke="#50616d"/>
+    <text x="1532" y="166" fill="#cfe2e6" font-size="16" font-weight="850">EN</text>
+
+    <!-- 行1：插件状态(窗棂) -->
+    <rect x="116" y="256" width="496" height="300" rx="32" fill="url(#panel)" stroke="#d6ecf0" stroke-opacity=".3"/>
+    <rect x="116" y="256" width="496" height="300" rx="32" fill="url(#lattice)" opacity=".5"/>
+    <text x="156" y="316" class="h2">插件状态</text>
+    <rect x="156" y="352" width="150" height="46" rx="16" fill="#eacd76"/>
+    <text x="186" y="382" class="label">已启用</text>
+    <text x="156" y="446" class="body">0.5.0.5 · FaceWinUnlock Provider</text>
+    <rect x="156" y="478" width="280" height="54" rx="18" fill="url(#indigoBar)" stroke="#eacd76" stroke-opacity=".7"/>
+    <text x="192" y="513" fill="#fffbf0" font-size="17" font-weight="850">打开注册 / 启用流程</text>
+
+    <!-- 行1：凭据索引(连珠) -->
+    <rect x="652" y="256" width="496" height="300" rx="32" fill="#223247" stroke="#eacd76" stroke-opacity=".5"/>
+    <rect x="652" y="256" width="496" height="300" rx="32" fill="url(#beads)" opacity=".7"/>
+    <text x="692" y="316" class="h2">凭据索引</text>
+    <text x="692" y="362" class="body">本地库是凭据来源，</text>
+    <text x="692" y="392" class="body">Windows 仅保存可登录索引。</text>
+    <rect x="692" y="430" width="220" height="56" rx="18" fill="#eacd76"/>
+    <text x="724" y="466" class="label">同步凭据索引</text>
+    <text x="692" y="520" class="muted">（原"全部写入缓存"，已改为易懂措辞）</text>
+
+    <!-- 行1：人脸门(如意云) -->
+    <rect x="1188" y="256" width="496" height="300" rx="32" fill="#223247" stroke="#eacd76" stroke-opacity=".5"/>
+    <rect x="1188" y="256" width="496" height="300" rx="32" fill="url(#ruyi)" opacity=".34"/>
+    <text x="1228" y="316" class="h2">人脸门</text>
+    <text x="1228" y="362" class="body">通行密钥操作前，</text>
+    <text x="1228" y="392" class="body">先经 FaceWinUnlock 人脸验证。</text>
+    <rect x="1228" y="430" width="120" height="46" rx="15" fill="#d6ecf0"/>
+    <text x="1262" y="461" class="label">已开启</text>
+    <text x="1228" y="520" class="muted">无 PIN · 无 Hello 弹窗 · 静默确认</text>
+
+    <!-- 行2：凭据列表(海水) -->
+    <rect x="116" y="588" width="1568" height="270" rx="34" fill="#1c3344" stroke="#eacd76" stroke-opacity=".45"/>
+    <rect x="116" y="588" width="1568" height="270" rx="34" fill="url(#water)" opacity=".4"/>
+    <text x="156" y="646" class="h2">凭据列表</text>
+    <rect x="156" y="678" width="724" height="150" rx="22" fill="#243449" stroke="#d6ecf0" stroke-opacity=".28"/>
+    <circle cx="208" cy="742" r="24" fill="#d6ecf0"/>
+    <path d="M196 742 C200 724 216 724 220 742 C216 760 200 760 196 742Z" fill="#1c3344"/>
+    <text x="252" y="724" class="body" font-size="20">facewin-live</text>
+    <text x="252" y="756" class="muted">webauthn.io · 已同步索引 · 可刷脸登录</text>
+    <rect x="752" y="716" width="104" height="40" rx="13" fill="#7bcfa6" opacity=".85"/>
+    <text x="778" y="742" class="label">可用</text>
+    <rect x="904" y="678" width="724" height="150" rx="22" fill="#243449" stroke="#d6ecf0" stroke-opacity=".2"/>
+    <circle cx="956" cy="742" r="24" fill="#9fb1b5"/>
+    <text x="1000" y="724" class="body" font-size="20">（更多凭据…）</text>
+    <text x="1000" y="756" class="muted">每行：用户名 · 站点 · 索引状态</text>
+    <path d="M1180 742 C1240 712 1300 768 1372 730 C1440 696 1500 748 1572 716" fill="none" stroke="#eacd76" stroke-width="2.5" opacity=".34"/>
+
+    <!-- 行3：高级维护折叠条(冰裂) + 朱砂印 -->
+    <rect x="116" y="890" width="1390" height="124" rx="28" fill="#22303f" stroke="#50616d"/>
+    <rect x="116" y="890" width="1390" height="124" rx="28" fill="url(#icecrack)" opacity=".6"/>
+    <path d="M156 952 l16 -16 l16 16" fill="none" stroke="#eacd76" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="210" y="940" class="h2" font-size="22">高级维护</text>
+    <text x="210" y="976" class="muted">删除 Windows 索引 · 重建本地库 · 调试日志（默认折叠，点击展开）</text>
+    <rect x="1540" y="884" width="92" height="136" rx="11" fill="#9d2933" stroke="#eacd76" stroke-width="1.5" transform="rotate(4 1586 952)"/>
+    <text x="1568" y="912" class="seal">安全守护</text>
+  </g>
+</svg>

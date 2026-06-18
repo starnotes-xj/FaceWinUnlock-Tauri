@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>通行密钥管理器 · v6 宫廷未来主义</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@400;500;600;700;900&family=Cinzel:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+/* v6 Passkey 插件管理器 · 复用主程序视觉系统 · 精简主流程 · 仅预览 */
+:root{
+  --bg1:#fffbf0; --bg2:#f6ead0; --bg3:#efe2cb;
+  --frame:#fffbf0; --card:#fffbf0; --card2:#fdf4df; --cool:#e9f2f4;
+  --ink:#1a3a47; --muted:#8a6f4a;
+  --gold:#eacd76; --gold2:#f2be45; --indigo:#065279; --red:#9d2933; --jade:#7bcfa6; --moon:#d6ecf0;
+  --pat-a:#065279; --pat-b:#eacd76; --pat-c:#9d2933;
+  --shadow:0 22px 50px -18px rgba(122,34,48,.34); --chip-ink:#1a3a47; --grain:.05;
+}
+[data-theme="dark"]{
+  --bg1:#3d3b4f; --bg2:#3a4759; --bg3:#1c2530;
+  --frame:#172430; --card:#223247; --card2:#1b2836; --cool:#1c3344;
+  --ink:#e6f0ec; --muted:#9fb1b5;
+  --gold:#eacd76; --gold2:#f2be45; --indigo:#0a4a6e; --red:#9d2933; --jade:#6fb39a; --moon:#d6ecf0;
+  --pat-a:#d6ecf0; --pat-b:#eacd76; --pat-c:#9d2933;
+  --shadow:0 26px 60px -16px rgba(0,0,0,.6); --chip-ink:#1a2530; --grain:.04;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:"Noto Serif SC","Source Han Serif SC","Songti SC",serif;
+  background:radial-gradient(60% 50% at 84% 8%,color-mix(in srgb,var(--moon) 55%,transparent),transparent 70%),
+    linear-gradient(135deg,var(--bg1),var(--bg2) 52%,var(--bg3));
+  color:var(--ink); min-height:100vh; overflow-x:hidden; transition:background .8s ease,color .8s ease; -webkit-font-smoothing:antialiased}
+.brush{font-family:"Ma Shan Zheng",cursive}
+.atmos{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden}
+.atmos svg{position:absolute}
+.clouds{inset:-10% -20%;width:140%;height:120%;opacity:.5;animation:drift 46s linear infinite;will-change:transform}
+[data-theme="dark"] .clouds{opacity:.4}
+.waves{left:-10%;bottom:-4%;width:120%;height:280px;opacity:.7;animation:bob 9s ease-in-out infinite alternate}
+.brocade-bg{inset:0;width:100%;height:100%;opacity:.5}
+.grain{position:fixed;inset:0;z-index:60;pointer-events:none;opacity:var(--grain);mix-blend-mode:multiply}
+[data-theme="dark"] .grain{mix-blend-mode:overlay;opacity:.07}
+.motes{position:fixed;inset:0;z-index:1;pointer-events:none;overflow:hidden}
+.mote{position:absolute;bottom:-12px;width:5px;height:5px;border-radius:50%;
+  background:radial-gradient(circle,var(--gold),transparent 70%);filter:blur(.4px);opacity:0;animation:rise linear infinite;will-change:transform,opacity}
+@keyframes drift{from{transform:translateX(0)}to{transform:translateX(-190px)}}
+@keyframes bob{from{transform:translateY(10px)}to{transform:translateY(-14px)}}
+@keyframes rise{0%{transform:translateY(0);opacity:0}12%{opacity:.9}88%{opacity:.7}100%{transform:translateY(-104vh) translateX(40px);opacity:0}}
+
+.stage{position:relative;z-index:2;max-width:1620px;margin:0 auto;padding:40px clamp(20px,3vw,56px);
+  perspective:1700px;perspective-origin:50% 40%}
+.frame{position:relative;border-radius:42px;background:color-mix(in srgb,var(--frame) 94%,transparent);
+  box-shadow:var(--shadow);overflow:hidden;padding:30px;transition:background .8s ease;
+  transform-style:preserve-3d;
+  transform:rotateX(var(--tilt-x,0deg)) rotateY(var(--tilt-y,0deg));
+  animation:frameIn 1s cubic-bezier(.16,1,.3,1) both}
+.frame::before{content:"";position:absolute;inset:0;border-radius:42px;padding:1.5px;
+  background:linear-gradient(120deg,var(--gold2),var(--gold),var(--gold2));
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;
+  pointer-events:none;opacity:0;animation:borderGlow 1.4s ease .3s forwards}
+@keyframes frameIn{
+  from{opacity:0;transform:translateY(26px) scale(.985) rotateX(var(--tilt-x,0deg)) rotateY(var(--tilt-y,0deg))}
+  to{opacity:1;transform:rotateX(var(--tilt-x,0deg)) rotateY(var(--tilt-y,0deg))}}
+@keyframes borderGlow{to{opacity:1}}
+
+.topbar{position:relative;border-radius:26px;background:var(--card2);overflow:hidden;padding:24px 32px;
+  box-shadow:inset 0 0 0 1px var(--gold);display:flex;align-items:center;justify-content:space-between;
+  animation:riseIn .8s cubic-bezier(.16,1,.3,1) .3s both}
+.topbar .meander{position:absolute;left:24px;right:24px;height:13px;opacity:.7}
+.topbar .meander.t{top:8px}.topbar .meander.b{bottom:8px}
+.brand{display:flex;align-items:center;gap:14px}
+.brand .mark{width:50px;height:50px;border-radius:50%;background:color-mix(in srgb,var(--card) 70%,#eedeb0);display:grid;place-items:center;box-shadow:inset 0 0 0 1.5px var(--gold)}
+.brand .mark svg{width:28px;height:28px}
+.brand .en{font:600 10px/1 "Cinzel",serif;letter-spacing:.32em;color:var(--gold)}
+.brand .zh{font:700 30px/1.1 "Ma Shan Zheng",cursive;color:var(--ink);margin-top:2px;
+  background:linear-gradient(100deg,var(--ink) 30%,var(--gold2) 50%,var(--ink) 70%);background-size:220% 100%;
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:shimmer 6s ease-in-out 1.2s infinite}
+@keyframes shimmer{0%,100%{background-position:120% 0}50%{background-position:-20% 0}}
+.token3d{position:relative;width:104px;height:72px;margin-left:auto;margin-right:18px;perspective:760px;pointer-events:none}
+.token3d .slab{position:absolute;inset:8px 12px;border-radius:16px;transform-style:preserve-3d;
+  animation:tokenRoll 7.5s cubic-bezier(.45,0,.55,1) infinite;
+  background:linear-gradient(145deg,color-mix(in srgb,var(--gold) 78%,var(--moon)),color-mix(in srgb,var(--indigo) 42%,var(--card)));
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--gold) 75%,transparent),0 18px 30px -18px rgba(0,0,0,.55)}
+.token3d .slab::before,.token3d .slab::after{content:"";position:absolute;inset:0;border-radius:16px;backface-visibility:hidden}
+.token3d .slab::before{background:
+  radial-gradient(circle at 32% 45%,var(--indigo) 0 9px,transparent 10px),
+  linear-gradient(90deg,transparent 42%,color-mix(in srgb,var(--indigo) 65%,transparent) 42% 48%,transparent 48%),
+  linear-gradient(145deg,color-mix(in srgb,var(--gold) 75%,transparent),color-mix(in srgb,var(--moon) 48%,transparent))}
+.token3d .slab::after{transform:rotateY(180deg) translateZ(3px);
+  background:repeating-linear-gradient(45deg,color-mix(in srgb,var(--gold) 48%,transparent) 0 5px,transparent 5px 13px)}
+.token3d .edge{position:absolute;inset:8px 12px;border-radius:16px;transform:translateZ(-8px);
+  background:color-mix(in srgb,var(--indigo) 70%,#000)}
+@keyframes tokenRoll{
+  0%,100%{transform:rotateX(13deg) rotateY(-24deg) translateZ(0)}
+  45%{transform:rotateX(-10deg) rotateY(22deg) translateZ(18px)}
+  70%{transform:rotateX(18deg) rotateY(160deg) translateZ(8px)}}
+.lang{display:flex;gap:10px}
+.lang button{font-family:"Noto Serif SC",serif;font-weight:700;font-size:16px;padding:11px 20px;border-radius:15px;cursor:pointer;border:none;transition:transform .3s,background .3s,color .3s}
+.lang .on{background:var(--gold);color:var(--chip-ink)}
+.lang .off{background:transparent;color:var(--muted);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--gold) 50%,transparent)}
+.lang button:hover{transform:translateY(-2px)}
+
+.grid{display:grid;gap:18px;grid-template-columns:repeat(3,1fr);margin-top:18px}
+.card{position:relative;border-radius:26px;padding:26px 28px;overflow:hidden;background:var(--card);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--gold) 70%,transparent);
+  transition:transform .5s cubic-bezier(.16,1,.3,1),box-shadow .5s,background .8s ease;
+  opacity:0;transform:translateY(26px);animation:riseIn .8s cubic-bezier(.16,1,.3,1) forwards;will-change:transform;
+  transform-style:preserve-3d}
+@keyframes riseIn{to{opacity:1;transform:none}}
+.card:hover{transform:translateY(-7px) translateZ(22px) rotateX(1.2deg) rotateY(-1deg);
+  box-shadow:inset 0 0 0 1.5px var(--gold),0 22px 44px -22px rgba(0,0,0,.5)}
+.card .pat{position:absolute;inset:0;pointer-events:none;transition:opacity .5s}
+.card:hover .pat{opacity:.95 !important}
+.card h2{font-size:24px;font-weight:700;color:var(--ink);position:relative}
+.card .desc{font-size:15px;color:var(--muted);margin-top:8px;position:relative;line-height:1.65}
+.tag{position:relative;z-index:2;display:inline-grid;place-items:center;padding:9px 18px;border-radius:14px;font-size:15px;font-weight:700;color:var(--chip-ink)}
+.tag.gold{background:var(--gold)}.tag.moon{background:var(--moon)}.tag.jade{background:var(--jade)}
+.btn{position:relative;z-index:2;display:inline-flex;align-items:center;gap:8px;padding:13px 22px;border-radius:15px;border:none;cursor:pointer;
+  font:700 16px/1 "Noto Serif SC",serif;background:linear-gradient(135deg,var(--indigo),#0a3a59);color:#fffbf0;
+  box-shadow:inset 0 0 0 1px rgba(234,205,118,.7);overflow:hidden;transition:transform .35s}
+[data-theme="dark"] .btn{background:var(--gold);color:#1a2530}
+.btn::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.4),transparent 70%);transform:translateX(-130%);transition:transform .7s}
+.btn:hover{transform:translateY(-2px)}.btn:hover::after{transform:translateX(130%)}
+.c-state .pat{opacity:.5}.c-index .pat{opacity:.72}.c-gate .pat{opacity:.36}
+.c-state{animation-delay:.4s}.c-index{animation-delay:.5s}.c-gate{animation-delay:.6s}
+.c-list{animation-delay:.72s}
+.c-state h2,.c-index h2,.c-gate h2{margin-bottom:4px}
+
+.gate-scan{position:absolute;right:24px;top:26px;width:60px;height:60px}
+.gate-scan .gr{transform-origin:center;animation:spin 6s linear infinite}
+.gate-scan .ga{transform-origin:center;animation:spin 3s cubic-bezier(.45,0,.55,1) infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.list{position:relative;border-radius:26px;padding:24px 28px;overflow:hidden;background:var(--cool);margin-top:18px;
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--gold) 55%,transparent);
+  opacity:0;transform:translateY(24px);animation:riseIn .8s cubic-bezier(.16,1,.3,1) .72s forwards}
+.list .pat{position:absolute;inset:0;opacity:.38;pointer-events:none}
+.list h2{font-size:24px;font-weight:700;position:relative;margin-bottom:16px}
+.rows{position:relative;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.row{display:flex;align-items:center;gap:16px;padding:16px 18px;border-radius:18px;background:color-mix(in srgb,var(--card) 88%,transparent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--moon) 22%,transparent);transition:transform .4s,box-shadow .4s}
+.row:hover{transform:translateX(4px);box-shadow:inset 0 0 0 1px var(--gold)}
+.row .av{width:46px;height:46px;border-radius:50%;flex:none;display:grid;place-items:center;background:var(--moon)}
+.row .av svg{width:26px;height:26px}
+.row .nm{font-size:19px;font-weight:600;color:var(--ink)}
+.row .mt{font-size:13px;color:var(--muted);margin-top:3px}
+.row .st{margin-left:auto}
+
+.adv{position:relative;display:flex;align-items:center;gap:18px;border-radius:22px;padding:20px 26px;overflow:hidden;margin-top:18px;
+  background:var(--card2);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--moon) 24%,transparent);cursor:pointer;
+  opacity:0;transform:translateY(20px);animation:riseIn .8s cubic-bezier(.16,1,.3,1) .85s forwards;transition:box-shadow .4s}
+.adv:hover{box-shadow:inset 0 0 0 1px var(--gold)}
+.adv .pat{position:absolute;inset:0;opacity:.6;pointer-events:none}
+.adv .chev{width:18px;height:18px;border-left:2.5px solid var(--gold);border-top:2.5px solid var(--gold);transform:rotate(45deg);transition:transform .4s;position:relative}
+.adv:hover .chev{transform:rotate(225deg)}
+.adv .t{position:relative}.adv .t h3{font-size:21px;font-weight:700;color:var(--ink)}.adv .t p{font-size:14px;color:var(--muted);margin-top:4px}
+.seal{position:relative;margin-left:auto;width:74px;height:108px;border-radius:9px;flex:none;
+  background:linear-gradient(160deg,#a82c37,#82222c);box-shadow:inset 0 0 0 1.5px var(--gold),0 8px 18px -8px #000;
+  display:grid;place-items:center;transform:rotate(4deg) scale(.4);opacity:0;animation:stamp .7s cubic-bezier(.34,1.56,.64,1) 1.4s forwards}
+.seal span{writing-mode:vertical-rl;font:700 16px/1 "Ma Shan Zheng",cursive;color:#fdeecf;letter-spacing:6px}
+@keyframes stamp{0%{transform:rotate(-12deg) scale(.4);opacity:0}60%{transform:rotate(6deg) scale(1.06);opacity:1}100%{transform:rotate(4deg) scale(1);opacity:1}}
+
+.toggle{position:fixed;top:30px;right:34px;z-index:70;width:56px;height:56px;border-radius:50%;
+  border:1.5px solid var(--gold);background:color-mix(in srgb,var(--frame) 85%,transparent);cursor:pointer;display:grid;place-items:center;box-shadow:var(--shadow);transition:transform .5s,background .8s}
+.toggle:hover{transform:rotate(28deg) scale(1.07)}
+.toggle svg{width:25px;height:25px;fill:var(--gold)}
+.toggle .sun{display:none}[data-theme="dark"] .toggle .sun{display:block}[data-theme="dark"] .toggle .moon{display:none}
+
+@media (prefers-reduced-motion:reduce){*{animation:none !important;transition:none !important}.card,.list,.adv,.seal{opacity:1 !important;transform:none !important}}
+@media (max-width:920px){.grid{grid-template-columns:1fr}.rows{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <pattern id="p-ruyi" width="190" height="118" patternUnits="userSpaceOnUse">
+    <path d="M16 78 C42 54 78 62 86 90 C112 52 168 60 176 100 L34 100 C12 100 0 90 16 78Z" fill="none" stroke-width="1.8" opacity=".5" style="stroke:var(--pat-b)"/>
+    <path d="M58 76 C72 54 112 54 126 80" fill="none" stroke-width="1.1" opacity=".3" style="stroke:var(--pat-a)"/></pattern>
+  <pattern id="p-water" width="168" height="80" patternUnits="userSpaceOnUse">
+    <path d="M0 60 C21 30 63 30 84 60 C105 30 147 30 168 60" fill="none" stroke-width="2" opacity=".32" style="stroke:var(--pat-a)"/>
+    <path d="M0 70 C21 46 63 46 84 70 C105 46 147 46 168 70" fill="none" stroke-width="1.4" opacity=".34" style="stroke:var(--pat-b)"/></pattern>
+  <pattern id="p-lattice" width="90" height="90" patternUnits="userSpaceOnUse">
+    <path d="M0 45 H90 M45 0 V90 M0 0 L90 90 M90 0 L0 90" stroke-width="1" opacity=".18" style="stroke:var(--pat-a)"/>
+    <rect x="33" y="33" width="24" height="24" fill="none" stroke-width="1" opacity=".22" transform="rotate(45 45 45)" style="stroke:var(--pat-c)"/></pattern>
+  <pattern id="p-beads" width="56" height="56" patternUnits="userSpaceOnUse">
+    <circle cx="14" cy="14" r="3" opacity=".22" style="fill:var(--pat-c)"/><circle cx="42" cy="42" r="3" opacity=".22" style="fill:var(--pat-a)"/>
+    <circle cx="42" cy="14" r="2" opacity=".34" style="fill:var(--pat-b)"/><circle cx="14" cy="42" r="2" opacity=".34" style="fill:var(--pat-b)"/></pattern>
+  <pattern id="p-brocade" width="86" height="86" patternUnits="userSpaceOnUse">
+    <path d="M43 5 L81 43 L43 81 L5 43Z" fill="none" stroke-width="1" opacity=".1" style="stroke:var(--pat-a)"/>
+    <circle cx="43" cy="43" r="3.2" opacity=".12" style="fill:var(--pat-c)"/>
+    <circle cx="5" cy="5" r="2" opacity=".24" style="fill:var(--pat-b)"/><circle cx="81" cy="5" r="2" opacity=".24" style="fill:var(--pat-b)"/>
+    <circle cx="5" cy="81" r="2" opacity=".24" style="fill:var(--pat-b)"/><circle cx="81" cy="81" r="2" opacity=".24" style="fill:var(--pat-b)"/></pattern>
+  <pattern id="p-meander" width="40" height="20" patternUnits="userSpaceOnUse">
+    <path d="M3 17 V3 H37 M3 17 H29 V9 H15 V13" fill="none" stroke-width="1.6" opacity=".75" style="stroke:var(--pat-b)"/></pattern>
+  <pattern id="p-ice" width="120" height="120" patternUnits="userSpaceOnUse">
+    <path d="M0 34 L40 52 L30 92 L72 112 M40 52 L82 30 L120 58 M82 30 L74 0 M30 92 L0 104 M72 112 L120 102 M82 30 L104 72 L72 112" fill="none" stroke-width="1" opacity=".24" style="stroke:var(--pat-a)"/></pattern>
+  <filter id="grainf"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
+</defs></svg>
+
+<div class="atmos">
+  <svg class="brocade-bg"><rect width="100%" height="100%" fill="url(#p-brocade)"/></svg>
+  <svg class="clouds"><rect width="100%" height="100%" fill="url(#p-ruyi)"/></svg>
+  <svg class="waves"><rect width="100%" height="100%" fill="url(#p-water)"/></svg>
+</div>
+<div class="motes" id="motes"></div>
+<svg class="grain"><rect width="100%" height="100%" filter="url(#grainf)"/></svg>
+
+<button class="toggle" id="themeBtn" title="日 / 夜">
+  <svg class="moon" viewBox="0 0 24 24"><path d="M12 2a9 9 0 1 0 9 9c0-.5 0-1-.1-1.5a6.5 6.5 0 0 1-8.4-8.4C12.5 2 12 2 12 2Z"/></svg>
+  <svg class="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M1 12h3M20 12h3M4 4l2 2M18 18l2 2M4 20l2-2M18 6l2-2" stroke-width="2" fill="none" stroke-linecap="round" style="stroke:var(--gold)"/></svg>
+</button>
+
+<div class="stage">
+ <div class="frame">
+
+  <div class="topbar">
+    <svg class="meander t"><rect width="100%" height="100%" fill="url(#p-meander)"/></svg>
+    <svg class="meander b"><rect width="100%" height="100%" fill="url(#p-meander)"/></svg>
+    <div class="brand">
+      <span class="mark"><svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="18" fill="none" stroke="#9d2933" stroke-width="1.5"/><path d="M11 20 C13 11 27 11 29 20 C27 29 13 29 11 20Z" fill="#9d2933"/><circle cx="20" cy="20" r="3" fill="#eedeb0"/></svg></span>
+      <div><div class="en">FACEWINUNLOCK PASSKEY</div><div class="zh brush">通行密钥管理器</div></div>
+    </div>
+    <div class="token3d" aria-hidden="true"><div class="edge"></div><div class="slab"></div></div>
+    <div class="lang"><button class="on">中文</button><button class="off">EN</button></div>
+  </div>
+
+  <div class="grid">
+    <div class="card c-state">
+      <svg class="pat"><rect width="100%" height="100%" fill="url(#p-lattice)"/></svg>
+      <h2>插件状态</h2>
+      <div style="margin:14px 0 16px"><span class="tag gold">已启用</span></div>
+      <div class="desc">0.5.0.5 · FaceWinUnlock Provider</div>
+      <div style="margin-top:18px"><button class="btn">打开注册 / 启用流程</button></div>
+    </div>
+
+    <div class="card c-index">
+      <svg class="pat"><rect width="100%" height="100%" fill="url(#p-beads)"/></svg>
+      <h2>凭据索引</h2>
+      <div class="desc">本地库是凭据来源，Windows 仅保存可登录索引。</div>
+      <div style="margin-top:20px"><button class="btn" style="background:var(--gold);color:var(--chip-ink);box-shadow:inset 0 0 0 1px rgba(0,0,0,.1)">同步凭据索引</button></div>
+      <div class="desc" style="margin-top:14px;opacity:.8">（原“全部写入缓存”，改为易懂措辞）</div>
+    </div>
+
+    <div class="card c-gate">
+      <svg class="pat"><rect width="100%" height="100%" fill="url(#p-ruyi)"/></svg>
+      <svg class="gate-scan" viewBox="-32 -32 64 64">
+        <circle class="gr" r="28" fill="none" stroke-width="2" stroke-dasharray="6 7" opacity=".8" style="stroke:var(--gold)"/>
+        <path class="ga" d="M0 -28 A28 28 0 0 1 24 -14" fill="none" stroke-width="3.5" stroke-linecap="round" style="stroke:var(--jade)"/>
+        <path d="M-9 0 C-7 -11 7 -11 9 0 C7 12 -7 12 -9 0Z" style="fill:var(--indigo)"/>
+      </svg>
+      <h2>人脸门</h2>
+      <div class="desc">通行密钥操作前，先经 FaceWinUnlock 人脸验证。</div>
+      <div style="margin:18px 0 12px"><span class="tag moon">已开启</span></div>
+      <div class="desc" style="opacity:.8">无 PIN · 无 Hello 弹窗 · 静默确认</div>
+    </div>
+  </div>
+
+  <div class="list c-list">
+    <svg class="pat"><rect width="100%" height="100%" fill="url(#p-water)"/></svg>
+    <h2>凭据列表</h2>
+    <div class="rows">
+      <div class="row">
+        <span class="av"><svg viewBox="0 0 40 40"><path d="M11 20 C13 11 27 11 29 20 C27 29 13 29 11 20Z" fill="#1c3344"/><circle cx="20" cy="20" r="3" fill="#d6ecf0"/></svg></span>
+        <div><div class="nm">facewin-live</div><div class="mt">webauthn.io · 已同步索引 · 可刷脸登录</div></div>
+        <span class="st"><span class="tag jade">可用</span></span>
+      </div>
+      <div class="row" style="opacity:.7">
+        <span class="av" style="background:var(--muted)"></span>
+        <div><div class="nm" style="color:var(--muted)">更多凭据…</div><div class="mt">每行：用户名 · 站点 · 索引状态</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="adv">
+    <svg class="pat"><rect width="100%" height="100%" fill="url(#p-ice)"/></svg>
+    <span class="chev"></span>
+    <div class="t"><h3>高级维护</h3><p>删除 Windows 索引 · 重建本地库 · 调试日志（默认折叠，点击展开）</p></div>
+    <div class="seal"><span>安全守护</span></div>
+  </div>
+
+ </div>
+</div>
+
+<script>
+const root=document.documentElement;
+document.getElementById('themeBtn').addEventListener('click',()=>{root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';});
+document.querySelectorAll('.lang button').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('.lang button').forEach(x=>{x.className='off'});b.className='on';}));
+const m=document.getElementById('motes');
+for(let i=0;i<14;i++){const s=document.createElement('span');s.className='mote';s.style.left=(Math.random()*100)+'%';
+  const d=9+Math.random()*12;s.style.animationDuration=d+'s';s.style.animationDelay=(-Math.random()*d)+'s';
+  s.style.transform='scale('+(.5+Math.random()*1.5)+')';m.appendChild(s);}
+const reduced=window.matchMedia('(prefers-reduced-motion: reduce)');
+const frame=document.querySelector('.frame');
+if(!reduced.matches){
+  frame.addEventListener('pointermove',e=>{
+    const r=frame.getBoundingClientRect();
+    const x=(e.clientX-r.left)/r.width-.5, y=(e.clientY-r.top)/r.height-.5;
+    root.style.setProperty('--tilt-x',(-y*3.1).toFixed(2)+'deg');
+    root.style.setProperty('--tilt-y',(x*4.2).toFixed(2)+'deg');
+  });
+  frame.addEventListener('pointerleave',()=>{
+    root.style.setProperty('--tilt-x','0deg');
+    root.style.setProperty('--tilt-y','0deg');
+  });
+}
+</script>
+</body>
+</html>

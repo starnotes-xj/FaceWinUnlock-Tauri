@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>面容解锁 · 安全中枢 · v7 墨韵星枢</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@300;400;500;600;700;900&family=ZCOOL+XiaoWei&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   v7 · Ink Cosmos · 墨韵星枢
+   中国传统水墨 × 宇宙深空 × 赛博金箔
+   前卫美学 — 不做中庸设计
+   ============================================================ */
+
+:root {
+  /* 墨色系 — 五墨：焦浓重淡清 */
+  --ink-char: #0a0a0c;
+  --ink-deep: #111318;
+  --ink-mid: #1a1e26;
+  --ink-fade: #242833;
+  --ink-light: #2d3340;
+
+  /* 金箔系 — 从暗金到亮金 */
+  --gold-deep: #8b6914;
+  --gold-mid: #c9a63e;
+  --gold-bright: #e8d07a;
+  --gold-pale: #f5e6b8;
+  --gold-foil: linear-gradient(135deg, #8b6914 0%, #c9a63e 25%, #e8d07a 50%, #c9a63e 75%, #8b6914 100%);
+
+  /* 朱砂系 */
+  --cinnabar: #c23531;
+  --cinnabar-bright: #e8554a;
+  --cinnabar-deep: #8b1a1a;
+
+  /* 青黛系 */
+  --indigo: #1e3a5f;
+  --indigo-bright: #2d5f9e;
+  --indigo-pale: #4a7fb5;
+
+  /* 月白 */
+  --moon: #d6e4f0;
+  --moon-dim: #a0b4c8;
+
+  /* 玉色 */
+  --jade: #5b8c5a;
+  --jade-bright: #7bc67e;
+
+  /* 功能色 */
+  --text-primary: #e8e0d0;
+  --text-secondary: #a09888;
+  --text-dim: #6a6258;
+  --surface-card: rgba(20, 24, 35, 0.85);
+  --surface-sidebar: rgba(10, 12, 16, 0.95);
+  --border-subtle: rgba(201, 166, 62, 0.18);
+  --border-active: rgba(201, 166, 62, 0.6);
+  --glow-gold: 0 0 30px rgba(201, 166, 62, 0.3), 0 0 80px rgba(201, 166, 62, 0.1);
+  --glow-cinnabar: 0 0 30px rgba(194, 53, 49, 0.4), 0 0 60px rgba(194, 53, 49, 0.15);
+  --glow-eye: 0 0 50px rgba(201, 166, 62, 0.5), 0 0 120px rgba(201, 166, 62, 0.2), 0 0 200px rgba(232, 212, 122, 0.1);
+}
+
+[data-theme="light"] {
+  --ink-char: #f5f0e8;
+  --ink-deep: #ede6d8;
+  --ink-mid: #e0d6c0;
+  --ink-fade: #d4c8b0;
+  --ink-light: #c8bba0;
+  --text-primary: #1a1814;
+  --text-secondary: #5a5040;
+  --text-dim: #8a7e6a;
+  --surface-card: rgba(245, 240, 232, 0.9);
+  --surface-sidebar: rgba(240, 232, 218, 0.95);
+  --border-subtle: rgba(139, 105, 20, 0.2);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0 }
+html, body { height: 100%; overflow: hidden }
+
+body {
+  font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+  background: var(--ink-char);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  transition: background 1.2s ease, color 1.2s ease;
+  cursor: default;
+  user-select: none;
+}
+
+/* ============================================
+   BACKGROUND — 墨韵深空
+   ============================================ */
+.bg-layer {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  overflow: hidden;
+}
+
+/* 水墨晕染底纹 */
+.ink-wash {
+  position: absolute; inset: -10%;
+  background:
+    radial-gradient(ellipse 80% 60% at 20% 15%, rgba(201,166,62,0.06) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 80% at 75% 60%, rgba(30,58,95,0.12) 0%, transparent 55%),
+    radial-gradient(ellipse 50% 50% at 40% 80%, rgba(194,53,49,0.04) 0%, transparent 50%),
+    radial-gradient(ellipse 70% 70% at 85% 20%, rgba(201,166,62,0.05) 0%, transparent 50%);
+  animation: inkDrift 30s ease-in-out infinite;
+  will-change: transform;
+}
+
+@keyframes inkDrift {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  25% { transform: translate(2%, -1%) scale(1.03); }
+  50% { transform: translate(-1%, 1.5%) scale(0.97); }
+  75% { transform: translate(1.5%, -0.5%) scale(1.02); }
+}
+
+/* 金箔粒子 */
+.particle-field {
+  position: absolute; inset: 0;
+}
+.particle {
+  position: absolute;
+  width: 2px; height: 2px;
+  border-radius: 50%;
+  background: var(--gold-bright);
+  filter: blur(0.5px);
+  animation: floatUp linear infinite;
+  opacity: 0;
+  will-change: transform, opacity;
+}
+@keyframes floatUp {
+  0% { transform: translateY(0) translateX(0) scale(0); opacity: 0; }
+  10% { opacity: 0.9; }
+  20% { opacity: 0.6; }
+  80% { opacity: 0.3; }
+  100% { transform: translateY(-100vh) translateX(30px) scale(1.2); opacity: 0; }
+}
+
+/* 宣纸纹理覆盖 */
+.paper-grain {
+  position: absolute; inset: 0;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+  background-size: 256px 256px;
+  mix-blend-mode: overlay;
+}
+
+/* ============================================
+   MAIN STAGE — 3D 透视容器
+   ============================================ */
+.stage {
+  position: relative; z-index: 1;
+  height: 100vh; display: flex; align-items: center; justify-content: center;
+  perspective: 2000px; perspective-origin: 50% 45%;
+  padding: 20px;
+}
+
+/* 外框 — 墨色匣子，带金边 */
+.frame {
+  width: 100%; max-width: 1600px; height: 92vh;
+  border-radius: 24px;
+  display: grid;
+  grid-template-columns: 270px 1fr;
+  overflow: hidden;
+  background: var(--surface-card);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+  border: 1px solid var(--border-subtle);
+  box-shadow:
+    0 0 0 1px var(--border-subtle),
+    0 40px 100px -30px rgba(0,0,0,0.6),
+    var(--glow-gold);
+  transform-style: preserve-3d;
+  transform: rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg));
+  transition: border-color 0.8s ease, box-shadow 0.8s ease;
+  animation: frameEnter 1.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.frame::before {
+  content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  border-radius: 24px;
+  padding: 1px;
+  background: linear-gradient(135deg,
+    transparent 0%, var(--gold-mid) 15%, transparent 35%,
+    var(--gold-bright) 55%, transparent 75%, var(--gold-deep) 90%
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  opacity: 0; animation: borderReveal 1.5s ease 0.6s forwards;
+}
+
+@keyframes frameEnter {
+  from { opacity: 0; transform: translateY(40px) scale(0.96) rotateX(var(--tilt-x)) rotateY(var(--tilt-y)); }
+  to { opacity: 1; transform: rotateX(var(--tilt-x)) rotateY(var(--tilt-y)); }
+}
+@keyframes borderReveal {
+  from { opacity: 0; }
+  to { opacity: 0.8; }
+}
+
+/* ============================================
+   SIDEBAR — 墨碑
+   ============================================ */
+.sidebar {
+  position: relative; z-index: 1;
+  background: var(--surface-sidebar);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-right: 1px solid var(--border-subtle);
+  display: flex; flex-direction: column;
+  padding: 28px 20px;
+  animation: slideIn 1s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-40px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.brand-block {
+  display: flex; align-items: center; gap: 14px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* 品牌标识 — 旋转金环 */
+.brand-emblem {
+  width: 50px; height: 50px; flex-shrink: 0;
+  position: relative;
+}
+
+.brand-emblem .ring-outer {
+  position: absolute; inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-active);
+  animation: ringPulse 3s ease-in-out infinite;
+}
+.brand-emblem .ring-inner {
+  position: absolute; inset: 6px;
+  border-radius: 50%;
+  border: 1px solid rgba(201,166,62,0.5);
+  animation: ringPulse 3s ease-in-out 0.5s infinite reverse;
+}
+.brand-emblem .ring-core {
+  position: absolute; inset: 14px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--cinnabar) 30%, var(--cinnabar-deep) 70%);
+  box-shadow: 0 0 16px rgba(194,53,49,0.5);
+  animation: coreBreath 2.4s ease-in-out infinite;
+}
+@keyframes ringPulse {
+  0%, 100% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.08); opacity: 1; }
+}
+@keyframes coreBreath {
+  0%, 100% { transform: scale(1); filter: brightness(1); }
+  50% { transform: scale(1.1); filter: brightness(1.4); }
+}
+
+.brand-text .en {
+  font: 600 10px/1 "Georgia", serif;
+  letter-spacing: 0.35em;
+  color: var(--gold-mid);
+  text-transform: uppercase;
+}
+.brand-text .zh {
+  font: 400 22px/1.2 "ZCOOL XiaoWei", "Ma Shan Zheng", cursive;
+  color: var(--text-primary);
+  margin-top: 3px;
+}
+
+/* 导航 */
+.nav-list {
+  margin-top: 32px; display: flex; flex-direction: column; gap: 4px;
+  flex: 1;
+}
+.nav-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; border-radius: 12px;
+  font-size: 15px; color: var(--text-secondary);
+  cursor: pointer; position: relative;
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  overflow: hidden;
+}
+.nav-item::before {
+  content: ""; position: absolute; inset: 0; border-radius: 12px;
+  background: linear-gradient(135deg, rgba(201,166,62,0.12), rgba(201,166,62,0.02));
+  transform: scaleX(0); transform-origin: left;
+  transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+  z-index: -1;
+}
+.nav-item:hover {
+  color: var(--text-primary);
+  transform: translateX(4px);
+}
+.nav-item:hover::before { transform: scaleX(1); }
+.nav-item.active {
+  color: var(--gold-bright);
+  font-weight: 600;
+  background: rgba(201,166,62,0.08);
+}
+.nav-item .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor; opacity: 0.4;
+  transition: all 0.4s ease;
+}
+.nav-item:hover .dot, .nav-item.active .dot {
+  opacity: 1;
+  box-shadow: 0 0 10px currentColor;
+  transform: scale(1.3);
+}
+
+/* 守护状态卡片 */
+.guard-card {
+  margin-top: auto; border-radius: 16px;
+  padding: 18px;
+  background: linear-gradient(135deg, rgba(30,58,95,0.4), rgba(15,25,45,0.6));
+  border: 1px solid var(--border-subtle);
+  backdrop-filter: blur(10px);
+}
+.guard-label { font-size: 13px; color: var(--text-dim); }
+.guard-value {
+  font-size: 20px; font-weight: 700; color: var(--gold-bright);
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 6px;
+}
+.status-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--jade-bright);
+  box-shadow: 0 0 12px rgba(123,198,126,0.6);
+  animation: statusPulse 2.5s ease-out infinite;
+}
+@keyframes statusPulse {
+  0% { box-shadow: 0 0 0 0 rgba(123,198,126,0.7); }
+  70% { box-shadow: 0 0 0 14px rgba(123,198,126,0); }
+  100% { box-shadow: 0 0 0 0 rgba(123,198,126,0); }
+}
+
+/* 印章 */
+.sidebar-seal {
+  position: absolute; bottom: 24px; right: 20px; z-index: 2;
+  width: 60px; height: 80px;
+  border-radius: 6px;
+  background: linear-gradient(160deg, #a83030, #7a1a1a);
+  border: 1.5px solid var(--gold-mid);
+  box-shadow: inset 0 0 12px rgba(0,0,0,0.4), 0 8px 24px -8px rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  transform: rotate(-6deg) scale(0.3); opacity: 0;
+  animation: stampIn 0.8s cubic-bezier(0.34, 1.56, 0.64, 1) 1.8s forwards;
+}
+.sidebar-seal span {
+  writing-mode: vertical-rl;
+  font: 400 16px/1 "ZCOOL XiaoWei", "Ma Shan Zheng", cursive;
+  color: var(--gold-pale);
+  letter-spacing: 8px;
+}
+@keyframes stampIn {
+  0% { transform: rotate(16deg) scale(0.3); opacity: 0; }
+  55% { transform: rotate(-8deg) scale(1.07); opacity: 1; }
+  100% { transform: rotate(-6deg) scale(1); opacity: 1; }
+}
+
+/* ============================================
+   MAIN CONTENT
+   ============================================ */
+.main {
+  position: relative; z-index: 1;
+  padding: 24px 28px;
+  display: flex; flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+
+/* Topbar */
+.topbar {
+  position: relative;
+  border-radius: 18px;
+  padding: 20px 26px;
+  background: linear-gradient(135deg, rgba(20,24,35,0.6), rgba(15,18,28,0.8));
+  border: 1px solid var(--border-subtle);
+  backdrop-filter: blur(12px);
+  display: flex; align-items: center; justify-content: space-between;
+  animation: cardRise 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.5s both;
+}
+
+.topbar-kicker {
+  font: 600 11px/1 "Georgia", serif;
+  letter-spacing: 0.3em;
+  color: var(--gold-mid);
+  text-transform: uppercase;
+}
+.topbar-title {
+  font: 400 34px/1.1 "ZCOOL XiaoWei", "Ma Shan Zheng", cursive;
+  color: var(--text-primary);
+  margin-top: 6px;
+  background: linear-gradient(110deg, var(--text-primary) 20%, var(--gold-bright) 45%, var(--text-primary) 70%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmerText 7s ease-in-out 1.5s infinite;
+}
+@keyframes shimmerText {
+  0%, 100% { background-position: 150% 0; }
+  50% { background-position: -50% 0; }
+}
+
+/* 顶部旋转的八宝纹章 */
+.topbar-emblem {
+  width: 72px; height: 72px;
+  flex-shrink: 0;
+  animation: slowSpin 40s linear infinite;
+}
+@keyframes slowSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* Grid */
+.grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: auto auto;
+  grid-template-areas:
+    "eye eye svc night"
+    "eye eye ver ver"
+    "fl fg sec sec";
+  flex: 1;
+}
+
+.card {
+  position: relative;
+  border-radius: 18px;
+  padding: 22px 24px;
+  background: var(--surface-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+  transform-style: preserve-3d;
+  transform: translateZ(0);
+  transition: transform 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 0.5s ease,
+              border-color 0.5s ease;
+  animation: cardRise 0.9s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+.card:hover {
+  transform: translateY(-6px) translateZ(20px) rotateX(1deg) rotateY(-1deg);
+  border-color: var(--border-active);
+  box-shadow: 0 20px 40px -16px rgba(0,0,0,0.5), var(--glow-gold);
+}
+@keyframes cardRise {
+  from { opacity: 0; transform: translateY(30px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.card .card-label {
+  font-size: 18px; font-weight: 600; color: var(--text-primary);
+  position: relative; z-index: 1;
+}
+.card .card-desc {
+  font-size: 13px; color: var(--text-dim); margin-top: 4px;
+  position: relative; z-index: 1;
+}
+
+/* Grid areas */
+.card-eye { grid-area: eye; min-height: 420px; }
+.card-svc { grid-area: svc; }
+.card-night { grid-area: night; background: linear-gradient(135deg, rgba(30,58,95,0.3), rgba(15,25,45,0.5)); }
+.card-ver { grid-area: ver; }
+.card-fl { grid-area: fl; }
+.card-fg { grid-area: fg; background: linear-gradient(135deg, rgba(20,24,35,0.4), rgba(30,58,95,0.15)); }
+.card-sec { grid-area: sec; }
+
+/* Card animation delays */
+.card-svc { animation-delay: 0.6s; }
+.card-night { animation-delay: 0.68s; }
+.card-ver { animation-delay: 0.76s; }
+.card-fl { animation-delay: 0.84s; }
+.card-fg { animation-delay: 0.92s; }
+.card-sec { animation-delay: 1.0s; }
+
+/* ============================================
+   🔥 火眼金睛 · ORBITAL EYE — 核心视觉
+   ============================================ */
+.eye-stage {
+  position: relative;
+  width: 100%; height: calc(100% - 60px);
+  display: flex; align-items: center; justify-content: center;
+  margin-top: 8px;
+}
+
+/* 主眼容器 — 3D 轨道 */
+.eye-orbital {
+  position: relative;
+  width: 280px; height: 280px;
+  transform-style: preserve-3d;
+  animation: orbitalFloat 8s ease-in-out infinite;
+}
+@keyframes orbitalFloat {
+  0%, 100% { transform: translateY(0) rotateX(4deg); }
+  50% { transform: translateY(-8px) rotateX(-2deg); }
+}
+
+/* 多层旋转环 — 不同速度、不同倾角 */
+.orbit-ring {
+  position: absolute; inset: -20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  transform-origin: center;
+  will-change: transform;
+}
+
+/* 外环 — 金 · 缓转 */
+.orbit-ring.r1 {
+  inset: -30px;
+  border-color: rgba(201,166,62,0.35);
+  border-style: dashed;
+  border-dash-array: 8 12;
+  animation: orbitSpin 20s linear infinite;
+  box-shadow: 0 0 40px rgba(201,166,62,0.1);
+}
+
+/* 中环1 — 朱砂 · 中速反向 */
+.orbit-ring.r2 {
+  inset: -18px;
+  border-color: rgba(194,53,49,0.4);
+  border-style: solid;
+  border-dash-array: 2 8;
+  animation: orbitSpin 14s linear infinite reverse;
+  box-shadow: 0 0 30px rgba(194,53,49,0.12);
+}
+
+/* 中环2 — 青黛 · 倾斜 */
+.orbit-ring.r3 {
+  inset: -8px;
+  border-color: rgba(30,58,95,0.5);
+  border-style: solid;
+  animation: orbitSpinTilted 18s linear infinite;
+  box-shadow: 0 0 25px rgba(45,95,158,0.08);
+}
+@keyframes orbitSpinTilted {
+  from { transform: rotateX(22deg) rotateY(15deg) rotateZ(0deg); }
+  to { transform: rotateX(22deg) rotateY(15deg) rotateZ(360deg); }
+}
+
+/* 扫描弧 — 翡翠绿 · 快速扫描 */
+.orbit-ring.r4 {
+  inset: -24px;
+  border-color: transparent;
+  border-top-color: rgba(123,198,126,0.6);
+  border-width: 3px;
+  animation: orbitSpin 4.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  filter: drop-shadow(0 0 12px rgba(123,198,126,0.5));
+}
+
+/* 内环 — 金箔粒子轨道 */
+.orbit-ring.r5 {
+  inset: 4px;
+  border-color: transparent;
+  animation: orbitSpin 6s linear infinite;
+}
+
+@keyframes orbitSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* 眼体 — 宇宙之眼 */
+.eye-body {
+  position: absolute;
+  inset: 30px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at 50% 45%,
+    #1a1200 0%, #0d0a00 30%, #000000 100%
+  );
+  box-shadow:
+    inset 0 0 60px rgba(201,166,62,0.08),
+    0 0 0 1.5px rgba(201,166,62,0.5),
+    var(--glow-eye);
+  overflow: hidden;
+  animation: eyeBreath 4s ease-in-out infinite;
+}
+@keyframes eyeBreath {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.025); }
+}
+
+/* 虹膜纹理 — 金色纤维状结构 */
+.iris-texture {
+  position: absolute; inset: 15%;
+  border-radius: 50%;
+  background:
+    repeating-conic-gradient(
+      from 0deg,
+      rgba(201,166,62,0.05) 0deg 3deg,
+      rgba(139,105,20,0.08) 3deg 6deg,
+      rgba(232,208,122,0.04) 6deg 9deg,
+      transparent 9deg 18deg
+    );
+  animation: irisSpin 16s linear infinite;
+}
+@keyframes irisSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* 虹膜环 — 双层金色纹路 */
+.iris-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 0.5px solid rgba(201,166,62,0.3);
+  animation: irisPulse 3s ease-in-out infinite;
+}
+.iris-ring.ir1 { inset: 20%; animation-delay: 0s; }
+.iris-ring.ir2 { inset: 28%; animation-delay: 0.5s; }
+.iris-ring.ir3 { inset: 36%; animation-delay: 1s; }
+@keyframes irisPulse {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.04); }
+}
+
+/* 瞳孔 — 黑洞核心 */
+.pupil {
+  position: absolute;
+  inset: 35%;
+  border-radius: 50%;
+  background: radial-gradient(circle,
+    #000000 40%,
+    #050302 60%,
+    #0d0a00 80%,
+    rgba(201,166,62,0.1) 100%
+  );
+  box-shadow:
+    inset 0 0 40px rgba(0,0,0,0.9),
+    0 0 30px rgba(0,0,0,0.7),
+    0 0 90px rgba(0,0,0,0.4);
+  animation: pupilFocus 5s ease-in-out infinite;
+}
+@keyframes pupilFocus {
+  0%, 100% { transform: scale(1); }
+  30% { transform: scale(1.1); }
+  60% { transform: scale(0.92); }
+}
+
+/* 瞳孔高光 — 金箔反光 */
+.pupil-highlight {
+  position: absolute;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--gold-bright);
+  top: 38%; left: 42%;
+  box-shadow: 0 0 12px rgba(232,208,122,0.8), 0 0 30px rgba(232,208,122,0.4);
+  animation: highlightWander 6s ease-in-out infinite;
+}
+@keyframes highlightWander {
+  0%, 100% { top: 38%; left: 42%; }
+  25% { top: 36%; left: 44%; }
+  50% { top: 40%; left: 40%; }
+  75% { top: 37%; left: 43%; }
+}
+
+/* 眼周金粉粒子 */
+.eye-particles {
+  position: absolute; inset: -40px;
+}
+.eye-particle {
+  position: absolute;
+  width: 3px; height: 3px;
+  border-radius: 50%;
+  background: var(--gold-bright);
+  filter: blur(0.5px);
+  animation: eyeParticleOrbit 5s linear infinite;
+}
+@keyframes eyeParticleOrbit {
+  0% {
+    transform: rotate(0deg) translateX(150px) rotate(0deg) scale(1);
+    opacity: 0;
+  }
+  10% { opacity: 1; }
+  30% { opacity: 0.8; }
+  70% { opacity: 0.3; }
+  100% {
+    transform: rotate(360deg) translateX(150px) rotate(-360deg) scale(0.5);
+    opacity: 0;
+  }
+}
+
+/* 眼睑光弧 */
+.eye-arc-top, .eye-arc-bottom {
+  position: absolute; left: 25%; right: 25%; height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--gold-mid);
+  filter: drop-shadow(0 0 8px rgba(201,166,62,0.5));
+  opacity: 0.6;
+}
+.eye-arc-top {
+  top: 20px;
+  border-bottom: none;
+  animation: arcTop 4s ease-in-out infinite;
+}
+.eye-arc-bottom {
+  bottom: 20px;
+  border-top: none;
+  animation: arcBottom 4s ease-in-out infinite;
+}
+@keyframes arcTop {
+  0%, 100% { opacity: 0.4; transform: translateY(0); }
+  50% { opacity: 0.8; transform: translateY(-4px); }
+}
+@keyframes arcBottom {
+  0%, 100% { opacity: 0.4; transform: translateY(0); }
+  50% { opacity: 0.8; transform: translateY(4px); }
+}
+
+/* 扫描线光束 */
+.eye-scan-line {
+  position: absolute;
+  top: 50%; left: -20%; right: -20%;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent, rgba(232,208,122,0.3), rgba(232,208,122,0.8),
+    rgba(232,208,122,0.3), transparent
+  );
+  animation: scanUpDown 3s ease-in-out infinite;
+  box-shadow: 0 0 20px rgba(232,208,122,0.3);
+}
+@keyframes scanUpDown {
+  0%, 100% { top: 25%; opacity: 0.5; }
+  25% { top: 75%; opacity: 0.8; }
+  50% { top: 50%; opacity: 0.3; }
+  75% { top: 30%; opacity: 0.7; }
+}
+
+/* ============================================
+   通用卡片内容
+   ============================================ */
+.tag {
+  display: inline-flex; padding: 6px 14px;
+  border-radius: 10px; font-size: 13px; font-weight: 600;
+  position: relative; z-index: 1;
+}
+.tag-jade { background: rgba(91,140,90,0.2); color: var(--jade-bright); border: 1px solid rgba(91,140,90,0.3); }
+.tag-gold { background: rgba(201,166,62,0.15); color: var(--gold-bright); border: 1px solid rgba(201,166,62,0.3); }
+.tag-red { background: rgba(194,53,49,0.2); color: var(--cinnabar-bright); border: 1px solid rgba(194,53,49,0.3); }
+.tag-indigo { background: rgba(30,58,95,0.3); color: var(--indigo-pale); border: 1px solid rgba(30,58,95,0.4); }
+
+.big-num {
+  font: 900 56px/1 "Noto Serif SC", serif;
+  color: var(--text-primary);
+  position: relative; z-index: 1;
+}
+.ver-num {
+  font: 700 36px/1 "Georgia", serif;
+  letter-spacing: 0.04em;
+  color: var(--gold-bright);
+}
+
+.btn-primary {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 12px 22px; border-radius: 12px;
+  background: linear-gradient(135deg, var(--cinnabar), var(--cinnabar-deep));
+  color: var(--text-primary); font-size: 15px; font-weight: 600;
+  border: 1px solid rgba(194,53,49,0.4);
+  cursor: pointer;
+  position: relative; z-index: 1;
+  overflow: hidden;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+.btn-primary::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,0.15), transparent 70%);
+  transform: translateX(-130%);
+  transition: transform 0.6s ease;
+}
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(194,53,49,0.4);
+}
+.btn-primary:hover::after { transform: translateX(130%); }
+
+/* 底栏 */
+.botbar {
+  border-radius: 16px;
+  padding: 16px 22px;
+  background: linear-gradient(120deg, rgba(30,58,95,0.4), rgba(15,25,45,0.6));
+  border: 1px solid var(--border-subtle);
+  backdrop-filter: blur(12px);
+  display: flex; align-items: center; gap: 20px;
+  animation: cardRise 0.8s cubic-bezier(0.16, 1, 0.3, 1) 1.2s backwards;
+}
+.botbar-desc {
+  font-size: 14px; color: var(--text-dim);
+  flex: 1;
+}
+.botbar-pal {
+  font-size: 12px; color: var(--gold-mid);
+  display: flex; gap: 12px;
+}
+.pal-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+
+/* 主题切换按钮 */
+.theme-toggle {
+  position: fixed; top: 24px; right: 28px; z-index: 100;
+  width: 48px; height: 48px; border-radius: 50%;
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  backdrop-filter: blur(16px);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.4s ease;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+}
+.theme-toggle:hover {
+  border-color: var(--border-active);
+  transform: rotate(45deg);
+  box-shadow: var(--glow-gold);
+}
+.theme-toggle svg { width: 22px; height: 22px; fill: var(--gold-mid); }
+[data-theme="dark"] .theme-toggle .sun-icon { display: none; }
+[data-theme="light"] .theme-toggle .moon-icon { display: none; }
+
+/* 辅助布局 */
+.flex-row { display: flex; align-items: center; gap: 12px; }
+.flex-col { display: flex; flex-direction: column; gap: 8px; }
+.flex-between { display: flex; align-items: center; justify-content: space-between; }
+.mt-auto { margin-top: auto; }
+.mt-16 { margin-top: 16px; }
+.mt-8 { margin-top: 8px; }
+
+/* ============================================
+   REDUCED MOTION
+   ============================================ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  .card, .sidebar, .topbar, .botbar, .sidebar-seal {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+
+/* ============================================
+   RESPONSIVE
+   ============================================ */
+@media (max-width: 1100px) {
+  .frame { grid-template-columns: 1fr; }
+  .sidebar { display: none; }
+  .grid {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "eye eye" "svc night"
+      "ver ver" "fl fg" "sec sec";
+  }
+  .card-eye { min-height: 320px; }
+}
+</style>
+</head>
+<body>
+
+<!-- ============ 背景层 ============ -->
+<div class="bg-layer">
+  <div class="ink-wash"></div>
+  <div class="particle-field" id="particles"></div>
+  <div class="paper-grain"></div>
+</div>
+
+<!-- ============ 主题切换 ============ -->
+<button class="theme-toggle" id="themeBtn" title="切换日夜主题">
+  <svg class="moon-icon" viewBox="0 0 24 24"><path d="M12 2a9 9 0 1 0 9 9c0-.5 0-1-.1-1.5a6.5 6.5 0 0 1-8.4-8.4C12.5 2 12 2 12 2Z"/></svg>
+  <svg class="sun-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M1 12h3M20 12h3M4 4l2 2M18 18l2 2M4 20l2-2M18 6l2-2" stroke-width="2" fill="none" stroke="var(--gold-mid)" stroke-linecap="round"/></svg>
+</button>
+
+<!-- ============ 主舞台 ============ -->
+<div class="stage">
+  <div class="frame" id="frame">
+
+    <!-- ==== 侧边栏 ==== -->
+    <aside class="sidebar">
+      <div class="brand-block">
+        <div class="brand-emblem">
+          <span class="ring-outer"></span>
+          <span class="ring-inner"></span>
+          <span class="ring-core"></span>
+        </div>
+        <div class="brand-text">
+          <div class="en">FACE GUARD</div>
+          <div class="zh">面容解锁</div>
+        </div>
+      </div>
+
+      <nav class="nav-list">
+        <div class="nav-item active"><span class="dot"></span>仪表盘</div>
+        <div class="nav-item"><span class="dot"></span>面容管理</div>
+        <div class="nav-item"><span class="dot"></span>通行密钥</div>
+        <div class="nav-item"><span class="dot"></span>安全场景</div>
+        <div class="nav-item"><span class="dot"></span>日志审计</div>
+      </nav>
+
+      <div class="guard-card">
+        <div class="guard-label">守护状态</div>
+        <div class="guard-value"><span class="status-dot"></span>已就绪</div>
+      </div>
+
+      <div class="sidebar-seal"><span>墨韵星枢</span></div>
+    </aside>
+
+    <!-- ==== 主内容 ==== -->
+    <section class="main" id="mainScroll">
+      <!-- Topbar -->
+      <div class="topbar">
+        <div>
+          <div class="topbar-kicker">INK COSMOS · 墨韵星枢</div>
+          <div class="topbar-title">面容与通行密钥安全中枢</div>
+        </div>
+        <svg class="topbar-emblem" viewBox="-60 -60 120 120">
+          <!-- 八宝纹章 -->
+          <defs>
+            <g id="bx8">
+              <path d="M0 -18 C12 -34 12 -58 0 -68 C-12 -58 -12 -34 0 -18Z" fill="none" stroke="var(--gold-mid)" stroke-width="1.4"/>
+            </g>
+          </defs>
+          <use href="#bx8" transform="rotate(0)"/>
+          <use href="#bx8" transform="rotate(45)"/>
+          <use href="#bx8" transform="rotate(90)"/>
+          <use href="#bx8" transform="rotate(135)"/>
+          <use href="#bx8" transform="rotate(180)"/>
+          <use href="#bx8" transform="rotate(225)"/>
+          <use href="#bx8" transform="rotate(270)"/>
+          <use href="#bx8" transform="rotate(315)"/>
+          <circle r="22" fill="none" stroke="var(--cinnabar)" stroke-width="1.2" opacity="0.6"/>
+          <circle r="8" fill="var(--cinnabar)" opacity="0.7"/>
+        </svg>
+      </div>
+
+      <!-- Grid -->
+      <div class="grid">
+        <!-- 🔥 火眼金睛 -->
+        <div class="card card-eye" id="cardEye">
+          <div class="flex-between" style="position:relative;z-index:1">
+            <div>
+              <div class="card-label">火眼金睛</div>
+              <div class="card-desc">墨韵星枢 · 宇宙之眼 · 金环轨道</div>
+            </div>
+            <span class="tag tag-red">面容识别</span>
+          </div>
+          <div class="eye-stage">
+            <!-- 眼周粒子 -->
+            <div class="eye-particles" id="eyeParticles"></div>
+
+            <div class="eye-orbital">
+              <!-- 轨道环 -->
+              <div class="orbit-ring r1"></div>
+              <div class="orbit-ring r2"></div>
+              <div class="orbit-ring r3"></div>
+              <div class="orbit-ring r4"></div>
+              <div class="orbit-ring r5"></div>
+
+              <!-- 扫描线 -->
+              <div class="eye-scan-line"></div>
+
+              <!-- 眼体 -->
+              <div class="eye-body">
+                <div class="iris-texture"></div>
+                <div class="iris-ring ir1"></div>
+                <div class="iris-ring ir2"></div>
+                <div class="iris-ring ir3"></div>
+                <div class="pupil">
+                  <div class="pupil-highlight"></div>
+                </div>
+              </div>
+
+              <!-- 眼睑光弧 -->
+              <div class="eye-arc-top"></div>
+              <div class="eye-arc-bottom"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 核心服务 -->
+        <div class="card card-svc">
+          <div class="card-label">核心服务</div>
+          <div class="card-desc">后台守护进程已就绪</div>
+          <div class="mt-16"><span class="tag tag-jade">运行正常</span></div>
+        </div>
+
+        <!-- 夜间模式 -->
+        <div class="card card-night">
+          <div class="card-label">夜间模式</div>
+          <div class="card-desc">深色语义已统一<br>无残留白底</div>
+        </div>
+
+        <!-- 通行密钥版本 -->
+        <div class="card card-ver">
+          <div class="flex-between" style="height:100%">
+            <div>
+              <div class="card-label">通行密钥插件</div>
+              <div class="ver-num mt-8">0.6.0.0</div>
+            </div>
+            <button class="btn-primary">打开注册 / 启用流程</button>
+          </div>
+        </div>
+
+        <!-- 面容库 -->
+        <div class="card card-fl">
+          <div class="card-label">面容库</div>
+          <div class="flex-row mt-16">
+            <span class="big-num">2</span>
+            <span class="card-desc" style="margin-top:0">张已启用</span>
+          </div>
+        </div>
+
+        <!-- 人脸门 -->
+        <div class="card card-fg">
+          <div class="card-label">人脸门</div>
+          <div class="card-desc">登录前人脸用户验证</div>
+          <div class="mt-16"><span class="tag tag-jade">已开启</span></div>
+        </div>
+
+        <!-- 安全场景 -->
+        <div class="card card-sec">
+          <div class="flex-between">
+            <div>
+              <div class="card-label">安全场景</div>
+              <div class="card-desc">登录 · 解锁 · UAC · 浏览器查看密码</div>
+            </div>
+            <span class="tag tag-red">人脸优先</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 底栏 -->
+      <div class="botbar">
+        <div class="botbar-desc">
+          墨分五色 · 焦浓重淡清 &nbsp;|&nbsp; 金箔粒子 · 宇宙之眼 · 八宝纹章 &nbsp;|&nbsp; 萱纸纹理 · 3D 轨道透视
+        </div>
+        <div class="botbar-pal">
+          <span class="pal-dot" style="background:var(--gold-mid)"></span>金
+          <span class="pal-dot" style="background:var(--cinnabar)"></span>朱砂
+          <span class="pal-dot" style="background:var(--indigo)"></span>青黛
+          <span class="pal-dot" style="background:var(--jade)"></span>翡翠
+          <span class="pal-dot" style="background:var(--moon)"></span>月白
+        </div>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<script>
+// ============================================================
+// 主题切换
+// ============================================================
+const root = document.documentElement;
+const themeBtn = document.getElementById('themeBtn');
+themeBtn.addEventListener('click', () => {
+  root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+});
+
+// ============================================================
+// 金箔粒子生成
+// ============================================================
+const particlesContainer = document.getElementById('particles');
+const particleCount = 24;
+for (let i = 0; i < particleCount; i++) {
+  const p = document.createElement('span');
+  p.className = 'particle';
+  p.style.left = (Math.random() * 96 + 2) + '%';
+  const dur = 14 + Math.random() * 18;
+  p.style.animationDuration = dur + 's';
+  p.style.animationDelay = (-Math.random() * dur) + 's';
+  p.style.width = (1.5 + Math.random() * 2.5) + 'px';
+  p.style.height = p.style.width;
+  particlesContainer.appendChild(p);
+}
+
+// ============================================================
+// 火眼金睛粒子生成
+// ============================================================
+const eyeParticlesContainer = document.getElementById('eyeParticles');
+const eyeParticleCount = 10;
+for (let i = 0; i < eyeParticleCount; i++) {
+  const p = document.createElement('span');
+  p.className = 'eye-particle';
+  const dur = 3.5 + Math.random() * 3;
+  p.style.animationDuration = dur + 's';
+  p.style.animationDelay = (-Math.random() * dur) + 's';
+  p.style.width = (2 + Math.random() * 3) + 'px';
+  p.style.height = p.style.width;
+  eyeParticlesContainer.appendChild(p);
+}
+
+// ============================================================
+// 3D 视差 — 整框倾斜跟随光标
+// ============================================================
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+const frame = document.getElementById('frame');
+
+if (!reducedMotion.matches) {
+  frame.addEventListener('pointermove', (e) => {
+    const rect = frame.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width - 0.5;
+    const y = (e.clientY - rect.top) / rect.height - 0.5;
+    root.style.setProperty('--tilt-x', (-y * 3.2).toFixed(2) + 'deg');
+    root.style.setProperty('--tilt-y', (x * 4.0).toFixed(2) + 'deg');
+  });
+  frame.addEventListener('pointerleave', () => {
+    root.style.setProperty('--tilt-x', '0deg');
+    root.style.setProperty('--tilt-y', '0deg');
+  });
+}
+
+// ============================================================
+// 导航项目点击切换
+// ============================================================
+document.querySelectorAll('.nav-item').forEach(item => {
+  item.addEventListener('click', () => {
+    document.querySelector('.nav-item.active')?.classList.remove('active');
+    item.classList.add('active');
+  });
+});
+</script>
+</body>
+</html>

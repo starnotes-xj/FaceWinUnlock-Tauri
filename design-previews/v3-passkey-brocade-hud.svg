@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#03060B"/>
+      <stop offset=".48" stop-color="#0A1E28"/>
+      <stop offset="1" stop-color="#140808"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="68%" cy="20%" r="62%">
+      <stop offset="0" stop-color="#63F2DD" stop-opacity=".35"/>
+      <stop offset=".45" stop-color="#0C5261" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="jade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#C6FFF5"/>
+      <stop offset=".52" stop-color="#43CDBB"/>
+      <stop offset="1" stop-color="#0D6571"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFE8A4"/>
+      <stop offset=".54" stop-color="#BC8B36"/>
+      <stop offset="1" stop-color="#FFF1C4"/>
+    </linearGradient>
+    <linearGradient id="red" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#EA654B"/>
+      <stop offset="1" stop-color="#8E211E"/>
+    </linearGradient>
+    <pattern id="brocade" width="108" height="108" patternUnits="userSpaceOnUse">
+      <path d="M54 8 C74 28 90 38 100 54 C90 70 74 80 54 100 C34 80 18 70 8 54 C18 38 34 28 54 8Z" fill="none" stroke="#D8B56D" stroke-width="1.4" opacity=".24"/>
+      <path d="M54 28 C68 38 76 44 80 54 C76 64 68 70 54 80 C40 70 32 64 28 54 C32 44 40 38 54 28Z" fill="none" stroke="#55E8D4" stroke-width="1" opacity=".18"/>
+    </pattern>
+    <pattern id="cloud" width="150" height="100" patternUnits="userSpaceOnUse">
+      <path d="M8 58 C34 58 30 34 56 34 C74 34 84 48 92 58 C112 32 144 38 148 68 C170 66 184 78 188 92 L34 92" fill="none" stroke="#D8B56D" stroke-width="1.5" opacity=".24"/>
+      <path d="M54 34 H82 V58 H116 V38 H148 M92 58 V90" fill="none" stroke="#55E8D4" stroke-width="1.1" opacity=".24"/>
+    </pattern>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#000" flood-opacity=".48"/>
+    </filter>
+    <style>
+      .font { font-family:"Microsoft YaHei UI","Noto Sans CJK SC","Segoe UI",sans-serif; }
+      .title { fill:#F9EBD1; font-size:40px; font-weight:850; letter-spacing:2px; }
+      .tiny { fill:#7AFFF0; font-size:12px; letter-spacing:4px; font-weight:850; }
+      .h2 { fill:#F9EBD1; font-size:26px; font-weight:780; }
+      .body { fill:#D8E8E5; font-size:18px; }
+      .muted { fill:#91AAA7; font-size:15px; }
+      .label { fill:#061418; font-size:16px; font-weight:850; }
+      .seal { fill:#FFF2E4; font-size:17px; font-weight:850; writing-mode:tb; letter-spacing:4px; }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1120" fill="url(#bg)"/>
+  <rect width="1800" height="1120" fill="url(#glow)"/>
+  <rect width="1800" height="1120" fill="url(#cloud)" opacity=".8"/>
+  <rect x="76" y="64" width="1648" height="992" rx="44" fill="#07151D" opacity=".92" filter="url(#shadow)"/>
+  <rect x="76" y="64" width="1648" height="992" rx="44" fill="none" stroke="url(#gold)" stroke-width="1.5" opacity=".62"/>
+  <rect x="110" y="98" width="1580" height="924" rx="32" fill="url(#brocade)" opacity=".28"/>
+
+  <g class="font">
+    <text x="150" y="142" class="tiny">FACEWINUNLOCK · PASSKEY PROVIDER</text>
+    <text x="150" y="198" class="title">通行密钥管理器</text>
+    <text x="150" y="236" class="body">更多传统元素，但信息更直白：插件状态、凭据索引、人脸门、高级维护。</text>
+    <rect x="1370" y="142" width="168" height="54" rx="18" fill="#0F2B34" stroke="#55E8D4" stroke-opacity=".45"/>
+    <text x="1405" y="176" class="body">中文 / EN</text>
+
+    <rect x="150" y="300" width="430" height="280" rx="34" fill="#0C222C" stroke="#55E8D4" stroke-opacity=".38"/>
+    <rect x="150" y="300" width="430" height="280" rx="34" fill="url(#cloud)" opacity=".24"/>
+    <text x="196" y="358" class="h2">插件状态</text>
+    <rect x="196" y="398" width="138" height="42" rx="15" fill="url(#jade)"/>
+    <text x="234" y="425" class="label">已启用</text>
+    <text x="196" y="482" class="body">版本 0.5.0.4</text>
+    <text x="196" y="520" class="muted">注册、更新、打开启用页合并成一条流程。</text>
+
+    <rect x="620" y="300" width="430" height="280" rx="34" fill="#0C222C" stroke="#D8B56D" stroke-opacity=".4"/>
+    <text x="666" y="358" class="h2">凭据索引</text>
+    <text x="666" y="398" class="body">本地库中的 passkey 已同步给 Windows。</text>
+    <rect x="666" y="450" width="190" height="52" rx="18" fill="url(#gold)"/>
+    <text x="704" y="483" class="label">同步索引</text>
+    <rect x="878" y="450" width="96" height="52" rx="18" fill="#12343E" stroke="#55E8D4" stroke-opacity=".4"/>
+    <text x="908" y="483" class="body">刷新</text>
+
+    <rect x="1090" y="300" width="430" height="280" rx="34" fill="#0C222C" stroke="#D8B56D" stroke-opacity=".4"/>
+    <text x="1136" y="358" class="h2">人脸门</text>
+    <text x="1136" y="398" class="body">通行密钥操作前先做人脸验证。</text>
+    <rect x="1136" y="450" width="138" height="42" rx="15" fill="url(#jade)"/>
+    <text x="1175" y="477" class="label">开启</text>
+    <text x="1136" y="532" class="muted">不再显示“密码库锁定/确认/PRF”这些示例术语。</text>
+
+    <rect x="150" y="630" width="1370" height="248" rx="36" fill="#0A1F28" stroke="#D8B56D" stroke-opacity=".38"/>
+    <text x="196" y="688" class="h2">凭据</text>
+    <rect x="196" y="734" width="580" height="82" rx="24" fill="#11343E" stroke="#55E8D4" stroke-opacity=".22"/>
+    <circle cx="238" cy="775" r="20" fill="url(#jade)"/>
+    <text x="278" y="770" class="body">facewin-test</text>
+    <text x="278" y="798" class="muted">webauthn.io · 已同步索引 · 可登录</text>
+    <path d="M940 790 C990 750 1040 818 1100 776 C1158 736 1210 790 1268 750 C1328 710 1390 748 1438 722" fill="none" stroke="url(#gold)" stroke-width="3" opacity=".5"/>
+    <path d="M930 820 C982 792 1030 846 1092 812 C1156 778 1205 826 1260 792 C1324 754 1376 794 1438 760" fill="none" stroke="#55E8D4" stroke-width="2" opacity=".32"/>
+
+    <rect x="150" y="920" width="860" height="70" rx="24" fill="#0C222C" stroke="#55E8D4" stroke-opacity=".28"/>
+    <text x="196" y="964" class="body">高级维护：删除 Windows 索引、重建本地库、查看调试日志</text>
+    <rect x="1244" y="900" width="88" height="118" rx="8" fill="url(#red)" transform="rotate(6 1288 959)"/>
+    <text x="1274" y="922" class="seal">安全</text>
+  </g>
+</svg>

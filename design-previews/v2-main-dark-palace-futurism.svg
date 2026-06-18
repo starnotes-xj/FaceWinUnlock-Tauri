@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <defs>
+    <radialGradient id="halo" cx="70%" cy="18%" r="60%">
+      <stop offset="0" stop-color="#37E8D1" stop-opacity=".38"/>
+      <stop offset=".38" stop-color="#0C5E68" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#02050A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="lacquer" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#05080E"/>
+      <stop offset=".45" stop-color="#071A22"/>
+      <stop offset="1" stop-color="#020307"/>
+    </linearGradient>
+    <linearGradient id="ru" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#B9F0E6" stop-opacity=".94"/>
+      <stop offset=".58" stop-color="#52BFAE" stop-opacity=".72"/>
+      <stop offset="1" stop-color="#174D58" stop-opacity=".82"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F6D98A"/>
+      <stop offset=".55" stop-color="#B98A38"/>
+      <stop offset="1" stop-color="#FFF1B6"/>
+    </linearGradient>
+    <linearGradient id="cinnabar" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF6F4D"/>
+      <stop offset="1" stop-color="#8E1E1C"/>
+    </linearGradient>
+    <filter id="softShadow" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="26" stdDeviation="28" flood-color="#000" flood-opacity=".45"/>
+    </filter>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="crackle" width="180" height="160" patternUnits="userSpaceOnUse">
+      <path d="M10 50 L46 28 L78 62 L120 40 L166 70 M42 120 L82 92 L128 118 L168 96 M78 62 L84 92 M120 40 L128 118" fill="none" stroke="#C8FFF3" stroke-width="1.2" opacity=".12"/>
+    </pattern>
+    <pattern id="yunlei" width="84" height="84" patternUnits="userSpaceOnUse">
+      <path d="M8 8 H62 V26 H26 V58 H76 V76 H8 V8Z" fill="none" stroke="#D8B56D" stroke-width="2" opacity=".42"/>
+      <path d="M20 20 H50 V36 H38 V48 H62" fill="none" stroke="#37E8D1" stroke-width="1.4" opacity=".25"/>
+    </pattern>
+    <pattern id="waves" width="160" height="82" patternUnits="userSpaceOnUse">
+      <path d="M0 70 C18 34 62 34 80 70 C98 34 142 34 160 70" fill="none" stroke="#55D6C3" stroke-width="3" opacity=".35"/>
+      <path d="M0 78 C18 46 62 46 80 78 C98 46 142 46 160 78" fill="none" stroke="#F6D98A" stroke-width="1.6" opacity=".26"/>
+    </pattern>
+    <style>
+      .font { font-family: "Microsoft YaHei UI", "Noto Sans CJK SC", "Segoe UI", sans-serif; }
+      .title { fill:#F9EED4; font-size:42px; font-weight:800; letter-spacing:2px; }
+      .smallcaps { fill:#86FFF1; font-size:13px; letter-spacing:4px; font-weight:700; }
+      .body { fill:#DDEDEA; font-size:19px; }
+      .muted { fill:#8CA5A5; font-size:15px; }
+      .h2 { fill:#F9EED4; font-size:26px; font-weight:760; }
+      .num { fill:#F9EED4; font-size:56px; font-weight:860; }
+      .seal { fill:#FFF2E4; font-size:18px; font-weight:800; writing-mode:tb; letter-spacing:4px; }
+      .nav { fill:#99B8B7; font-size:18px; letter-spacing:1px; }
+      .navon { fill:#061418; font-size:18px; font-weight:800; letter-spacing:1px; }
+    </style>
+  </defs>
+  <rect width="1800" height="1120" fill="url(#lacquer)"/>
+  <rect width="1800" height="1120" fill="url(#halo)"/>
+  <rect width="1800" height="1120" fill="url(#crackle)" opacity=".65"/>
+
+  <path d="M0 918 C180 860 320 965 510 905 C720 835 840 940 1020 875 C1230 776 1380 900 1800 790 L1800 1120 L0 1120Z" fill="#06151C"/>
+  <rect x="0" y="895" width="1800" height="225" fill="url(#waves)" opacity=".7"/>
+  <g opacity=".55">
+    <path d="M1040 985 L1100 850 L1164 985Z" fill="#0E3440" stroke="#D8B56D" stroke-opacity=".35"/>
+    <path d="M1110 985 L1198 790 L1280 985Z" fill="#123B48" stroke="#D8B56D" stroke-opacity=".45"/>
+    <path d="M1240 985 L1320 830 L1392 985Z" fill="#0A2B35" stroke="#D8B56D" stroke-opacity=".32"/>
+  </g>
+
+  <rect x="64" y="52" width="1672" height="970" rx="46" fill="#06131B" opacity=".78" filter="url(#softShadow)"/>
+  <rect x="64" y="52" width="1672" height="970" rx="46" fill="none" stroke="url(#gold)" stroke-width="1.5" opacity=".58"/>
+  <rect x="88" y="76" width="1624" height="922" rx="34" fill="none" stroke="url(#yunlei)" stroke-width="10" opacity=".18"/>
+
+  <g class="font">
+    <text x="122" y="128" class="smallcaps">FACE · BIOMETRIC · PASSKEY</text>
+    <text x="122" y="182" class="title">面容解锁中枢</text>
+    <text x="122" y="215" class="body">新中式前卫：海水江崖为底，云雷纹为电路，汝窑冰裂为界面材质。</text>
+
+    <rect x="126" y="274" width="246" height="60" rx="20" fill="url(#ru)"/>
+    <text x="178" y="312" class="navon">仪表盘</text>
+    <text x="146" y="405" class="nav">面容管理</text>
+    <text x="146" y="482" class="nav">通行密钥</text>
+    <text x="146" y="559" class="nav">安全场景</text>
+    <text x="146" y="636" class="nav">日志</text>
+    <rect x="138" y="836" width="86" height="112" rx="8" fill="url(#cinnabar)" transform="rotate(-5 181 892)"/>
+    <text x="166" y="858" class="seal">已就绪</text>
+
+    <g transform="translate(500 178)">
+      <circle cx="380" cy="265" r="205" fill="#071A22" stroke="url(#gold)" stroke-opacity=".48"/>
+      <circle cx="380" cy="265" r="154" fill="none" stroke="#46E4CF" stroke-width="2" opacity=".52" filter="url(#glow)"/>
+      <path d="M380 94 C472 94 546 168 546 260 C546 352 472 426 380 426 C288 426 214 352 214 260 C214 168 288 94 380 94Z" fill="none" stroke="url(#yunlei)" stroke-width="12" opacity=".22"/>
+      <path d="M380 168 C430 168 470 208 470 258 C470 308 430 348 380 348 C330 348 290 308 290 258 C290 208 330 168 380 168Z" fill="#0C2F38" stroke="url(#ru)" stroke-width="3"/>
+      <path d="M350 258 C356 218 404 218 410 258 C404 304 356 304 350 258Z" fill="url(#ru)" opacity=".92"/>
+      <circle cx="380" cy="258" r="10" fill="#06131B"/>
+      <text x="292" y="512" class="smallcaps">LOCAL FACE AUTHORIZED</text>
+    </g>
+
+    <g transform="translate(1190 150)">
+      <path d="M120 0 C178 42 224 86 220 152 C216 220 162 268 98 268 C44 268 0 228 0 174 C0 118 48 88 96 98 C78 60 86 26 120 0Z" fill="#0E3039" stroke="url(#gold)" stroke-opacity=".42"/>
+      <path d="M110 70 C150 84 174 118 168 158 C162 200 126 220 88 208 C116 190 122 164 110 140 C92 104 80 88 110 70Z" fill="url(#cinnabar)" opacity=".92"/>
+      <text x="20" y="320" class="muted">宝相花 / 朱砂印 / 安全徽章</text>
+    </g>
+
+    <rect x="462" y="690" width="330" height="210" rx="32" fill="#09212A" stroke="#77DDCD" stroke-opacity=".35"/>
+    <rect x="462" y="690" width="330" height="210" rx="32" fill="url(#crackle)" opacity=".8"/>
+    <text x="504" y="742" class="h2">面容库</text>
+    <text x="504" y="805" class="num">2</text>
+    <text x="594" y="802" class="body">张已启用</text>
+    <text x="504" y="858" class="muted">新增入口采用异步加载，避免卡顿。</text>
+
+    <rect x="838" y="690" width="330" height="210" rx="32" fill="#09212A" stroke="#D8B56D" stroke-opacity=".4"/>
+    <text x="880" y="742" class="h2">通行密钥</text>
+    <text x="880" y="805" class="num">0.5.0.4</text>
+    <rect x="880" y="835" width="176" height="42" rx="15" fill="url(#ru)"/>
+    <text x="918" y="862" class="navon">启用流程</text>
+
+    <rect x="1214" y="690" width="330" height="210" rx="32" fill="#09212A" stroke="#D8B56D" stroke-opacity=".4"/>
+    <text x="1256" y="742" class="h2">夜间模式</text>
+    <text x="1256" y="792" class="body">全局深色语义变量</text>
+    <text x="1256" y="834" class="muted">卡片、弹窗、表格、菜单全部去白底。</text>
+    <rect x="1256" y="858" width="150" height="36" rx="14" fill="url(#cinnabar)"/>
+    <text x="1296" y="882" class="pill" fill="#FFF2E4">待修复</text>
+  </g>
+</svg>
