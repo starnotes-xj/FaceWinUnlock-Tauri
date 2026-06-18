@@ -337,6 +337,20 @@ jobs:
           Write-Host "Server DLL: $((Get-Item $dll).Length) bytes"
           Write-Host "Unlock EXE: $((Get-Item $exe).Length) bytes"
 
+      # windows-latest (2025) 默认不含 UWP v143 构建工具，MSIX 打包需要
+      - name: Install UWP build tools for Passkey plugin
+        shell: pwsh
+        run: |
+          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          if (Test-Path $vsInstaller) {
+            & $vsInstaller modify --installPath "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise" `
+              --add Microsoft.VisualStudio.Workload.Universal `
+              --quiet --norestart --wait | Out-Null
+            Write-Host "UWP build tools installed."
+          } else {
+            Write-Host "VS Installer not found, assuming UWP tools already present."
+          }
+
       - name: Build Passkey plugin MSIX
         shell: pwsh
         run: |
@@ -504,4 +518,3 @@ jobs:
             target/release/update_manifest.json
             target/release/FaceWinUnlock-NPU-Runtime.zip
             target/release/bundle/nsis/*.exe
-            target/release/bundle/msi/*.msi
