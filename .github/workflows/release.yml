@@ -311,6 +311,10 @@ jobs:
           OPENCV_LINK_PATHS    = { value = '${libDir}', force = true }
           OPENCV_LINK_LIBS     = { value = '${worldName}', force = true }
           "@ | Set-Content -Path $configPath -Encoding UTF8
+          "OPENCV_INCLUDE_PATHS=$incDir" >> $env:GITHUB_ENV
+          "OPENCV_LINK_PATHS=$libDir" >> $env:GITHUB_ENV
+          "OPENCV_LINK_LIBS=$worldName" >> $env:GITHUB_ENV
+          $binDir >> $env:GITHUB_PATH
           Write-Host "=== .cargo/config.toml [env] ==="
           Get-Content $configPath
           Write-Host "=== Verify pre-built OpenCV ==="
@@ -324,8 +328,7 @@ jobs:
           # 主构建：Server DLL + Unlock EXE。旧的 key_capture/NGC 签名实验已停用，
           # Passkey 登录改走官方 Provider 插件（后续 MSIX 构建步骤）。
           cargo build --release -p winlogon -p unlock
-          # 清理临时配置，防止污染后续步骤
-          Remove-Item $configPath -Force
+          # 保留 .cargo/config.toml；后续 Tauri installer 会在 UI/src-tauri 再次调用 Cargo。
 
       - name: Verify runtime binaries
         shell: pwsh
@@ -373,24 +376,42 @@ jobs:
           Write-Host "Passkey MSIX: $((Get-Item $msix).Length) bytes"
           Write-Host "Passkey certificate: $((Get-Item $cer).Length) bytes"
 
-      - name: Stage OpenCV DLLs for Tauri resources
+      - name: Stage runtime DLLs for Tauri resources
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          # ── opencv_world DLL（主构建链接的 OpenCV）──
           $sourceWorld = Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.dll" | Select-Object -First 1
           if (-not $sourceWorld) { throw "opencv_world DLL not found under D:\OpenCV\install" }
           $sourceBin = $sourceWorld.Directory.FullName
           $targetBin = "D:\OpenCV\build\x64\vc16\bin"
           New-Item -ItemType Directory -Path $targetBin -Force | Out-Null
           Get-ChildItem $sourceBin -Filter "opencv_world*.dll" | Copy-Item -Destination $targetBin -Force
-          Get-ChildItem $sourceBin -Filter "opencv_videoio_ffmpeg*.dll" | Copy-Item -Destination $targetBin -Force
-          if (-not (Test-Path (Join-Path $targetBin "opencv_world4120.dll"))) {
-            throw "Tauri resource opencv_world4120.dll was not staged to $targetBin"
+          # 预构建包使用 opencv_world（全模块静态链接为单一 DLL），不含独立的 videoio_ffmpeg DLL
+          if (-not (Get-ChildItem $targetBin -Filter "opencv_world*.dll")) {
+            throw "Tauri resource: opencv_world DLL was not staged to $targetBin"
           }
-          if (-not (Test-Path (Join-Path $targetBin "opencv_videoio_ffmpeg4120_64.dll"))) {
-            throw "Tauri resource opencv_videoio_ffmpeg4120_64.dll was not staged to $targetBin"
+          Write-Host "Staged OpenCV DLLs:"
+          Get-ChildItem $targetBin -Filter "opencv*.dll" | Select-Object Name, Length
+
+          # ── OpenVINO 运行时 DLL ──
+          # opencv_world 编译时启用了 WITH_OPENVINO=ON，其导入表硬依赖 openvino.dll。
+          # 必须随附 OpenVINO 运行时 DLL 到安装目录，否则 Windows 加载器报
+          # "由于找不到 openvino.dll，无法继续执行代码"。
+          $ovStaging = "D:\OpenCV\openvino_runtime"
+          New-Item -ItemType Directory -Path $ovStaging -Force | Out-Null
+          $ovBin = "D:\OpenVINO\runtime\bin\intel64\Release"
+          if (-not (Test-Path $ovBin)) { throw "OpenVINO runtime bin not found: $ovBin" }
+          $ovCount = 0
+          Get-ChildItem $ovBin -Filter "*.dll" | ForEach-Object { Copy-Item $_.FullName $ovStaging -Force; $ovCount++ }
+          Get-ChildItem $ovBin -Filter "*.xml" | ForEach-Object { Copy-Item $_.FullName $ovStaging -Force; $ovCount++ }
+          # TBB（OpenVINO 依赖的 Intel Threading Building Blocks）
+          $tbbBin = "D:\OpenVINO\runtime\3rdparty\tbb\bin"
+          if (Test-Path $tbbBin) {
+            Get-ChildItem $tbbBin -Filter "*.dll" | ForEach-Object { Copy-Item $_.FullName $ovStaging -Force; $ovCount++ }
           }
-          Get-ChildItem $targetBin -Filter "opencv*.dll" | Select-Object FullName, Length
+          Write-Host "Staged $ovCount OpenVINO runtime files to $ovStaging"
+          Get-ChildItem $ovStaging | Select-Object Name, Length
 
       # ---- Tauri UI build ----
       - name: Cache npm dependencies
@@ -405,47 +426,21 @@ jobs:
 
       - name: Build Tauri installer
         working-directory: UI
-        run: npm run tauri build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @("OPENCV_INCLUDE_PATHS", "OPENCV_LINK_PATHS", "OPENCV_LINK_LIBS")) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if (-not $value) { throw "$name is not set for the Tauri build" }
+            Write-Host "$name=$value"
+          }
+          npm run tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      # ---- Package OpenVINO / OpenCV runtime (for Intel NPU support) ----
-      # NPU 推理需要随附 OpenVINO 运行时 DLL + 预构建的 opencv_world DLL（含 OpenVINO 后端）。
-      # 这些文件不在 Tauri 默认安装包内，单独打包成 zip 作为发布资产，
-      # 用户解压后放入安装目录 resources\ 即可启用 NPU（仍需安装 Intel NPU 驱动）。
-      - name: Package NPU runtime
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $stage = "$env:RUNNER_TEMP\npu-runtime"
-          New-Item -ItemType Directory -Path $stage -Force | Out-Null
-
-          # OpenCV world DLL（含 OpenVINO 后端）
-          $worldDll = Get-ChildItem "D:\OpenCV\install" -Recurse -Filter "opencv_world*.dll" | Select-Object -First 1
-          if ($worldDll) { Copy-Item $worldDll.FullName $stage }
-
-          # OpenVINO 运行时 DLL + 插件清单
-          $ovBin = "D:\OpenVINO\runtime\bin\intel64\Release"
-          if (Test-Path $ovBin) {
-            Get-ChildItem $ovBin -Filter "*.dll" | ForEach-Object { Copy-Item $_.FullName $stage }
-            Get-ChildItem $ovBin -Filter "*.xml" | ForEach-Object { Copy-Item $_.FullName $stage }
-          }
-          # TBB（OpenVINO 依赖）
-          $tbbBin = "D:\OpenVINO\runtime\3rdparty\tbb\bin"
-          if (Test-Path $tbbBin) {
-            Get-ChildItem $tbbBin -Filter "*.dll" | ForEach-Object { Copy-Item $_.FullName $stage }
-          }
-
-          $files = Get-ChildItem $stage
-          Write-Host "Staged $($files.Count) runtime files:"
-          $files | Select-Object Name
-          if ($files.Count -eq 0) { throw "No runtime DLLs were staged" }
-
-          $zip = "target\release\FaceWinUnlock-NPU-Runtime.zip"
-          New-Item -ItemType Directory -Path "target\release" -Force | Out-Null
-          Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
-          Write-Host "Created $zip"
+      # OpenVINO 运行时 DLL 已随主安装包分发（见上方 Stage runtime DLLs 步骤）。
+      # Intel NPU 用户仍需安装 Intel NPU 驱动才能启用硬件推理后端。
 
       # ---- Release ----
       - name: Determine release metadata
@@ -504,7 +499,7 @@ jobs:
           $manifest = [ordered]@{ version = $version; files = $files }
           $out = "target/release/update_manifest.json"
           $manifest | ConvertTo-Json -Depth 4 | Out-File -Encoding utf8 $out
-          Write-Host "Generated $out:"
+          Write-Host "Generated ${out}:"
           Get-Content $out
 
       - name: Create GitHub Release
@@ -522,5 +517,4 @@ jobs:
             target/release/FaceWinUnlock-Passkey.msix
             target/release/FaceWinUnlock-Passkey.cer
             target/release/update_manifest.json
-            target/release/FaceWinUnlock-NPU-Runtime.zip
             target/release/bundle/nsis/*.exe
