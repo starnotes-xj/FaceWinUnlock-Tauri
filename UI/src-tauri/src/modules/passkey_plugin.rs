@@ -12,6 +12,9 @@ const FORMAL_PACKAGE_NAME: &str = "FaceWinUnlock.PasskeyManager";
 const FORMAL_APP_ID: &str = "FaceWinUnlock.PasskeyManager";
 const SAMPLE_PACKAGE_NAME: &str = "Contoso.PasskeyManager";
 const SAMPLE_APP_ID: &str = "Contoso.PasskeyManager";
+const APPX_ALL_USER_STORE_PATH: &str =
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore";
+const PASSKEY_PLUGIN_REG_PATH: &str = r"Software\FaceWinUnlock\PasskeyManager";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn run_powershell(script: &str) -> std::io::Result<Output> {
@@ -51,15 +54,14 @@ fn artifact_path(file_name: &str) -> PathBuf {
 }
 
 fn query_package(package_name: &str) -> Result<Option<Value>, String> {
-    // 两步查询：先查当前用户，查不到再加 -AllUsers 兜底。
-    // 主程序以 RUNASADMIN 提权运行时，Get-AppxPackage 在部分 Windows 版本
-    // /UAC 配置下可能找不到按用户安装的 MSIX 包，-AllUsers 可消除此类误报"未安装"。
+    // 合并 per-user 和 -AllUsers 两次查询（取最高版本），避免管理员上下文
+    // 下 Get-AppxPackage 漏掉 per-user MSIX 包。
     let name_literal = powershell_string_literal(package_name);
     let script = format!(
-        "$pkg = Get-AppxPackage -Name {name_literal} | Sort-Object Version -Descending | Select-Object -First 1; \
-         if ($null -eq $pkg) {{ \
-           $pkg = Get-AppxPackage -AllUsers -Name {name_literal} | Sort-Object Version -Descending | Select-Object -First 1; \
-         }}; \
+        "$pkgs = @(Get-AppxPackage -Name {name_literal} -ErrorAction SilentlyContinue); \
+         $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); \
+         if ($isAdmin) {{ $pkgs += @(Get-AppxPackage -AllUsers -Name {name_literal} -ErrorAction SilentlyContinue) }}; \
+         $pkg = $pkgs | Sort-Object Version -Descending | Select-Object -First 1; \
          if ($null -ne $pkg) {{ \
            [pscustomobject]@{{ \
              name = $pkg.Name; \
@@ -145,8 +147,9 @@ fn read_appx_version_from_registry(package_family_name: &str) -> Option<String> 
     use winreg::RegKey;
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let store_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore";
-    let store_key = hklm.open_subkey_with_flags(store_path, KEY_READ).ok()?;
+    let store_key = hklm
+        .open_subkey_with_flags(APPX_ALL_USER_STORE_PATH, KEY_READ)
+        .ok()?;
 
     // 遍历所有子键（每个子键是用户 SID 或 Installed、Staged 等特殊键）
     for sid_key in store_key.enum_keys().flatten() {
@@ -170,6 +173,77 @@ fn read_appx_version_from_registry(package_family_name: &str) -> Option<String> 
     }
 
     None
+}
+
+fn is_passkey_appx_entry(key_name: &str) -> bool {
+    [FORMAL_PACKAGE_NAME, SAMPLE_PACKAGE_NAME]
+        .iter()
+        .any(|package_name| {
+            key_name == *package_name || key_name.starts_with(&format!("{package_name}_"))
+        })
+}
+
+fn collect_passkey_appx_entries(key: &winreg::RegKey, prefix: &str, matches: &mut Vec<String>) {
+    use winreg::enums::KEY_READ;
+
+    for child_name in key.enum_keys().flatten() {
+        let child_path = if prefix.is_empty() {
+            child_name.clone()
+        } else {
+            format!(r"{prefix}\{child_name}")
+        };
+
+        if is_passkey_appx_entry(&child_name) {
+            matches.push(child_path);
+            continue;
+        }
+
+        if let Ok(child_key) = key.open_subkey_with_flags(&child_name, KEY_READ) {
+            collect_passkey_appx_entries(&child_key, &child_path, matches);
+        }
+    }
+}
+
+fn cleanup_passkey_registry_residue() -> Result<(), String> {
+    use std::io::ErrorKind;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE};
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    match hkcu.delete_subkey_all(PASSKEY_PLUGIN_REG_PATH) {
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("清理 Passkey 插件用户注册表失败: {e}")),
+    }
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let store_key = match hklm
+        .open_subkey_with_flags(APPX_ALL_USER_STORE_PATH, KEY_READ | KEY_WRITE)
+    {
+        Ok(key) => key,
+        Err(e) if e.kind() == ErrorKind::NotFound || e.kind() == ErrorKind::PermissionDenied => {
+            return Ok(())
+        }
+        Err(e) => return Err(format!("打开 Appx CurrentVersion 注册表失败: {e}")),
+    };
+
+    let mut matches = Vec::new();
+    collect_passkey_appx_entries(&store_key, "", &mut matches);
+    matches.sort_by_key(|path| std::cmp::Reverse(path.len()));
+
+    for entry_path in matches {
+        match store_key.delete_subkey_all(&entry_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "清理 Passkey Appx CurrentVersion 注册表残留失败 ({entry_path}): {e}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// 从包全名的后缀（FamilyName 之后的 `_1_0_0_0_x64__PublisherId` 部分）提取版本号。
@@ -418,7 +492,11 @@ pub fn install_passkey_plugin(replace_sample: bool) -> Result<CustomResult, Cust
     let replace_script = if should_remove_sample {
         format!(
             "Get-Process -Name 'PasskeyManager' -ErrorAction SilentlyContinue | Stop-Process -Force; \
-             Get-AppxPackage -Name '{SAMPLE_PACKAGE_NAME}' | Remove-AppxPackage -ErrorAction Stop;"
+             $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); \
+             $pkgs = @(Get-AppxPackage -Name '{SAMPLE_PACKAGE_NAME}' -ErrorAction SilentlyContinue); \
+             if ($isAdmin) {{ $pkgs += @(Get-AppxPackage -AllUsers -Name '{SAMPLE_PACKAGE_NAME}' -ErrorAction SilentlyContinue) }}; \
+             if ($pkgs.Count -gt 1) {{ $pkgs = $pkgs | Sort-Object PackageFullName -Unique }}; \
+             $pkgs | Remove-AppxPackage -ErrorAction Stop;"
         )
     } else {
         String::new()
@@ -560,6 +638,7 @@ fn uninstall_passkey_plugin_impl(ignore_missing: bool) -> Result<(bool, Value), 
         .map_err(|e| format!("查询测试 Passkey 插件失败: {e}"))?;
 
     if formal.is_none() && sample.is_none() {
+        cleanup_passkey_registry_residue()?;
         if ignore_missing {
             return Ok((false, status_value()?));
         }
@@ -586,19 +665,36 @@ fn uninstall_passkey_plugin_impl(ignore_missing: bool) -> Result<(bool, Value), 
             ));
         }
     } else {
-        // 内联卸载：停止进程 → Remove-AppxPackage（-AllUsers 兜底提权上下文）→ 清理用户证书
+        // 内联卸载：停止进程 → Remove-AppxPackage（合并 per-user + all-users 覆盖所有安装上下文）
         let script = format!(
             "Get-Process -Name 'PasskeyManager' -ErrorAction SilentlyContinue | Stop-Process -Force; \
              $ErrorActionPreference = 'Stop'; \
+             $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); \
              foreach ($name in @('{FORMAL_PACKAGE_NAME}', '{SAMPLE_PACKAGE_NAME}')) {{ \
-               $pkgs = Get-AppxPackage -Name $name -ErrorAction SilentlyContinue; \
-               if ($null -eq $pkgs) {{ $pkgs = Get-AppxPackage -AllUsers -Name $name -ErrorAction SilentlyContinue }}; \
+               $pkgs = @(Get-AppxPackage -Name $name -ErrorAction SilentlyContinue); \
+               if ($isAdmin) {{ $pkgs += @(Get-AppxPackage -AllUsers -Name $name -ErrorAction SilentlyContinue) }}; \
+               if ($pkgs.Count -gt 1) {{ $pkgs = $pkgs | Sort-Object PackageFullName -Unique }}; \
                $pkgs | Remove-AppxPackage -ErrorAction Stop; \
              }}; \
              if (Test-Path {cert_path}) {{ \
                $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new({cert_path}); \
-               @('Cert:\\CurrentUser\\TrustedPeople','Cert:\\CurrentUser\\Root') | ForEach-Object {{ \
-                 Get-ChildItem $_ -ErrorAction SilentlyContinue | Where-Object Thumbprint -eq $cert.Thumbprint | Remove-Item -Force \
+               foreach ($storeName in @('TrustedPeople','Root')) {{ \
+                 & certutil.exe -user -store $storeName $cert.Thumbprint 2>$null | Out-Null; \
+                 if ($LASTEXITCODE -eq 0) {{ \
+                   & certutil.exe -user -delstore $storeName $cert.Thumbprint | Out-Null; \
+                   $deleteExit = $LASTEXITCODE; \
+                   & certutil.exe -user -store $storeName $cert.Thumbprint 2>$null | Out-Null; \
+                   if ($deleteExit -ne 0 -or $LASTEXITCODE -eq 0) {{ throw 'Failed to remove CurrentUser certificate' }} \
+                 }}; \
+                 if ($isAdmin) {{ \
+                   & certutil.exe -store $storeName $cert.Thumbprint 2>$null | Out-Null; \
+                   if ($LASTEXITCODE -eq 0) {{ \
+                     & certutil.exe -delstore $storeName $cert.Thumbprint | Out-Null; \
+                     $deleteExit = $LASTEXITCODE; \
+                     & certutil.exe -store $storeName $cert.Thumbprint 2>$null | Out-Null; \
+                     if ($deleteExit -ne 0 -or $LASTEXITCODE -eq 0) {{ throw 'Failed to remove LocalMachine certificate' }} \
+                   }} \
+                 }} \
                }} \
              }}",
             cert_path = powershell_literal(&certificate_path),
@@ -611,6 +707,8 @@ fn uninstall_passkey_plugin_impl(ignore_missing: bool) -> Result<(bool, Value), 
             ));
         }
     }
+
+    cleanup_passkey_registry_residue()?;
 
     Ok((true, status_value()?))
 }

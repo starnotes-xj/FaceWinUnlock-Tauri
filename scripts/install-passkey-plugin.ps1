@@ -18,37 +18,55 @@ if (-not $CertificatePath) {
     $CertificatePath = if (Test-Path $repoCertificate) { $repoCertificate } else { $installedCertificate }
 }
 
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
 if (-not (Test-Path $PackagePath)) {
     throw "Passkey plugin package not found: $PackagePath"
 }
 
 if (Test-Path $CertificatePath) {
-    # 自签名 MSIX 部署要求签名链终结于“受信任的根”。机器级信任需要管理员权限：
-    # 提权时导入 LocalMachine\TrustedPeople + Root（与 NSIS 安装器 hooks.nsh 一致），
-    # 否则 Add-AppxPackage 会报 0x800B0109（应用包签名的根证书必须是受信任的证书）。
-    # 非提权时退回 CurrentUser\TrustedPeople（对自签名通常不足）并给出明确提示。
-    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    # A self-signed MSIX must chain to a trusted root. Machine-level trust
+    # matches the NSIS installer and requires administrator privileges.
     if ($isAdmin) {
         Import-Certificate -FilePath $CertificatePath -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
         Import-Certificate -FilePath $CertificatePath -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
     } else {
         Import-Certificate -FilePath $CertificatePath -CertStoreLocation Cert:\CurrentUser\TrustedPeople | Out-Null
-        Write-Warning "未以管理员运行：证书仅导入 CurrentUser\TrustedPeople，自签名包可能因根证书不受信任而安装失败 (0x800B0109)。请以管理员重跑，或让安装器完成机器级证书信任。"
+        Write-Warning "Not running as admin: the certificate was imported only into CurrentUser\TrustedPeople. Re-run as admin if Add-AppxPackage reports 0x800B0109."
     }
 }
 
-$sample = Get-AppxPackage -Name Contoso.PasskeyManager | Select-Object -First 1
+$sample = Get-AppxPackage -Name Contoso.PasskeyManager -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -eq $sample -and $isAdmin) {
+    $sample = Get-AppxPackage -AllUsers -Name Contoso.PasskeyManager -ErrorAction SilentlyContinue | Select-Object -First 1
+}
 if ($sample -and -not $ReplaceSample) {
     throw "Contoso test plugin is installed. Re-run with -ReplaceSample only after confirming its local passkeys may be deleted."
 }
 
 Get-Process -Name PasskeyManager -ErrorAction SilentlyContinue | Stop-Process -Force
 if ($sample -and $ReplaceSample) {
-    $sample | Remove-AppxPackage -ErrorAction Stop
+    # Merge both package views so the sample plugin is removed in every context.
+    $samplePkgs = @(Get-AppxPackage -Name Contoso.PasskeyManager -ErrorAction SilentlyContinue)
+    if ($isAdmin) { $samplePkgs += @(Get-AppxPackage -AllUsers -Name Contoso.PasskeyManager -ErrorAction SilentlyContinue) }
+    if ($samplePkgs.Count -gt 1) { $samplePkgs = $samplePkgs | Sort-Object PackageFullName -Unique }
+    $samplePkgs | Remove-AppxPackage -ErrorAction Stop
 }
-Add-AppxPackage -Path $PackagePath -ForceApplicationShutdown -ForceUpdateFromAnyVersion
 
-$package = Get-AppxPackage -Name FaceWinUnlock.PasskeyManager
+$existing = Get-AppxPackage -Name FaceWinUnlock.PasskeyManager -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -eq $existing -and $isAdmin) {
+    $existing = Get-AppxPackage -AllUsers -Name FaceWinUnlock.PasskeyManager -ErrorAction SilentlyContinue | Select-Object -First 1
+}
+if ($existing) {
+    Add-AppxPackage -Update -Path $PackagePath -ForceApplicationShutdown -ForceUpdateFromAnyVersion
+} else {
+    Add-AppxPackage -Path $PackagePath -ForceApplicationShutdown -ForceUpdateFromAnyVersion
+}
+
+$package = Get-AppxPackage -Name FaceWinUnlock.PasskeyManager -ErrorAction SilentlyContinue
+if (-not $package -and $isAdmin) {
+    $package = Get-AppxPackage -AllUsers -Name FaceWinUnlock.PasskeyManager -ErrorAction SilentlyContinue | Select-Object -First 1
+}
 if (-not $package) {
     throw "FaceWinUnlock Passkey package was not installed."
 }
