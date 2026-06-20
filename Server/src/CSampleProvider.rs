@@ -134,7 +134,22 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
         }
 
         if cpus.0 == 4 && host == "credentialuibroker.exe" {
-            info!("SampleProvider::SetUsageScenario - credentialuibroker.exe 启用先人脸、失败后回退 Windows PIN");
+            // credentialuibroker.exe 同时托管：浏览器查看密码、Chrome 通行密钥(passkey)验证、
+            // Windows 设置启用插件的 PIN 验证。三者 cpus/dwflags/CLSID 完全一致（实测 dwflags
+            // 均为 0x250），唯一可靠区分是「触发弹窗的应用窗口标题」：查看密码→含「密码」、
+            // 通行密钥→含「通行密钥」、设置 PIN→「设置」。用 GetWindowTextW 读应用窗口标题
+            //（应用进程非受限，不像 broker 进程内 UIA COM 被封）。
+            let scene = crate::classify_broker_scene();
+            info!("SampleProvider::SetUsageScenario - broker 场景分类: {:?}", scene);
+            if scene != crate::BrokerScene::Password {
+                // 通行密钥(选原生 Hello)/设置 PIN/未知 → 不介入，交还 Windows 原生（PIN/Hello）。
+                // 返回 E_NOTIMPL 后本 Provider 完全不参与：不启动人脸监听、不装输入 Hook、
+                // 不创建动画、摄像头不亮——根治「选原生 Hello 移动鼠标触发人脸」与「启用插件输 PIN 卡死」。
+                info!("SampleProvider::SetUsageScenario - 非「查看密码」场景，跳过人脸，交还 Windows");
+                inner.is_scenario_supported = false;
+                return Err(E_NOTIMPL.into());
+            }
+            info!("SampleProvider::SetUsageScenario - 「查看密码」场景，启用先人脸、失败后回退 Windows PIN");
         }
 
         Ok(())

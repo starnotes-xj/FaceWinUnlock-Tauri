@@ -136,6 +136,67 @@ pub fn current_process_exe_name() -> String {
         .unwrap_or_default()
 }
 
+/// broker CredUI 场景分类。credentialuibroker.exe 同时托管「浏览器查看密码」「Chrome 通行
+/// 密钥(passkey)验证」「Windows 设置启用插件的 PIN 验证」，三者 cpus/dwflags/CLSID 完全
+/// 一致（实测 dwflags 均为 0x250），无法用这些区分。唯一可靠信号是「触发弹窗的应用窗口标题」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerScene {
+    /// 查看已保存密码 — 走人脸识别
+    Password,
+    /// 通行密钥(passkey)验证 — 跳过人脸，交还 Windows 原生（选原生 Hello 正常输 PIN）
+    Passkey,
+    /// 设置 PIN / 登录 / 无法判断 — 保守跳过人脸，避免误触发与卡死
+    Unknown,
+}
+
+/// 收集前台窗口及其所有者/根所有者窗口的标题（拼接小写）。
+///
+/// broker 弹窗(GetForegroundWindow)的标题是「Windows 安全中心」（无区分信息），但它的
+/// 所有者窗口就是触发它的应用（Chrome / 设置），标题直接反映用户意图。仅用 GetWindowTextW
+/// 读这些应用窗口标题——应用进程非受限，能稳定读到（不像 broker 进程内 UIA COM 被封）。
+fn foreground_window_titles() -> String {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindow, GW_OWNER, GetWindowTextW, GetAncestor, GET_ANCESTOR_FLAGS,
+    };
+    fn title_of(hwnd: HWND) -> String {
+        if hwnd.0.is_null() { return String::new(); }
+        let mut buf = [0u16; 512];
+        let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
+        if n <= 0 { return String::new(); }
+        String::from_utf16_lossy(&buf[..n as usize])
+    }
+    let fg = unsafe { GetForegroundWindow() };
+    let mut parts = vec![title_of(fg)];
+    if let Ok(owner) = unsafe { GetWindow(fg, GW_OWNER) } {
+        parts.push(title_of(owner));
+    }
+    // GA_ROOTOWNER = 3：根所有者窗口（兜底，确保拿到触发应用的主窗口标题）
+    let root = unsafe { GetAncestor(fg, GET_ANCESTOR_FLAGS(3)) };
+    parts.push(title_of(root));
+    parts.join(" ").to_lowercase()
+}
+
+/// 按前台窗口链标题区分 broker 场景。passkey 关键词优先（"通行密钥"含"密钥"但绝不含"密码"，
+/// "密码管理工具"含"密码"，二者无交集，安全）。读不到任何关键词 → Unknown（保守跳过）。
+pub fn classify_broker_scene() -> BrokerScene {
+    let titles = foreground_window_titles();
+    info!("classify_broker_scene - 前台窗口标题: {:?}", titles);
+    const PASSKEY_KW: &[&str] = &[
+        "通行密钥", "passkey", "安全密钥", "security key", "证实是您本人", "确保是你本人",
+    ];
+    const PASSWORD_KW: &[&str] = &[
+        "密码", "password",
+    ];
+    if PASSKEY_KW.iter().any(|k| titles.contains(&k.to_lowercase())) {
+        BrokerScene::Passkey
+    } else if PASSWORD_KW.iter().any(|k| titles.contains(&k.to_lowercase())) {
+        BrokerScene::Password
+    } else {
+        BrokerScene::Unknown
+    }
+}
+
 // 定义凭据提供程序的GUID，用于系统识别
 // 8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c
 pub const CLSID_SampleProvider: GUID = GUID::from_u128(0x8a7b9c6d_4e5f_89a0_8b7c_6d5e4f3e2d1c);
