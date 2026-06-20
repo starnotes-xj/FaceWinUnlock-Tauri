@@ -337,6 +337,26 @@ jobs:
           Write-Host "Server DLL: $((Get-Item $dll).Length) bytes"
           Write-Host "Unlock EXE: $((Get-Item $exe).Length) bytes"
 
+      - name: Ensure UWP build tools for Passkey plugin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sdkVersion = "10.0.26100.0"
+          $windowsKitsRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $windowsDesktopProps = Join-Path $windowsKitsRoot "Extension SDKs\WindowsDesktop\$sdkVersion\DesignTime\CommonConfiguration\Neutral\WindowsDesktop.props"
+          $makeAppx = Join-Path $windowsKitsRoot "bin\$sdkVersion\x64\makeappx.exe"
+
+          if ((Test-Path $windowsDesktopProps) -and (Test-Path $makeAppx)) {
+            Write-Host "WindowsDesktop Extension SDK $sdkVersion and MakeAppx are already present."
+            exit 0
+          }
+
+          choco install visualstudio2022-workload-universal -y --no-progress --limit-output `
+            --package-parameters "--quiet --norestart --wait --add Microsoft.VisualStudio.Component.Windows11SDK.26100"
+
+          if (-not (Test-Path $windowsDesktopProps)) { throw "Missing: $windowsDesktopProps" }
+          if (-not (Test-Path $makeAppx)) { throw "Missing: $makeAppx" }
+
       - name: Build Passkey plugin MSIX
         shell: pwsh
         run: |
@@ -504,4 +524,3 @@ jobs:
             target/release/update_manifest.json
             target/release/FaceWinUnlock-NPU-Runtime.zip
             target/release/bundle/nsis/*.exe
-            target/release/bundle/msi/*.msi
