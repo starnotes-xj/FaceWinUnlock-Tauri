@@ -1687,6 +1687,11 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
     let mut last_record_reload = instant_secs_ago(60);
     let mut camera_rotation = load_camera_rotation(&db_path);
     let mut requested_inference = load_inference_backend(&db_path);
+    // 授权冷却：人脸授权成功后 AUTH_COOLDOWN 内不再开摄像头。
+    // 根因：授权只更新 state.last_user_active，但不会重置 OS 的 GetLastInputInfo；
+    // 用户长时间不碰键鼠时，下一轮 OS idle 仍超时 → 又开摄像头 → 每秒闪一次。
+    const AUTH_COOLDOWN: Duration = Duration::from_secs(60);
+    let mut auth_cooldown_until: Option<Instant> = None;
 
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -1716,9 +1721,10 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
 
         let idle_ms = get_idle_millis();
         if idle_ms < (auto_lock_timeout * 1000) as u32 {
-            // 用户有活动，更新最后活跃时间
+            // 用户有真实键鼠输入，更新活跃时间并清空授权冷却（OS idle 已被真正重置）
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
             state.last_user_active.store(now, Ordering::SeqCst);
+            auth_cooldown_until = None;
             continue;
         }
 
@@ -1738,6 +1744,13 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             last_record_reload = Instant::now();
         }
         if records.is_empty() { continue; } // 无人脸记录，不锁屏
+
+        // 授权冷却期内不开摄像头（修闪烁）：人脸授权成功后 AUTH_COOLDOWN 内，即使 OS
+        // idle 仍超时也跳过——人脸识别不会重置 GetLastInputInfo，否则每秒重复开摄像头闪烁。
+        if let Some(until) = auth_cooldown_until {
+            if Instant::now() < until { continue; }
+            auth_cooldown_until = None;
+        }
 
         // broker 冷却期内不打开摄像头
         let now_ms = SystemTime::now()
@@ -1786,12 +1799,15 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         drop(cam);
 
         if authorized {
-            // 授权用户在场，更新活跃时间，继续监控
+            // 授权用户在场，更新活跃时间并进入授权冷却：下一轮 OS idle 仍会超时
+            // （人脸识别不重置 GetLastInputInfo），冷却避免每秒重复开摄像头闪烁。
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
             state.last_user_active.store(now, Ordering::SeqCst);
+            auth_cooldown_until = Some(Instant::now() + AUTH_COOLDOWN);
         } else {
-            // 无人或非授权人员 → 锁屏
+            // 无人或非授权人员 → 锁屏，清空授权冷却（锁屏后下次需重新识别）
             let _ = unsafe { LockWorkStation() };
+            auth_cooldown_until = None;
             // 锁屏后等 5 秒再继续检查
             thread::sleep(Duration::from_secs(5));
         }
