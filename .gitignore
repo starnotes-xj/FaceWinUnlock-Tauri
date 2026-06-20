@@ -60,3 +60,13 @@ reverse_analysis/ghidra_project/
 reverse_analysis/*.dll
 reverse_analysis/*.bin
 C:/FaceWinUnlock/
+
+# OpenCV 预构建：体积巨大（含 OpenVINO Debug DLL，曾让 .git 膨胀到 ~490MB），
+# 已发布为 GitHub Release 资产 opencv-prebuilt-v1（opencv-*-prebuilt.zip），
+# CI 从那里下载解压到 D:\OpenCV\install，绝不入 git 历史。
+opencv-prebuilt/
+opencv-*-prebuilt.zip
+opencv-4.12.0-prebuilt.zip
+
+# git 历史重写遗留的旧 .git 备份（filter-repo 清理 opencv 时产生，可删）
+.git.old-*
