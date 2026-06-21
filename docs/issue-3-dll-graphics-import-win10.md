@@ -109,3 +109,41 @@ ntdll/secur32 + UCRT + VCRUNTIME140）。LogonUI 在任意 Win8.1+/Win10/Win11 �
   旧系统一律在 UI 层按 `os_supported` 优雅跳过。
 - ✅ 判断「DLL 有没有被 LogonUI 加载」看 `facewinunlock.log` 是否有当次启动记录（含 PID）；
   无日志 = 没加载 = PE 加载阶段失败（查导入表/依赖），不是运行时逻辑问题。
+
+---
+
+## 0.5.2 之后的后续问题（OpenCL FP16 后端 + 更新检查）
+
+用户装上修好的 0.5.2 后，**解锁本身已恢复**（`facewinunlock.log` 正常生成、磁贴出现）。
+但报告新症状：Win+L 后磁贴出现、摄像头亮、界面转圈一直闪却不自动登录；人脸录入
+「一致性检查」黑屏、摄像头隔很久才开；CPU/内存偏高；更新检查「已是最新仍提示更新」。
+
+### 根因（前四个症状同源 = OpenCL FP16 后端）
+
+用户在「首选项」把推理后端改成了 **OpenCL FP16**（backend=3,target=2）。日志实证：
+
+- `unlock.log`：`inference backend changed to OpenCL FP16` 后，`run requested` → `camera opened`
+  → **93 秒后**才 `face recognition finished without a match`；对比之前 CPU 后端 `面容匹配成功`。
+- `facewinunlock.log`：DLL 反复发 `run`、凭据线程连上 unlock 管道等待，但**从未「收到凭据」**
+  （识别没匹配上 → 不回凭据 → 不 autologon → 一直转圈）。
+- `app.log`：一致性检查 RAF 报 `模型未加载/摄像头未打开`，间隔 20–50s（每次 verify 极慢）。
+
+OpenCL FP16 在这台 Win10 机器上 GPU kernel 编译 + FP16 精度问题 → 推理极慢且匹配不上。
+**关键**：`load_opencv_model` 对 OpenCL FP16 会**加载成功**（`setPreferableTarget` 不立即报错，
+首次 forward 才编译 kernel），所以 #125 的「加载失败回退 CPU」**覆盖不到**这种「加载成功但
+运行时坏」。CPU 后端一切正常。
+
+### 修复（UI 警告 + 引导回 CPU，不做自动回退）
+
+- `Options.vue`：切到 OpenCL/OpenCL FP16 时即使探测加载成功也弹**实验性警告**（部分设备识别
+  极慢/匹配失败，遇异常请改回 CPU）。
+- `Add.vue`：一致性检查/识别循环 catch 时停止循环（不刷屏）+ 报模型/摄像头未就绪时提示可能是
+  GPU 后端问题、引导改回 CPU。
+- **不做自动回退**：无法区分「首帧 kernel 编译慢 vs 一直慢」，且可能误判本就正常的 GPU 设备。
+
+### 更新检查「已是最新仍提示」（独立 bug）
+
+`check_update` 的 current_version 来自 `CARGO_PKG_VERSION`（`UI/src-tauri/Cargo.toml`），但 v0.5.2
+发版只 bump 了 `tauri.conf.json`、漏了 Cargo.toml（仍 0.5.1）→ current(0.5.1) < latest tag(0.5.2)
+→ 永远提示更新。修复：bump Cargo.toml + CI「Sync version from tag」**同时**同步 `tauri.conf.json`
+与 `UI/src-tauri/Cargo.toml`。**发版两个版本号文件必须都跟 tag。**

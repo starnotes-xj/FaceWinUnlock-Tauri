@@ -262,6 +262,17 @@
 							? 'Intel NPU 需额外安装 <b>OpenVINO 运行时</b> 及对应的 OpenCV DNN 插件 DLL。'
 							: '请确认显卡及驱动支持 OpenCL。')
 				});
+			} else if (value === 'opencl' || value === 'opencl_fp16') {
+				// OpenCL/FP16 加载会"成功"，但人脸识别推理在部分显卡/驱动上会很慢甚至
+				// 匹配不上（加载阶段无法预知）——表现为锁屏一直转圈不自动解锁、一致性检查
+				// 卡住黑屏、CPU/内存偏高（issue #3）。给出明确的实验性警告，引导遇异常改回 CPU。
+				ElMessageBox.alert(
+					'GPU（OpenCL）后端为实验性：在部分显卡/驱动上人脸识别会明显变慢、甚至无法匹配，' +
+					'可能导致锁屏一直转圈不自动解锁、一致性检查卡住黑屏、占用偏高。' +
+					'若遇到解锁失败或识别异常，请把推理后端改回 CPU（CPU 兼容性最好）。',
+					'GPU 后端为实验性',
+					{ type: 'warning', confirmButtonText: '我知道了' }
+				).catch(() => {});
 			} else {
 				ElMessage.success(`推理后端 ${value} 可用`);
 			}

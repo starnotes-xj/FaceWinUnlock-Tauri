@@ -424,9 +424,12 @@ jobs:
         working-directory: UI
         run: npm ci
 
-      # 从 tag 同步版本号到 tauri.conf.json，确保安装包文件名/内部版本与 release tag 一致
-      # （历史上靠手动 bump tauri.conf.json，易漏 → v0.5.2 曾打出 0.5.1 文件名，见 issue #3 修复）。
-      - name: Sync version from tag to tauri.conf.json
+      # 从 tag 同步版本号到 app 版本文件，确保安装包文件名、程序内部版本、以及
+      # 更新检查的 current_version 三者与 release tag 一致（历史上靠手动 bump，易漏：
+      # v0.5.2 曾打出 0.5.1 文件名；Cargo.toml 漏 bump 又导致更新检查反复提示，见 issue #3）。
+      #   - tauri.conf.json: 决定安装包文件名 / 程序内部版本
+      #   - UI/src-tauri/Cargo.toml: CARGO_PKG_VERSION，决定 check_update 的 current_version
+      - name: Sync version from tag to app version files
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
@@ -438,7 +441,12 @@ jobs:
             $json = Get-Content $conf -Raw
             $json = [regex]::Replace($json, '"version"\s*:\s*"[^"]*"', "`"version`": `"$version`"", 1)
             Set-Content $conf -Value $json -NoNewline -Encoding utf8
-            Write-Host "Synced tauri.conf.json version -> $version"
+            Write-Host "Synced $conf version -> $version"
+            $cargo = "UI/src-tauri/Cargo.toml"
+            $toml = Get-Content $cargo -Raw
+            $toml = [regex]::Replace($toml, '(?m)^version\s*=\s*"[^"]*"', "version = `"$version`"", 1)
+            Set-Content $cargo -Value $toml -NoNewline -Encoding utf8
+            Write-Host "Synced $cargo version -> $version"
           }
 
       - name: Build Tauri installer

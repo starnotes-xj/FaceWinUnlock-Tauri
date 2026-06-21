@@ -243,9 +243,18 @@
             // 继续下一帧
             requestAnimationFrame(streamLoop);
         } catch (error) {
-            const info = formatObjectString("RAF循环出错：" ,error);
-            errorLog(info);
-            ElMessage.error(info);
+            // 识别循环出错。常见根因：切到 GPU(OpenCL) 推理后端后模型加载慢/推理异常，
+            // 或切走页面时已卸载模型/摄像头（issue #3）。停止循环避免半死状态与反复弹窗，
+            // 并给出可操作的提示而非裸露的内部错误。
+            isLoopRunning = false;
+            const raw = formatObjectString("一致性检查/识别循环出错：", error);
+            errorLog(raw);
+            const text = String(error ?? '');
+            if (text.includes('模型未加载') || text.includes('摄像头未打开')) {
+                ElMessage.error('人脸识别未就绪（模型或摄像头未准备好）。若你切换过 GPU（OpenCL）推理后端，部分设备会出现此问题，建议在「首选项 → 识别参数」把推理后端改回 CPU 后重试。');
+            } else {
+                ElMessage.error(raw);
+            }
         }
     };
 
