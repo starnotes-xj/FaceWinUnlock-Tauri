@@ -60,17 +60,6 @@ impl SampleProvider {
         }
     }
 
-    fn reset_session_state(inner: &mut ProviderInner) {
-        if let Some(listener) = inner.listener.take() {
-            listener.lock().unwrap().stop_and_join();
-        }
-        inner.credential = None;
-        inner.events = None;
-        inner.advise_context = 0;
-        inner.shared_creds.lock().unwrap().reset_for_new_usage();
-        crate::CPipeListener::reset_broker_pin_fallback();
-    }
-
     fn reset_broker_session_state(inner: &mut ProviderInner) {
         if let Some(listener) = inner.listener.take() {
             listener.lock().unwrap().stop_and_join();

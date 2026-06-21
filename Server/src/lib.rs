@@ -1,4 +1,7 @@
 // 引入日志宏和日志库
+// 模块/常量沿用原 C++ 项目与 COM 约定的大驼峰命名（CSampleProvider 等），crate 名
+// FaceWinUnlock_Tauri 同时是 DLL 导出名——均为有意命名，统一抑制风格 lint（非代码问题）。
+#![allow(non_snake_case, non_upper_case_globals)]
 #[macro_use] extern crate log;
 extern crate simplelog;
 use simplelog::*;
