@@ -247,7 +247,7 @@ const finishInit = () => {
                 <span style="color:var(--v7-gold-bright);font-weight:700">步骤1</span>
                 <span>强制关机 3 次 → 自动修复 → 疑难解答 → 启动设置 → 重启 → <b>F5 安全模式</b></span>
                 <span style="color:var(--v7-gold-bright);font-weight:700">步骤2</span>
-                <span>删除 <code>C:\Windows\System32\FaceWinUnlock-Tauri.dll</code>（或删除注册表 <code>HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}</code>）</span>
+                <span>删除 <code>%SystemRoot%\System32\FaceWinUnlock-Tauri.dll</code>（即系统盘的 Windows\System32，未必是 C:；或删除注册表 <code>HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}</code>）</span>
                 <span style="color:var(--v7-gold-bright);font-weight:700">步骤3</span>
                 <span>重启系统即可恢复正常</span>
               </div>

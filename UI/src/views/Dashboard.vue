@@ -29,7 +29,8 @@ onMounted(async () => {
   // v7 火眼金睛眼周粒子
   const eyeParticlesContainer = document.getElementById('v7EyeParticles');
   if (eyeParticlesContainer) {
-    for (let i = 0; i < 10; i++) {
+    // 眼周粒子从 10 降到 5（issue #4 GPU 优化），火眼金睛观感基本不变。
+    for (let i = 0; i < 5; i++) {
       const p = document.createElement('span');
       p.className = 'v7-eye-particle';
       const dur = 3.5 + Math.random() * 3;
@@ -307,13 +308,16 @@ onMounted(async () => {
   max-width: 100%;
 }
 
-/* Card animation delays */
-.card-svc   { animation: cardRise .8s cubic-bezier(.16,1,.3,1) .6s backwards; }
-.card-night { animation: cardRise .8s cubic-bezier(.16,1,.3,1) .68s backwards; }
-.card-ver   { animation: cardRise .8s cubic-bezier(.16,1,.3,1) .76s backwards; }
-.card-fl    { animation: cardRise .8s cubic-bezier(.16,1,.3,1) .84s backwards; }
-.card-fg    { animation: cardRise .8s cubic-bezier(.16,1,.3,1) .92s backwards; }
-.card-sec   { animation: cardRise .8s cubic-bezier(.16,1,.3,1) 1s backwards; }
+/* Card animation delays — 缩短延迟链与时长。
+   原 0.6~1s 延迟 + 0.8s 时长：切回仪表盘时（keep-alive 恢复 DOM 会重播 CSS 动画）
+   卡片要 ~1.8s 才全部浮现，数据其实已缓存，却显得"加载很慢"。
+   改为 0.03~0.18s 延迟 + 0.42s 时长，最后一张约 0.6s 就位，保留逐个浮现观感但顺滑得多。 */
+.card-svc   { animation: cardRise .42s cubic-bezier(.16,1,.3,1) .03s backwards; }
+.card-night { animation: cardRise .42s cubic-bezier(.16,1,.3,1) .06s backwards; }
+.card-ver   { animation: cardRise .42s cubic-bezier(.16,1,.3,1) .09s backwards; }
+.card-fl    { animation: cardRise .42s cubic-bezier(.16,1,.3,1) .12s backwards; }
+.card-fg    { animation: cardRise .42s cubic-bezier(.16,1,.3,1) .15s backwards; }
+.card-sec   { animation: cardRise .42s cubic-bezier(.16,1,.3,1) .18s backwards; }
 
 @keyframes cardRise {
   from { opacity: 0; transform: translateY(20px); }

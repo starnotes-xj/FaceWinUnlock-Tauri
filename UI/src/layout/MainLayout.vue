@@ -27,20 +27,33 @@ function isActive(item: any) {
   return route.path.startsWith(item.path);
 }
 
-/* ====== v7 3D 视差效果 ====== */
+/* ====== v7 3D 视差效果（rAF 节流）======
+   原实现每次 pointermove 都 getBoundingClientRect（强制同步 reflow）+ 写 CSS 变量，
+   触发整块 layout-wrapper（backdrop-filter: blur(40px) + preserve-3d）重绘，高频下拖累流畅度。
+   改为合并到每帧一次：pointermove 只记录坐标，rAF 回调统一计算并写入，效果不变、开销大降。 */
 let frameEl: HTMLElement | null = null;
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+let tiltRaf = 0;
+let lastPointer: { x: number; y: number } | null = null;
 
-function onPointerMove(e: PointerEvent) {
-  if (!frameEl || reducedMotion.matches) return;
+function applyTilt() {
+  tiltRaf = 0;
+  if (!frameEl || !lastPointer) return;
   const rect = frameEl.getBoundingClientRect();
-  const x = (e.clientX - rect.left) / rect.width - 0.5;
-  const y = (e.clientY - rect.top) / rect.height - 0.5;
+  const x = (lastPointer.x - rect.left) / rect.width - 0.5;
+  const y = (lastPointer.y - rect.top) / rect.height - 0.5;
   document.documentElement.style.setProperty('--tilt-x', (-y * 3.2).toFixed(2) + 'deg');
   document.documentElement.style.setProperty('--tilt-y', (x * 4.0).toFixed(2) + 'deg');
 }
 
+function onPointerMove(e: PointerEvent) {
+  if (!frameEl || reducedMotion.matches) return;
+  lastPointer = { x: e.clientX, y: e.clientY };
+  if (!tiltRaf) tiltRaf = requestAnimationFrame(applyTilt);
+}
+
 function onPointerLeave() {
+  if (tiltRaf) { cancelAnimationFrame(tiltRaf); tiltRaf = 0; }
   document.documentElement.style.setProperty('--tilt-x', '0deg');
   document.documentElement.style.setProperty('--tilt-y', '0deg');
 }
@@ -54,6 +67,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  if (tiltRaf) cancelAnimationFrame(tiltRaf);
   if (frameEl) {
     frameEl.removeEventListener('pointermove', onPointerMove);
     frameEl.removeEventListener('pointerleave', onPointerLeave);
@@ -235,8 +249,10 @@ function resetScroll() {
     0 0 0 1px rgba(201,166,62,.08),
     0 40px 100px -36px rgba(0,0,0,.74),
     var(--v7-glow-gold);
-  backdrop-filter: blur(40px);
-  -webkit-backdrop-filter: blur(40px);
+  /* blur 半径从 40px 降到 24px：backdrop-filter 模糊成本随半径超线性增长，
+     24px 在半透明暗色卡片上观感几乎一致，却显著降低 GPU 合成开销（issue #4）。 */
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
   transform-style: preserve-3d;
   transform: rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg));
   transition: transform 0.15s ease-out;
@@ -445,12 +461,16 @@ function resetScroll() {
 /* ==========================================
    路由过渡动画
    ========================================== */
-.fade-transform-enter-active,
-.fade-transform-leave-active {
-  transition: opacity .32s cubic-bezier(.4,0,.2,1), transform .32s cubic-bezier(.4,0,.2,1);
+/* out-in 串行：离开 + 进入时长相加。原各 .32s（合计 ~.64s）切换偏慢；
+   离开缩到 .13s、进入 .2s（合计 ~.33s），并减小位移，切换更跟手且保留淡入观感。 */
+.fade-transform-enter-active {
+  transition: opacity .2s cubic-bezier(.4,0,.2,1), transform .2s cubic-bezier(.4,0,.2,1);
 }
-.fade-transform-enter-from { opacity: 0; transform: translateY(14px); }
-.fade-transform-leave-to { opacity: 0; transform: translateY(-10px); }
+.fade-transform-leave-active {
+  transition: opacity .13s cubic-bezier(.4,0,.2,1), transform .13s cubic-bezier(.4,0,.2,1);
+}
+.fade-transform-enter-from { opacity: 0; transform: translateY(8px); }
+.fade-transform-leave-to { opacity: 0; transform: translateY(-6px); }
 
 /* ==========================================
    响应式

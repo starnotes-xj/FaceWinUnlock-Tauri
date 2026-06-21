@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { RouterView } from 'vue-router';
 import { connect } from './utils/sqlite.js';
 import { formatObjectString } from './utils/function.js';
@@ -18,7 +18,9 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 onMounted(() => {
   const particlesContainer = document.getElementById('v7Particles');
   if (particlesContainer) {
-    for (let i = 0; i < 24; i++) {
+    // 金箔粒子数从 24 降到 12：每个粒子是独立合成层(will-change)且在 backdrop-filter 下持续浮动，
+    // 减半可降低 GPU 合成与 blur 重算开销，氛围基本不变（issue #4）。
+    for (let i = 0; i < 12; i++) {
       const p = document.createElement('span');
       p.className = 'v7-particle';
       p.style.left = (Math.random() * 96 + 2) + '%';
@@ -30,6 +32,26 @@ onMounted(() => {
       particlesContainer.appendChild(p);
     }
   }
+
+  // GPU 优化（issue #4 GPU 占用过高）：窗口失焦/隐藏时暂停所有 CSS 动画。
+  // 应用常驻后台/托盘，背景水墨漂移、金箔粒子、火眼金睛等 infinite 动画会让 WebView2
+  // 持续满帧合成（再叠加多层 backdrop-filter:blur），没人看时也空耗 GPU。失焦即暂停 →
+  // 背景静止 → backdrop-filter 不再每帧重算 → GPU 大幅回落；重新聚焦自动恢复，零观感损失。
+  document.addEventListener('visibilitychange', syncAnimationState);
+  window.addEventListener('blur', syncAnimationState);
+  window.addEventListener('focus', syncAnimationState);
+  syncAnimationState();
+});
+
+function syncAnimationState() {
+  const idle = document.hidden || !document.hasFocus();
+  document.documentElement.classList.toggle('anim-idle', idle);
+}
+
+onUnmounted(() => {
+  document.removeEventListener('visibilitychange', syncAnimationState);
+  window.removeEventListener('blur', syncAnimationState);
+  window.removeEventListener('focus', syncAnimationState);
 });
 
 const isInit = ref(false);

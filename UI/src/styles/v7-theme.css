@@ -644,6 +644,15 @@ html.dark {
    v7 自定义组件 / 动画
    ========================================== */
 
+/* GPU 优化（issue #4）：窗口失焦/隐藏时（<html class="anim-idle">，由 App.vue 切换）
+   暂停所有 CSS 动画。背景静止后 backdrop-filter:blur 不再每帧重算，WebView2 进入空闲，
+   GPU 占用从两位数回落到接近 0；重新聚焦自动恢复，对正在看的用户零影响。 */
+html.anim-idle *,
+html.anim-idle *::before,
+html.anim-idle *::after {
+  animation-play-state: paused !important;
+}
+
 /* 背景氛围层 — 水墨晕染 + 宣纸纹理 */
 .v7-bg-layer {
   position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden;
@@ -655,7 +664,8 @@ html.dark {
     radial-gradient(ellipse 60% 80% at 75% 60%, rgba(30,58,95,0.12) 0%, transparent 55%),
     radial-gradient(ellipse 50% 50% at 40% 80%, rgba(194,53,49,0.04) 0%, transparent 50%),
     radial-gradient(ellipse 70% 70% at 85% 20%, rgba(201,166,62,0.05) 0%, transparent 50%);
-  animation: v7-inkDrift 30s ease-in-out infinite;
+  /* inkDrift 漂移动画已移除：30s 缓慢平移肉眼几乎不可辨，却让 backdrop-filter:blur 后的
+     背景每帧变化、无法被浏览器缓存，是 GPU 占用过高的主因之一（issue #4）。保留静态水墨渐变。 */
 }
 .v7-bg-layer::after {
   content: ""; position: absolute; inset: 0;

@@ -1,10 +1,11 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use opencv::videoio::{VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst};
 use tauri_plugin_log::log;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use winreg::enums::{HKEY_CLASSES_ROOT, HKEY_LOCAL_MACHINE, KEY_WRITE};
 use winreg::RegKey;
@@ -14,8 +15,23 @@ use crate::ROOT_DIR;
 
 /// DLL 文件名（不含路径）
 const DLL_NAME: &str = "FaceWinUnlock-Tauri.dll";
-/// System32 完整路径
-const SYSTEM32: &str = r"C:\Windows\System32";
+/// 动态解析真实 System32 目录。系统盘可能不是 C:（issue #137 —— DLL 路径硬编码
+/// `C:\Windows\System32`，在系统盘为 D:/E: 等的机器上部署失败、解锁失效）。
+/// 优先 `GetSystemDirectoryW`（最权威，64 位进程不受 WOW64 重定向），回退 `%SystemRoot%`，
+/// 再兜底 `C:\Windows\System32`。
+fn system32_dir() -> PathBuf {
+    unsafe {
+        let mut buf = [0u16; 260]; // MAX_PATH
+        let len = GetSystemDirectoryW(Some(&mut buf)) as usize;
+        if len > 0 && len <= buf.len() {
+            return PathBuf::from(String::from_utf16_lossy(&buf[..len]));
+        }
+    }
+    std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .map(|w| PathBuf::from(w).join("System32"))
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32"))
+}
 /// Credential Provider GUID
 const CP_GUID: &str = "{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}";
 /// CP 注册表路径（Credential Providers 列表）
@@ -98,7 +114,7 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
     // 1. 复制核心文件到 System32
     let copy_to_system32 = |name: &str| -> Result<(), CustomResult> {
         let src = ROOT_DIR.join("resources").join(name);
-        let dst = Path::new(SYSTEM32).join(name);
+        let dst = system32_dir().join(name);
         if !src.exists() {
             log::info!("deploy: {} 不存在，跳过", src.display());
             return Ok(());
@@ -146,7 +162,7 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
     let (inproc_key, _) = hkcr
         .create_subkey_with_flags(&inproc_path, KEY_WRITE)
         .map_err(|e| CustomResult::error(Some(format!("写 InprocServer32 失败: {}", e)), None))?;
-    let dll_full = format!(r"{}\{}", SYSTEM32, DLL_NAME);
+    let dll_full = system32_dir().join(DLL_NAME).to_string_lossy().into_owned();
     inproc_key
         .set_value("", &dll_full)
         .map_err(|e| CustomResult::error(Some(format!("写 DLL 路径失败: {}", e)), None))?;
@@ -300,7 +316,7 @@ pub fn uninstall_init() -> Result<CustomResult, CustomResult> {
 
     // 5. 删除 System32 文件（主 DLL + 已废弃的 UIA-Helper），best-effort 不因占用而中断
     for f in [DLL_NAME, "FaceWinUnlock-UIA-Helper.exe"] {
-        let p = Path::new(SYSTEM32).join(f);
+        let p = system32_dir().join(f);
         if p.exists() {
             let _ = fs::remove_file(&p);
         }
