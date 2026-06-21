@@ -1,5 +1,5 @@
 <script setup lang="ts">
-	import { ref, reactive } from 'vue'
+	import { ref, reactive, onMounted, nextTick } from 'vue'
 	import { ElMessage, ElMessageBox, ElLoading } from 'element-plus'
 	import {
 		Unlock,
@@ -17,13 +17,6 @@
 	import { useRouter } from 'vue-router'
 	import { openUrl } from '@tauri-apps/plugin-opener';
 
-	// 自启判断
-	invoke("check_scheduled_task", {taskName: 'FaceWinUnlockAutoStart'}).then((result)=>{
-		config.autoStart = result.data.enable;
-	}).catch((error)=>{
-		ElMessage.warning(formatObjectString("查询自启状态失败 ", error));
-	});
-
 	const optionsStore = useOptionsStore();
 	const router = useRouter();
 
@@ -40,7 +33,6 @@
 	const activeNames = ref([]);
 	// 解锁服务是否打开了？
 	const isServiceRunning = ref(false);
-	checkServiceRunning(null);
 	const config = reactive({
 		camera: optionsStore.getOptionValueByKey('camera') || "-1",
 		cameraRotation: parseInt(optionsStore.getOptionValueByKey('cameraRotation')) || 0,
@@ -67,7 +59,6 @@
 		autoLockEnabled: optionsStore.getOptionValueByKey('autoLockEnabled') ? (optionsStore.getOptionValueByKey('autoLockEnabled') == 'false' ? false : true) : false,
 		autoLockTimeout: parseInt(optionsStore.getOptionValueByKey('autoLockTimeout')) || 300,
 	})
-	checkAutoFaceRecogOnStart(null);
 
 	const dllConfig = reactive({
 		showTile: optionsStore.getOptionValueByKey('showTile') ? (optionsStore.getOptionValueByKey('showTile') == 'false' ? false : true) : true,
@@ -171,7 +162,22 @@
 		}
 	}
 
-	refreshPasskeyPluginStatus()
+	// 首次打开「软件配置」时，避免在 setup 同步阶段同时 spawn 多个外部进程
+	//（schtasks ×2 + 命名管道 + PowerShell Get-AppxPackage）与首屏渲染竞争造成明显卡顿：
+	// 统一移到 onMounted + nextTick，让首屏先绘制完成，再分批加载各项状态；
+	// Passkey 状态走 PowerShell（首次启动进程 1-3s 最慢），额外延迟错开，进一步避开首屏。
+	onMounted(() => {
+		nextTick(() => {
+			invoke("check_scheduled_task", { taskName: 'FaceWinUnlockAutoStart' }).then((result: any) => {
+				config.autoStart = result.data.enable;
+			}).catch((error) => {
+				ElMessage.warning(formatObjectString("查询自启状态失败 ", error));
+			});
+			checkServiceRunning(null);
+			checkAutoFaceRecogOnStart(null);
+			setTimeout(() => { refreshPasskeyPluginStatus(); }, 200);
+		});
+	});
 
 	const refreshCameraList = ()=>{
 		cameraListLoading.value = true;
