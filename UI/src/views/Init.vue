@@ -23,6 +23,7 @@ const passkeyAutoSetupAttempted = ref(false);
 const passkeyPlugin = reactive({
   loading: false, installed: false, sampleInstalled: false,
   version: '', bundledVersion: '', updateAvailable: false, available: false,
+  osSupported: true,
 });
 
 async function refreshPasskeyPluginStatus() {
@@ -36,6 +37,8 @@ async function refreshPasskeyPluginStatus() {
     passkeyPlugin.bundledVersion = status.bundled_version || '';
     passkeyPlugin.updateAvailable = Boolean(status.update_available);
     passkeyPlugin.available = Boolean(status.msix_available && status.certificate_available);
+    // os_supported 缺失（旧后端）时默认 true，保持兼容
+    passkeyPlugin.osSupported = status.os_supported !== false;
   } catch (error) {
     warn(formatObjectString('查询 Passkey 插件状态失败：', error));
   } finally { passkeyPlugin.loading = false; }
@@ -43,6 +46,11 @@ async function refreshPasskeyPluginStatus() {
 
 async function setupPasskeyPlugin(options: any = {}) {
   const auto = Boolean(options.auto);
+  if (!passkeyPlugin.osSupported) {
+    // 第三方 passkey Provider 需 Win11 24H2+；旧系统优雅跳过，绝不弹安装错误
+    if (!auto) ElMessage.info('当前系统不支持第三方通行密钥（需 Windows 11 24H2 及以上），已跳过此步骤，不影响面容解锁');
+    return;
+  }
   let replaceSample = false;
   if (passkeyPlugin.sampleInstalled && !passkeyPlugin.installed) {
     if (auto) { warn('检测到 Contoso 测试插件，自动 Passkey 设置已跳过'); return; }
@@ -97,6 +105,7 @@ async function maybeAutoSetupPasskeyPlugin() {
   if (passkeyAutoSetupAttempted.value) return;
   passkeyAutoSetupAttempted.value = true;
   await refreshPasskeyPluginStatus();
+  if (!passkeyPlugin.osSupported) return; // 旧系统不自动尝试安装，避免弹错
   if (passkeyPlugin.sampleInstalled && !passkeyPlugin.installed) return;
   if (passkeyPlugin.installed || passkeyPlugin.available) { await setupPasskeyPlugin({ auto: true }); }
 }
@@ -265,7 +274,11 @@ const finishInit = () => {
             <h3>启用官方 Passkey Provider</h3>
             <p>插件创建并持有自己的不可导出密钥，人脸识别只负责用户验证。</p>
             <div class="passkey-alerts">
-              <el-alert v-if="passkeyPlugin.installed"
+              <el-alert v-if="!passkeyPlugin.osSupported" type="info"
+                title="当前系统无需配置通行密钥"
+                description="第三方通行密钥（Passkey）Provider 需 Windows 11 24H2 及以上，当前系统不支持，已自动跳过。这不影响面容解锁，请直接点击下一步。"
+                show-icon :closable="false" />
+              <el-alert v-else-if="passkeyPlugin.installed"
                 :type="passkeyPlugin.updateAvailable ? 'warning' : 'success'"
                 :title="`正式插件已安装${passkeyPlugin.version ? '（' + passkeyPlugin.version + '）' : ''}`"
                 :description="passkeyPlugin.updateAvailable ? `安装包内有更新版本，点击按钮会先更新再打开启用页面。` : '向导会自动注册插件并打开 Windows 设置页。'"
@@ -278,7 +291,7 @@ const finishInit = () => {
                 description="点击下方按钮后会自动安装、注册插件并打开 Windows 启用页面。" show-icon :closable="false" />
               <div class="passkey-actions">
                 <el-button type="primary" :loading="passkeyPlugin.loading"
-                  :disabled="(!passkeyPlugin.installed || passkeyPlugin.updateAvailable) && !passkeyPlugin.available"
+                  :disabled="!passkeyPlugin.osSupported || ((!passkeyPlugin.installed || passkeyPlugin.updateAvailable) && !passkeyPlugin.available)"
                   @click="setupPasskeyPlugin()">
                   {{ passkeyPlugin.installed ? (passkeyPlugin.updateAvailable ? '更新并打开启用页' : '打开注册/启用流程') : '安装并打开启用页' }}
                 </el-button>

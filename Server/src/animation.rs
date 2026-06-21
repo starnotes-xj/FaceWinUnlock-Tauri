@@ -26,7 +26,7 @@ use windows::Win32::{
                 D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_U,
                 D2D1_COMPOSITE_MODE_SOURCE_OVER,
             },
-            D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1,
+            ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1,
             ID2D1PathGeometry1, ID2D1StrokeStyle, ID2D1RenderTarget,
             D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
             D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE,
@@ -35,16 +35,11 @@ use windows::Win32::{
             D2D1_INTERPOLATION_MODE_LINEAR,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
         },
-        Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL},
-        Direct3D11::{
-            D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
-        },
-        DirectComposition::{
-            DCompositionCreateDevice2, DCompositionWaitForCompositorClock,
-            IDCompositionDesktopDevice, IDCompositionVisual2,
-        },
+        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+        Direct3D11::{D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION},
+        DirectComposition::{IDCompositionDesktopDevice, IDCompositionVisual2},
         DirectWrite::{
-            DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
+            IDWriteFactory, IDWriteTextFormat,
             DWRITE_FACTORY_TYPE_SHARED, DWRITE_TEXT_ALIGNMENT_CENTER,
             DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_FONT_WEIGHT_BOLD,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
@@ -64,6 +59,158 @@ use windows::Win32::{
 use windows_core::Interface;
 
 use crate::read_facewinunlock_registry;
+
+// ── 图形 API 运行时动态加载（issue #3 修复 · 旧 Win10 兼容）──────────────
+//
+// CRITICAL / 回归防护：以下图形自由函数若用 windows-rs 的静态导入，本 CP DLL
+// 的 PE 导入表会硬依赖 d3d11.dll / dcomp.dll / dwrite.dll / d2d1.dll。其中
+// dcomp.dll!DCompositionWaitForCompositorClock 仅 Windows 10 1803 (build 17134)
+// 起才有该导出。在更老的 Win10 上 LogonUI 加载本 DLL 时静态导入解析失败
+// (STATUS_ENTRYPOINT_NOT_FOUND)，整个凭据提供程序无法加载——表现为：锁屏
+// 无面容磁贴、无 facewinunlock.log、面容解锁完全失效（而原版无图形依赖可正常加载）。
+//
+// 改为运行时 LoadLibrary + GetProcAddress 后，本 DLL 不再硬依赖任何图形库，
+// 任意 Windows 上都能被 LogonUI 加载；某导出缺失（老系统）时动画优雅降级
+// （渲染线程返回 Err 后退出），面容解锁不受影响。
+//
+// 绝不可改回 windows-rs 的 D3D11CreateDevice / DCompositionCreateDevice2 /
+// DCompositionWaitForCompositorClock / D2D1CreateFactory / DWriteCreateFactory
+// 等静态导入自由函数（会重新引入本 issue 的加载失败回归）。
+mod dyngfx {
+    use std::ffi::c_void;
+    use std::sync::OnceLock;
+
+    use windows::core::s;
+    use windows::core::{Error, Interface, Result, GUID, HRESULT, PCSTR};
+    use windows::Win32::Foundation::{E_NOTIMPL, HANDLE, HMODULE};
+    use windows::Win32::Graphics::Direct2D::{D2D1_FACTORY_TYPE, ID2D1Factory1};
+    use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE, D3D_FEATURE_LEVEL};
+    use windows::Win32::Graphics::Direct3D11::{D3D11_CREATE_DEVICE_FLAG, ID3D11Device};
+    use windows::Win32::Graphics::DirectComposition::IDCompositionDesktopDevice;
+    use windows::Win32::Graphics::DirectWrite::{DWRITE_FACTORY_TYPE, IDWriteFactory};
+    use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+
+    /// LoadLibrary + GetProcAddress；缺 DLL 或缺导出都返回 Err（绝不 panic）。
+    unsafe fn proc(dll: PCSTR, name: PCSTR) -> Result<unsafe extern "system" fn() -> isize> {
+        let module = LoadLibraryA(dll)?;
+        GetProcAddress(module, name)
+            .ok_or_else(|| Error::new(E_NOTIMPL, "graphics export missing (old Windows build?)"))
+    }
+
+    /// d3d11.dll!D3D11CreateDevice —— 仅取设备与 feature level（其余出参传 null）。
+    pub unsafe fn d3d11_create_device(
+        driver_type: D3D_DRIVER_TYPE,
+        flags: D3D11_CREATE_DEVICE_FLAG,
+        sdk_version: u32,
+    ) -> Result<(ID3D11Device, D3D_FEATURE_LEVEL)> {
+        type Func = unsafe extern "system" fn(
+            *mut c_void,              // pAdapter (IDXGIAdapter*)
+            D3D_DRIVER_TYPE,          // DriverType
+            HMODULE,                  // Software
+            D3D11_CREATE_DEVICE_FLAG, // Flags
+            *const D3D_FEATURE_LEVEL, // pFeatureLevels
+            u32,                      // FeatureLevels
+            u32,                      // SDKVersion
+            *mut *mut c_void,         // ppDevice
+            *mut D3D_FEATURE_LEVEL,   // pFeatureLevel
+            *mut *mut c_void,         // ppImmediateContext
+        ) -> HRESULT;
+        let func: Func = std::mem::transmute(proc(s!("d3d11.dll"), s!("D3D11CreateDevice"))?);
+
+        let mut device: *mut c_void = std::ptr::null_mut();
+        let mut level = D3D_FEATURE_LEVEL::default();
+        func(
+            std::ptr::null_mut(),
+            driver_type,
+            HMODULE::default(),
+            flags,
+            std::ptr::null(),
+            0,
+            sdk_version,
+            &mut device,
+            &mut level,
+            std::ptr::null_mut(),
+        )
+        .ok()?;
+        if device.is_null() {
+            return Err(Error::new(E_NOTIMPL, "D3D11CreateDevice 返回空设备"));
+        }
+        Ok((ID3D11Device::from_raw(device), level))
+    }
+
+    /// dcomp.dll!DCompositionCreateDevice2 → IDCompositionDesktopDevice。
+    pub unsafe fn dcomposition_create_device2(
+        rendering_device: &IDXGIDevice,
+    ) -> Result<IDCompositionDesktopDevice> {
+        type Func = unsafe extern "system" fn(
+            *mut c_void,      // renderingDevice (IUnknown*)
+            *const GUID,      // iid
+            *mut *mut c_void, // dcompositionDevice (out)
+        ) -> HRESULT;
+        let func: Func =
+            std::mem::transmute(proc(s!("dcomp.dll"), s!("DCompositionCreateDevice2"))?);
+
+        let mut out: *mut c_void = std::ptr::null_mut();
+        func(rendering_device.as_raw(), &IDCompositionDesktopDevice::IID, &mut out).ok()?;
+        if out.is_null() {
+            return Err(Error::new(E_NOTIMPL, "DCompositionCreateDevice2 返回空设备"));
+        }
+        Ok(IDCompositionDesktopDevice::from_raw(out))
+    }
+
+    /// d2d1.dll!D2D1CreateFactory → ID2D1Factory1（不传 factory options）。
+    pub unsafe fn d2d1_create_factory(factory_type: D2D1_FACTORY_TYPE) -> Result<ID2D1Factory1> {
+        type Func = unsafe extern "system" fn(
+            D2D1_FACTORY_TYPE, // factoryType
+            *const GUID,       // riid
+            *const c_void,     // pFactoryOptions (optional)
+            *mut *mut c_void,  // ppIFactory (out)
+        ) -> HRESULT;
+        let func: Func = std::mem::transmute(proc(s!("d2d1.dll"), s!("D2D1CreateFactory"))?);
+
+        let mut out: *mut c_void = std::ptr::null_mut();
+        func(factory_type, &ID2D1Factory1::IID, std::ptr::null(), &mut out).ok()?;
+        if out.is_null() {
+            return Err(Error::new(E_NOTIMPL, "D2D1CreateFactory 返回空工厂"));
+        }
+        Ok(ID2D1Factory1::from_raw(out))
+    }
+
+    /// dwrite.dll!DWriteCreateFactory → IDWriteFactory。
+    pub unsafe fn dwrite_create_factory(factory_type: DWRITE_FACTORY_TYPE) -> Result<IDWriteFactory> {
+        type Func = unsafe extern "system" fn(
+            DWRITE_FACTORY_TYPE, // factoryType
+            *const GUID,         // iid
+            *mut *mut c_void,    // factory (out, IUnknown**)
+        ) -> HRESULT;
+        let func: Func = std::mem::transmute(proc(s!("dwrite.dll"), s!("DWriteCreateFactory"))?);
+
+        let mut out: *mut c_void = std::ptr::null_mut();
+        func(factory_type, &IDWriteFactory::IID, &mut out).ok()?;
+        if out.is_null() {
+            return Err(Error::new(E_NOTIMPL, "DWriteCreateFactory 返回空工厂"));
+        }
+        Ok(IDWriteFactory::from_raw(out))
+    }
+
+    /// dcomp.dll!DCompositionWaitForCompositorClock（每帧调用，缓存函数指针）。
+    /// 老系统缺该导出时返回 0（不等待）；渲染主循环有挂钟兜底限速，不会空转。
+    pub unsafe fn wait_for_compositor_clock(count: u32, handles: *const HANDLE, timeout_ms: u32) -> u32 {
+        type Func = unsafe extern "system" fn(u32, *const HANDLE, u32) -> u32;
+        static PTR: OnceLock<Option<unsafe extern "system" fn() -> isize>> = OnceLock::new();
+        let cached = PTR.get_or_init(|| unsafe {
+            proc(s!("dcomp.dll"), s!("DCompositionWaitForCompositorClock")).ok()
+        });
+        match cached {
+            Some(raw) => {
+                let func: Func = std::mem::transmute(*raw);
+                func(count, handles, timeout_ms)
+            }
+            None => 0,
+        }
+    }
+}
 
 // ── 常量 ──────────────────────────────────────────────────────
 
@@ -495,7 +642,7 @@ unsafe fn create_all_resources(
 
     // ── DWrite ──
 
-    let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+    let dwrite_factory: IDWriteFactory = dyngfx::dwrite_create_factory(DWRITE_FACTORY_TYPE_SHARED)?;
     let text_format: IDWriteTextFormat = dwrite_factory.CreateTextFormat(
         w!("Segoe UI"),
         None,
@@ -825,15 +972,17 @@ fn run_render_loop(
         }; }
 
         log::info!("[anim] initializing D3D11 device...");
-        let mut d3d_device: Option<ID3D11Device> = None;
-        let mut feature_level = D3D_FEATURE_LEVEL::default();
-        D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut d3d_device), Some(&mut feature_level), None)?;
-        let d3d_device = d3d_device.ok_or_else(|| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, "D3D11 设备为空"))?;
+        // 动态加载 D3D11CreateDevice（见 dyngfx 模块：消除 PE 静态导入，兼容旧 Win10）
+        let (d3d_device, _feature_level) = dyngfx::d3d11_create_device(
+            D3D_DRIVER_TYPE_HARDWARE,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            D3D11_SDK_VERSION,
+        )?;
         log::info!("[anim] D3D11 device created");
         check_stop!();
 
         let dxgi_device: IDXGIDevice = d3d_device.cast()?;
-        let dcomp_device: IDCompositionDesktopDevice = DCompositionCreateDevice2(&dxgi_device)?;
+        let dcomp_device: IDCompositionDesktopDevice = dyngfx::dcomposition_create_device2(&dxgi_device)?;
         let dcomp_target = dcomp_device.CreateTargetForHwnd(parent_hwnd, true)?;
         let dcomp_visual: IDCompositionVisual2 = dcomp_device.CreateVisual()?.cast()?;
         dcomp_target.SetRoot(&dcomp_visual)?;
@@ -866,7 +1015,7 @@ fn run_render_loop(
         dcomp_device.Commit()?;
         check_stop!();
 
-        let d2d_factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+        let d2d_factory: ID2D1Factory1 = dyngfx::d2d1_create_factory(D2D1_FACTORY_TYPE_SINGLE_THREADED)?;
         let d2d_device = d2d_factory.CreateDevice(&dxgi_device)?;
         let d2d_context = d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
         check_stop!();
@@ -953,7 +1102,7 @@ fn run_render_loop(
             // 200ms 超时让 stop_flag 能在该频率响应（compositor 正常情况每 1/Hz 秒触发）
             for _ in 0..ticks_per_frame {
                 if state.stop.load(Ordering::SeqCst) { return Ok(()); }
-                let _ = DCompositionWaitForCompositorClock(None, 200);
+                let _ = dyngfx::wait_for_compositor_clock(0, std::ptr::null(), 200);
             }
 
             // 冷启动兜底限速：开机首次登录时 DWM 合成器时钟可能尚未稳定，

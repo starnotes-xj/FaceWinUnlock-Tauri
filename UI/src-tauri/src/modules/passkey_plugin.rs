@@ -340,6 +340,30 @@ fn compare_versions(left: &str, right: &str) -> Ordering {
     Ordering::Equal
 }
 
+/// 第三方通行密钥（passkey）凭据 Provider 是 Windows 11 24H2 (build 26100) 引入的
+/// 系统功能，更旧的系统（含**全部 Windows 10**）无法注册/使用该插件——MSIX 的
+/// `TargetDeviceFamily MinVersion` 即为 `10.0.26100.0`，在 Win10 上 `Add-AppxPackage`
+/// 会直接报 `0x80073CFD`(ERROR_INSTALL_PREREQUISITE_FAILED)。
+///
+/// 用于让初始化向导在不支持的系统上**优雅跳过** Passkey 步骤（给友好提示而非弹出
+/// 红色安装错误，避免用户误以为整个初始化失败 —— 面容解锁的核心在第二步已配好）。
+const PASSKEY_MIN_BUILD: u32 = 26100;
+
+fn current_os_build() -> u32 {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", KEY_READ)
+        .ok()
+        .and_then(|key| key.get_value::<String, _>("CurrentBuildNumber").ok())
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+fn is_passkey_os_supported() -> bool {
+    current_os_build() >= PASSKEY_MIN_BUILD
+}
+
 fn status_value() -> Result<Value, String> {
     let formal = query_package(FORMAL_PACKAGE_NAME)?;
     let sample = query_package(SAMPLE_PACKAGE_NAME)?;
@@ -361,6 +385,7 @@ fn status_value() -> Result<Value, String> {
         "certificate_available": artifact_path("FaceWinUnlock-Passkey.cer").exists(),
         "bundled_version": bundled_version,
         "update_available": update_available,
+        "os_supported": is_passkey_os_supported(),
     }))
 }
 
@@ -444,6 +469,19 @@ pub fn get_passkey_plugin_status() -> Result<CustomResult, CustomResult> {
 
 #[tauri::command]
 pub fn install_passkey_plugin(replace_sample: bool) -> Result<CustomResult, CustomResult> {
+    // OS 兜底：旧系统（含全部 Win10）不支持第三方 passkey Provider，直接返回可读提示，
+    // 不把 Add-AppxPackage 的 0x80073CFD 原始错误透传给用户（前端通常已据 os_supported 跳过）。
+    if !is_passkey_os_supported() {
+        return Err(CustomResult::error(
+            Some(format!(
+                "当前 Windows 版本（build {}）不支持第三方通行密钥 Provider，该功能需 Windows 11 24H2（build {}）及以上。已跳过 Passkey 插件，不影响面容解锁。",
+                current_os_build(),
+                PASSKEY_MIN_BUILD
+            )),
+            status_value().ok(),
+        ));
+    }
+
     let package_path = artifact_path("FaceWinUnlock-Passkey.msix");
     let certificate_path = artifact_path("FaceWinUnlock-Passkey.cer");
     if !package_path.exists() || !certificate_path.exists() {
