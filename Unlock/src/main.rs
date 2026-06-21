@@ -1965,6 +1965,22 @@ fn main() {
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
 
+    // OpenCL kernel tuning 缓存目录（issue #3）：不设此目录，OpenCV 的 ocl4dnn 每次 forward
+    // 都会对卷积层重新做 OpenCL kernel 编译 + auto-tuning —— OpenCL/FP16 后端首次推理可达
+    // ~90s，且因结果不持久化，**每次解锁都重复**（用户反馈锁屏转圈 90 秒不解锁）。指向一个
+    // 已存在、可写、持久的目录后，只有首次 tuning 慢，后续从缓存秒加载。必须在任何 OpenCV
+    // OpenCL 调用前设置。SYSTEM 服务用 ProgramData（SYSTEM 可写且重启后保留）。
+    {
+        let ocl_cache = PathBuf::from(
+            std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string()),
+        )
+        .join("facewinunlock-tauri")
+        .join("ocl_cache");
+        if std::fs::create_dir_all(&ocl_cache).is_ok() {
+            std::env::set_var("OPENCV_OCL4DNN_CONFIG_PATH", &ocl_cache);
+        }
+    }
+
     // ── NGC 解密链 Smoke Test（CLI 模式）────────────────────────────
     let args: Vec<String> = std::env::args().collect();
     let is_cli_mode = args.iter().any(|a| a == "--ngc-smoke-test" || a == "--ngc-probe" || a == "--ngc-dump" || a == "--ngc-keys" || a == "--ngc-enum-cng" || a == "--ngc-sign-probe" || a == "--ngc-container-dump" || a == "--ngc-srk" || a == "--ngc-ncrypt" || a == "--ngc-ncrypt-vault" || a == "--ngc-ncrypt-export" || a == "--ngc-dump-enc" || a == "--ngc-cbor-deep-dump" || a == "--ngc-phase1" || a == "--ngc-phase1-path-a" || a == "--ngc-probe-derive" || a == "--uia-dump-credui" || a == "--uia-dump-all" || a == "--uia-autofill-pin" || a == "--uia-blind-inject" || a == "--pin-save");

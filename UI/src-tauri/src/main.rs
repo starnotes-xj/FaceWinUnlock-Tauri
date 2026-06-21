@@ -138,5 +138,18 @@ fn main() {
 
     std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", webview_data_dir);
 
+    // OpenCL kernel tuning 缓存目录（issue #3）：不设此目录，OpenCV 的 ocl4dnn 每次 forward 都会
+    // 对卷积层重新做 OpenCL kernel 编译 + auto-tuning —— GPU(OpenCL/FP16) 后端首次推理极慢
+    // 且每次重复（录入预览/一致性检查黑屏卡顿）。指向持久可写目录后只首次慢、后续从缓存秒加载。
+    // 必须在加载 OpenCV 模型前设置。UI 以用户身份运行，用 LOCALAPPDATA（用户可写且持久）。
+    {
+        let ocl_cache = env::var("LOCALAPPDATA")
+            .map(|p| PathBuf::from(p).join("facewinunlock-tauri").join("ocl_cache"))
+            .unwrap_or_else(|_| exe_dir.join("cache").join("ocl_cache"));
+        if fs::create_dir_all(&ocl_cache).is_ok() {
+            std::env::set_var("OPENCV_OCL4DNN_CONFIG_PATH", &ocl_cache);
+        }
+    }
+
     facewinunlock_tauri_lib::run()
 }

@@ -140,6 +140,15 @@ OpenCL FP16 在这台 Win10 机器上 GPU kernel 编译 + FP16 精度问题 → 
 - `Add.vue`：一致性检查/识别循环 catch 时停止循环（不刷屏）+ 报模型/摄像头未就绪时提示可能是
   GPU 后端问题、引导改回 CPU。
 - **不做自动回退**：无法区分「首帧 kernel 编译慢 vs 一直慢」，且可能误判本就正常的 GPU 设备。
+- **OpenCL kernel tuning 缓存**（v0.5.3 追加，`Unlock/src/main.rs` + `UI/src-tauri/src/main.rs`）：
+  启动早期设 `OPENCV_OCL4DNN_CONFIG_PATH` 到持久可写目录（SYSTEM 服务→ProgramData、UI→LOCALAPPDATA，
+  目录须先 `create_dir_all`）。OpenCV 的 ocl4dnn **默认不持久化** auto-tuning 结果 → 每次 `forward`
+  对卷积层重新编译 OpenCL kernel + tuning（首次推理 ~90s 且**每次解锁/识别都重复**）；设此目录后
+  只首次 tuning、后续从缓存秒加载。**必须在任何 OpenCV OpenCL 调用前 set_var**。
+  **边界**：只解决「慢」。若某显卡 FP16 精度不足，特征向量偏差导致 cosine 相似度偏低、
+  「匹配不上」（日志 `finished without a match`），缓存无能为力，仍需改回 CPU 或试 `opencl`（非 FP16）。
+  作者自己 Win11 + OpenCL FP16 正常（能匹配），说明软件链路可行；ViCrack 的 Win10 慢的主因即
+  「每次重 tuning」，此优化直接命中。
 
 ### 更新检查「已是最新仍提示」（独立 bug）
 
