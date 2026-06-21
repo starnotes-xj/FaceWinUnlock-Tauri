@@ -35,7 +35,7 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../../target/release/FaceWinUnlock-Server.exe": "FaceWinUnlock-Server.exe",
+      "../../target/release/FaceWinUnlock-Server.exe": "resources/FaceWinUnlock-Server.exe",
       "../../target/release/FaceWinUnlock-Passkey.msix": "FaceWinUnlock-Passkey.msix",
       "../../target/release/FaceWinUnlock-Passkey.cer": "FaceWinUnlock-Passkey.cer",
       "../../scripts/install-passkey-plugin.ps1": "scripts/install-passkey-plugin.ps1",
@@ -46,7 +46,7 @@
       "../resources/face_detection_yunet_2023mar.onnx": "resources/face_detection_yunet_2023mar.onnx",
       "../resources/face_liveness.onnx": "resources/face_liveness.onnx",
       "../resources/face_recognition_sface_2021dec.onnx": "resources/face_recognition_sface_2021dec.onnx",
-      "D:\\OpenCV\\build\\x64\\vc16\\bin\\opencv_world4120.dll": "opencv_world4120.dll",
+      "D:\\OpenCV\\build\\x64\\vc16\\bin\\opencv_world4120.dll": "resources/opencv_world4120.dll",
       "D:\\OpenCV\\openvino_runtime\\": "."
     },
     "windows": {

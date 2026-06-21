@@ -1687,10 +1687,12 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
     let mut last_record_reload = instant_secs_ago(60);
     let mut camera_rotation = load_camera_rotation(&db_path);
     let mut requested_inference = load_inference_backend(&db_path);
-    // 授权冷却：人脸授权成功后 AUTH_COOLDOWN 内不再开摄像头。
+    // 授权冷却：人脸授权成功后这段时间内不再开摄像头。
     // 根因：授权只更新 state.last_user_active，但不会重置 OS 的 GetLastInputInfo；
-    // 用户长时间不碰键鼠时，下一轮 OS idle 仍超时 → 又开摄像头 → 每秒闪一次。
-    const AUTH_COOLDOWN: Duration = Duration::from_secs(60);
+    // 用户长时间不碰键鼠（看屏幕、读网页、盯终端）时，下一轮 OS idle 仍超时 → 又开摄像头。
+    // 冷却时长取 max(60s, autoLockTimeout)：用户在场时按其设定的检测间隔周期性复查，
+    // 而非固定每 60s 一次，把空闲期间摄像头亮起频率降到与 autoLockTimeout 一致（通常 5 分钟）。
+    const AUTH_COOLDOWN_MIN: Duration = Duration::from_secs(60);
     let mut auth_cooldown_until: Option<Instant> = None;
 
     loop {
@@ -1745,8 +1747,8 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         }
         if records.is_empty() { continue; } // 无人脸记录，不锁屏
 
-        // 授权冷却期内不开摄像头（修闪烁）：人脸授权成功后 AUTH_COOLDOWN 内，即使 OS
-        // idle 仍超时也跳过——人脸识别不会重置 GetLastInputInfo，否则每秒重复开摄像头闪烁。
+        // 授权冷却期内不开摄像头（修闪烁）：人脸授权成功后冷却期内，即使 OS idle 仍超时
+        // 也跳过——人脸识别不会重置 GetLastInputInfo，否则会反复开摄像头闪烁。
         if let Some(until) = auth_cooldown_until {
             if Instant::now() < until { continue; }
             auth_cooldown_until = None;
@@ -1761,13 +1763,32 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             continue;
         }
 
-        // 打开摄像头做一次验证（最多 15 帧 ≈ 2~3 秒）
+        // 打开摄像头做一次验证（最多 15 帧 ≈ 2~3 秒）。
+        // 关键：这里开摄像头是「自动锁屏空闲复查在场」触发的，与凭据提供程序的 "run" 无关。
+        // 必须写日志，否则用户只看到摄像头亮、unlock.log 却空白，无从判断是 auto-lock 正常工作
+        // 还是异常调用（排障史：曾因这里没日志，误以为「非人脸场景乱亮摄像头」是 bug）。
+        log_service(
+            &exe_dir,
+            "INFO",
+            &format!(
+                "auto-lock: idle {}s >= timeout {}s, opening camera to verify presence",
+                idle_ms / 1000,
+                auto_lock_timeout
+            ),
+        );
         let mut cam: Option<VideoCapture> = None;
         let camera_index = configured_camera_index(&db_path);
-        if let Some((c, _)) = open_configured_camera(camera_index) {
+        if let Some((c, backend_name)) = open_configured_camera(camera_index) {
+            log_service(&exe_dir, "INFO", &format!("auto-lock: camera opened via {}", backend_name));
             cam = Some(c);
         }
-        let cap = match cam.as_mut() { Some(c) => c, None => continue };
+        let cap = match cam.as_mut() {
+            Some(c) => c,
+            None => {
+                log_service(&exe_dir, "WARN", "auto-lock: failed to open camera, skip this check");
+                continue;
+            }
+        };
 
         let mut authorized = false;
         for _ in 0..15 {
@@ -1800,12 +1821,21 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
 
         if authorized {
             // 授权用户在场，更新活跃时间并进入授权冷却：下一轮 OS idle 仍会超时
-            // （人脸识别不重置 GetLastInputInfo），冷却避免每秒重复开摄像头闪烁。
+            // （人脸识别不重置 GetLastInputInfo），冷却避免反复开摄像头闪烁。
+            // 冷却时长 = max(60s, autoLockTimeout)：在场时按用户设定的检测间隔周期复查，
+            // 而非固定每 60s，把空闲期间摄像头亮起频率降到与检测间隔一致。
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
             state.last_user_active.store(now, Ordering::SeqCst);
-            auth_cooldown_until = Some(Instant::now() + AUTH_COOLDOWN);
+            let cooldown = AUTH_COOLDOWN_MIN.max(Duration::from_secs(auto_lock_timeout));
+            auth_cooldown_until = Some(Instant::now() + cooldown);
+            log_service(
+                &exe_dir,
+                "INFO",
+                &format!("auto-lock: authorized user present, next presence check in {}s", cooldown.as_secs()),
+            );
         } else {
             // 无人或非授权人员 → 锁屏，清空授权冷却（锁屏后下次需重新识别）
+            log_service(&exe_dir, "INFO", "auto-lock: no authorized face, locking workstation");
             let _ = unsafe { LockWorkStation() };
             auth_cooldown_until = None;
             // 锁屏后等 5 秒再继续检查

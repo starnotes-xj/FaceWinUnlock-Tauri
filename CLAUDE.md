@@ -372,7 +372,8 @@ Models are loaded into `APP_STATE` by `load_opencv_model(backend, target)`. All 
 | [#104](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/104) | 域账户登录 | `Unlock/src/main.rs` + `UI/` | `FaceRecord.domain` + `JsonData.domain` |
 | [#125](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/125) | Intel NPU 录入报错 | `UI/src-tauri/src/modules/faces.rs` | 非 CPU 后端失败自动回退 CPU + `ModelLoadResult` 提示 |
 | broker 三场景区分（查看密码/passkey/设置PIN，反复 ≥6 次）| `Server/src/CSampleProvider.rs` + `Server/src/lib.rs` | `SetUsageScenario` 用 `classify_broker_scene()` 读**触发应用窗口标题**区分：含「密码」→人脸；含「通行密钥/passkey/安全密钥」→`E_NOTIMPL` 跳过；其它→跳过。**绝不**用 cpus/dwflags/UIA/进程名区分（实测三场景同构、UIA 在 broker 进程被封）、**绝不**让 broker 无条件先人脸（拦 PIN 输入）、**绝不**按时间冷却拒绝 run（死亡螺旋）。改后必须验证四场景各一遍。详见 [docs/credui-broker-scene-and-autolock-fixes.md](docs/credui-broker-scene-and-autolock-fixes.md) |
-| 自动锁屏每秒开摄像头闪烁 | `Unlock/src/main.rs` | `auto_lock_monitor` 授权成功后设 `AUTH_COOLDOWN`(60s)，冷却期内不开摄像头——人脸识别**不**重置 OS `GetLastInputInfo`，不冷却就每秒重复开摄像头；真实键鼠输入/锁屏时清空冷却 |
+| 自动锁屏摄像头乱亮（每秒/每60s/无日志）| `Unlock/src/main.rs` | `auto_lock_monitor` 授权成功后设冷却 `max(60s, autoLockTimeout)`（**非固定 60s**，否则用户在场时每 60s 仍开摄像头复查，依旧乱亮），冷却期内不开摄像头——人脸识别**不**重置 OS `GetLastInputInfo`；真实键鼠输入/锁屏时清空冷却；**开摄像头/授权/锁屏必须写 `unlock.log`**（`auto-lock:`，无日志会被误判为乱亮 bug）。详见 [docs/credui-broker-scene-and-autolock-fixes.md](docs/credui-broker-scene-and-autolock-fixes.md) |
+| opencv_world4120.dll / FaceWinUnlock-Server.exe 从 NSIS 安装包丢失 | `UI/src-tauri/tauri.conf.json` + `UI/src-tauri/nsis/hooks.nsh` | 运行报「找不到 opencv_world4120.dll」/后台服务不自启。根因：`bundle.resources` 含 `"."` 目录展开时，Tauri v2+NSIS 漏掉映射到**安装根的单文件**。**绝不**把运行时单文件直接映射到安装根，统一走 `resources/` 子目录 + hooks 复制到根。详见 [docs/opencv-world-packaging-fix.md](docs/opencv-world-packaging-fix.md) |
 
 ### 关键改动文件
 

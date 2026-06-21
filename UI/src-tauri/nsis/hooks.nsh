@@ -15,11 +15,17 @@
 !macro NSIS_HOOK_POSTINSTALL
   CreateDirectory "$INSTDIR\logs"
 
-  ; 兜底: 如果 DLL 被放到了 resources/ 子目录, 复制到安装根目录
-  IfFileExists "$INSTDIR\resources\opencv_world4120.dll" 0 +2
+  ; 运行时文件部署到安装根目录（= 主 EXE 同目录 = Windows DLL 搜索路径起点）。
+  ; opencv_world4120.dll 与 FaceWinUnlock-Server.exe 改由 resources/ 子目录打包：
+  ; Tauri v2 对「映射到安装根的单文件」打包不稳定，这两个文件曾整体从 NSIS 安装包
+  ; 丢失（运行时报「找不到 opencv_world4120.dll」、后台人脸服务缺失）。这里安装后
+  ; 复制到根，并删除 resources 副本，避免 61MB 的 DLL 占双份磁盘。
+  IfFileExists "$INSTDIR\resources\opencv_world4120.dll" 0 +3
     CopyFiles /SILENT "$INSTDIR\resources\opencv_world4120.dll" "$INSTDIR\"
-  IfFileExists "$INSTDIR\resources\opencv_videoio_ffmpeg4120_64.dll" 0 +2
-    CopyFiles /SILENT "$INSTDIR\resources\opencv_videoio_ffmpeg4120_64.dll" "$INSTDIR\"
+    Delete "$INSTDIR\resources\opencv_world4120.dll"
+  IfFileExists "$INSTDIR\resources\FaceWinUnlock-Server.exe" 0 +3
+    CopyFiles /SILENT "$INSTDIR\resources\FaceWinUnlock-Server.exe" "$INSTDIR\"
+    Delete "$INSTDIR\resources\FaceWinUnlock-Server.exe"
 
   ; 同步部署 Credential Provider DLL。登录/锁屏磁贴加载的是 System32 中注册的 DLL，
   ; 仅覆盖安装目录资源文件不会更新锁屏界面的文字和逻辑。
