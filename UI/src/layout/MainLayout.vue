@@ -4,6 +4,7 @@ import { RouterView, useRouter, useRoute } from 'vue-router';
 import { Sunny, Moon, ArrowLeft } from '@element-plus/icons-vue';
 import { ElNotification, ElMessageBox, ElLoading, ElMessage } from 'element-plus';
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { useTheme } from '../hook/useTheme';
 
 const router = useRouter();
@@ -85,7 +86,7 @@ async function manualCheckUpdate() {
     if (info?.has_update) {
       ElNotification({
         title: '发现更新', message: `${formatUpdateMessage(info)}（点击前往下载）`, type: 'info', duration: 0,
-        onClick: () => { if (info.release_url) window.open(info.release_url, '_blank'); }
+        onClick: () => { if (info.release_url) openUrl(info.release_url); }
       });
     } else { ElMessage.success(`已是最新版本 v${info?.current_version || version.value}`); }
   } catch (e) { ElMessage.error('检查更新失败: ' + (e?.toString() || '网络错误')); }
@@ -99,7 +100,7 @@ onMounted(async () => {
     try { diff = await invoke('fetch_update_diff'); } catch {
       ElNotification({
         title: '发现更新', message: `${formatUpdateMessage(info)}（点击前往下载）`, type: 'info', duration: 10000,
-        onClick: () => { if (info.release_url) window.open(info.release_url, '_blank'); }
+        onClick: () => { if (info.release_url) openUrl(info.release_url); }
       }); return;
     }
     if (!diff?.files_to_update?.length) return;
