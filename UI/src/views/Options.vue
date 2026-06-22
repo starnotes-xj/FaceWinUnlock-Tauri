@@ -191,6 +191,29 @@
 		}
 	}
 
+	// 清理插件残留的 KSP 私钥：插件「清空/删除通行密钥」只删元数据与 Windows 索引、不删私钥（issue #3）。
+	async function cleanupResidualKeys() {
+		try {
+			await ElMessageBox.confirm(
+				'将删除本机残留的 FaceWinUnlock 通行密钥私钥——插件的「清空/删除」不会删除这些私钥。<br/><br/>' +
+				'若你仍在使用之前注册的通行密钥，请勿清理；清理后相关站点需重新注册。确定清理吗？',
+				'清理残留私钥',
+				{ type: 'warning', dangerouslyUseHTMLString: true, confirmButtonText: '确认清理', cancelButtonText: '取消' }
+			)
+		} catch {
+			return
+		}
+		passkeyPlugin.loading = true
+		try {
+			const result: any = await invoke('cleanup_passkey_residual_keys')
+			ElMessage.success(result?.msg || '已清理残留私钥')
+		} catch (error) {
+			ElMessage.error(formatObjectString('清理残留私钥失败：', error))
+		} finally {
+			passkeyPlugin.loading = false
+		}
+	}
+
 	// 首次打开「软件配置」时，避免在 setup 同步阶段同时 spawn 多个外部进程
 	//（schtasks ×2 + 命名管道 + PowerShell Get-AppxPackage）与首屏渲染竞争造成明显卡顿：
 	// 统一移到 onMounted + nextTick，让首屏先绘制完成，再分批加载各项状态；
@@ -975,6 +998,13 @@
 									:loading="passkeyPlugin.loading"
 									@click="uninstallPasskeyPlugin"
 								>卸载插件</el-button>
+								<el-button
+									size="small"
+									type="warning"
+									plain
+									:loading="passkeyPlugin.loading"
+									@click="cleanupResidualKeys"
+								>清理残留私钥</el-button>
 							</div>
 							<p v-if="passkeyPlugin.sampleInstalled && !passkeyPlugin.installed" class="sub" style="margin-top:10px;">
 								迁移会删除测试插件本地凭据，网站端需使用正式插件重新注册通行密钥。

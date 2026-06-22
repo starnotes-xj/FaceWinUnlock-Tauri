@@ -896,3 +896,43 @@ pub fn uninstall_passkey_plugin(purge: bool) -> Result<CustomResult, CustomResul
     };
     Ok(CustomResult::success(Some(msg.to_string()), Some(status)))
 }
+
+/// 清理插件残留的 KSP 私钥（`facewinunlock/*`）。
+///
+/// 背景：插件的「清空/删除通行密钥」只删元数据与 Windows 索引，**不删** NCrypt 私钥，
+/// 导致私钥残留在 `%APPDATA%\Microsoft\Crypto\Keys`（每个约 1-2KB，占用极小但属隐私残留）。
+/// 本命令用 certutil 枚举并删除所有 `facewinunlock/` 前缀的 Software KSP 私钥，返回删除数量。
+/// 与「彻底卸载(Purge)」删私钥逻辑一致，但无需卸载插件、可单独清理。
+#[tauri::command]
+pub fn cleanup_passkey_residual_keys() -> Result<CustomResult, CustomResult> {
+    let script = "\
+        $deleted = 0; \
+        $keys = & certutil.exe -user -key -csp 'Microsoft Software Key Storage Provider' 2>$null; \
+        if ($keys) { foreach ($line in $keys) { \
+            $t = \"$line\".Trim(); \
+            if ($t -like 'facewinunlock/*') { \
+                & certutil.exe -user -delkey \"$t\" 2>$null | Out-Null; \
+                if ($LASTEXITCODE -eq 0) { $deleted++ } \
+            } \
+        } }; \
+        Write-Output $deleted";
+    let output = run_powershell(script)
+        .map_err(|e| CustomResult::error(Some(format!("清理残留私钥失败: {e}")), None))?;
+    if !output.status.success() {
+        return Err(CustomResult::error(
+            Some(format!(
+                "清理残留私钥失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            None,
+        ));
+    }
+    let deleted: i64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    Ok(CustomResult::success(
+        Some(format!("已清理 {deleted} 个残留通行密钥私钥")),
+        Some(json!({ "deleted": deleted })),
+    ))
+}

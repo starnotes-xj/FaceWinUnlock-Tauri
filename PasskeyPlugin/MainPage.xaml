@@ -229,7 +229,8 @@
                     Click="refreshButton_Click"
                     Content="刷新"
                     Style="{StaticResource AccentButtonStyle}" />
-                <DropDownButton x:Name="addCredentialsButton" Content="添加">
+                <!-- 「添加（写入缓存）」为开发调试用，对普通用户隐藏（保留 x:Name 供 code-behind 引用） -->
+                <DropDownButton x:Name="addCredentialsButton" Content="添加" Visibility="Collapsed">
                     <DropDownButton.Flyout>
                         <MenuFlyout Placement="Bottom">
                             <MenuFlyoutItem
@@ -247,26 +248,32 @@
                 <DropDownButton x:Name="deleteCredentialsButton" Content="删除">
                     <DropDownButton.Flyout>
                         <MenuFlyout Placement="Bottom">
-                            <MenuFlyoutItem
-                                x:Name="deleteAllPluginCredentialsMenuItem"
-                                Click="deleteAllPluginCredentials_Click"
-                                Text="清空缓存中的全部通行密钥" />
-                            <MenuFlyoutItem
-                                x:Name="deleteSelectedCacheButton"
-                                Click="deleteSelectedPluginCredentials_Click"
-                                Text="删除缓存中的所选通行密钥" />
+                            <!-- 面向普通用户只保留两个清晰选项（均作用于「全部位置」=缓存+本地库）；
+                                 其余「缓存/本地库」细分项为开发调试用，Collapsed 隐藏（保留 x:Name 与
+                                 Click，避免破坏 code-behind 的引用与文案设置）。 -->
                             <MenuFlyoutItem
                                 x:Name="deleteSelectedLocalButton"
                                 Click="deleteSelectedPluginCredentialsEverywhere_Click"
-                                Text="删除所选通行密钥（全部位置）" />
-                            <MenuFlyoutItem
-                                x:Name="deleteAllLocalCredentialsMenuItem"
-                                Click="deleteAllLocalCredentials_Click"
-                                Text="清空本地库中的全部通行密钥" />
+                                Text="删除所选通行密钥" />
                             <MenuFlyoutItem
                                 x:Name="deleteAllCredentialsMenuItem"
                                 Click="deleteAllCredentials_Click"
-                                Text="清空全部位置的通行密钥" />
+                                Text="清空全部通行密钥" />
+                            <MenuFlyoutItem
+                                x:Name="deleteAllPluginCredentialsMenuItem"
+                                Click="deleteAllPluginCredentials_Click"
+                                Text="清空缓存中的全部通行密钥"
+                                Visibility="Collapsed" />
+                            <MenuFlyoutItem
+                                x:Name="deleteSelectedCacheButton"
+                                Click="deleteSelectedPluginCredentials_Click"
+                                Text="删除缓存中的所选通行密钥"
+                                Visibility="Collapsed" />
+                            <MenuFlyoutItem
+                                x:Name="deleteAllLocalCredentialsMenuItem"
+                                Click="deleteAllLocalCredentials_Click"
+                                Text="清空本地库中的全部通行密钥"
+                                Visibility="Collapsed" />
                         </MenuFlyout>
                     </DropDownButton.Flyout>
                 </DropDownButton>
