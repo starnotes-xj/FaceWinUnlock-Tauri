@@ -3,7 +3,7 @@
 use std::{env, fs, os::windows::ffi::OsStrExt, path::PathBuf};
 use tauri_plugin_log::log::{info, warn};
 use windows::{
-    core::{w, BOOL, PCWSTR},
+    core::{w, PCWSTR},
     Win32::{
         Foundation::{LocalFree, WIN32_ERROR},
         Security::{

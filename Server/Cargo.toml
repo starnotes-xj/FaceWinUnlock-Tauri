@@ -42,6 +42,12 @@ log = "0.4"
 simplelog = "0.12"
 winreg = "0.52"
 
+# 注意：workspace 构建下本 [profile.release] 会被 Cargo 忽略（profile 仅在根 Cargo.toml 生效），
+# 故 `cargo build` 会提示 "profiles for the non root package will be ignored"。保留它用于记录本
+# CP DLL 的理想 release 配置——尤其 panic="abort"：DLL 注入 LogonUI，panic 跨 COM/FFI 边界 unwind
+# 属未定义行为，理应 abort。但 panic 是整个 build 统一、无法 per-package；而根 workspace 含 Tauri(UI)、
+# 依赖 unwind 捕获 command panic，故不能在根设 panic="abort"。若要让本 DLL 真正以 panic=abort 构建，
+# 需将 Server 拆为独立 workspace 单独编译（当前结构下此 profile 不生效，实际为默认 unwind）。
 [profile.release]
 opt-level = 3
 lto = true

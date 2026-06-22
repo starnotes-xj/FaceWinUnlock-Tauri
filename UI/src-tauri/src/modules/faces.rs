@@ -6,7 +6,6 @@ use opencv::{
     core::{Mat, Rect, Scalar, Size, Vector},
     imgcodecs, imgproc,
     prelude::*,
-    videoio::VideoCapture,
 };
 use serde_json::json;
 
@@ -17,7 +16,8 @@ use crate::{APP_STATE, ROOT_DIR};
 struct VerificationCache {
     reference_hash: String,
     reference_feature: Mat,
-    threshold: f32, // 缓存时的检测阈值
+    #[allow(dead_code)] // 缓存时的检测阈值，保留备查
+    threshold: f32,
 }
 static VERIFY_CACHE: std::sync::LazyLock<Mutex<Option<VerificationCache>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));

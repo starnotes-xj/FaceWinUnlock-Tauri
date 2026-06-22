@@ -58,6 +58,11 @@
 //! --ngc-phase1-path-a <user> <pin> 路A 完整链: NCryptDecrypt 多点 + 明文检测
 //! --ngc-phase1 <user> <pin>        4路径融合: A(Protectors) + B(Vault) + C(NCryptDecrypt fallback) + D(Keys)
 
+// NGC 是 Hello PIN 解密链的实验/备用模块（含大量 CLI 诊断路径与备用 API），其中不少
+// 函数/字段/常量在当前主流程暂未调用，且部分沿用 Win32 大驼峰命名——统一在模块级抑制
+// 相关 lint，保留实验代码完整性，不影响产品逻辑（覆盖 ngc 及其全部子模块）。
+#![allow(dead_code, non_snake_case, unused_variables, unused_mut)]
+
 use std::fmt;
 use std::path::PathBuf;
 

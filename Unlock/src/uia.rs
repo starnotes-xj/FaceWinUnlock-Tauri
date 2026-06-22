@@ -302,7 +302,7 @@ pub fn dump_all_windows() -> Vec<String> {
             let faid = bstr_of(|| focused.CurrentAutomationId());
             let fcls = bstr_of(|| focused.CurrentClassName());
             let mut fpid = 0u32;
-            focused.CurrentProcessId().map(|p| { fpid = p as u32; });
+            let _ = focused.CurrentProcessId().map(|p| { fpid = p as u32; });
             let fexe = process_name(fpid);
             log.push(format!("  [{fct}] name='{fname}' autoId='{faid}' class='{fcls}' pid={fpid} exe={fexe}"));
             // dump 焦点元素的祖先链（用 TreeWalker 向上遍历）
