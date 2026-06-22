@@ -95,3 +95,32 @@ Caveats / must-verify on real hardware:
 - End-to-end validation needs **Win11 24H2 + a previously registered site passkey**; the
   `-PreserveApplicationData` reuse, backup/restore and `certutil -delkey` cannot be verified
   on a dev box without that setup.
+
+## In-app residual-key cleanup + simplified delete UI (issue #3)
+
+Follow-up to the keep-credentials work above. Two user-reported papercuts:
+
+1. The plugin's "clear / delete passkeys" actions only remove credential metadata and the
+   Windows index — they never call `NCryptDeleteKey` (confirmed in
+   `PluginManagement/PluginCredentialManager.cpp`). So repeatedly clicking "clear" leaves the
+   KSP private keys behind under `%APPDATA%\Microsoft\Crypto\Keys` (tiny, but a privacy residue).
+2. The plugin exposed too many delete entries (per-cache / per-local-store / all-locations) plus an
+   "add (write cache)" debug button — users could not tell them apart.
+
+Fixes:
+
+- **In-app cleanup** (`passkey_plugin.rs::cleanup_passkey_residual_keys`, wired in `lib.rs`,
+  "清理残留私钥" button in `Options.vue`): enumerates the Microsoft Software KSP via
+  `certutil -user -key`, deletes every key whose name starts with `facewinunlock/` via
+  `certutil -user -delkey`, returns the deleted count. Per-user, no uninstall required.
+  Guarded by a confirm dialog because it invalidates previously registered site passkeys.
+- **Simplified delete UI** (`PasskeyPlugin/MainPage.xaml` + `.xaml.cpp`): keep only
+  "删除所选通行密钥" + "清空全部通行密钥"; the cache/local-store detail items and the
+  "add (write cache)" button get `Visibility="Collapsed"`. **All `x:Name`s are kept** (code-behind
+  in `MainPage.xaml.cpp` sets their `.Text()`/`.IsEnabled()`), so elements are hidden, not deleted —
+  deleting them would break the C++/WinRT code-behind and the `LocalizedText` overrides.
+
+Relationship to keep-credentials uninstall: cleanup is the **active** opposite of the passive
+keep — uninstall preserves keys for reinstall, this button deliberately purges the residue when
+the user no longer wants them. Same `certutil -delkey facewinunlock/*` primitive as Purge mode,
+but invokable without uninstalling. Needs Win11 24H2 to verify the actual KSP deletion.

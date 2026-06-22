@@ -391,9 +391,9 @@ namespace winrt::PasskeyManager::implementation
         deleteCredentialsButton().Content(winrt::box_value(LocalizedText(L"删除", L"Delete")));
         deleteAllPluginCredentialsMenuItem().Text(LocalizedText(L"清空缓存中的全部通行密钥", L"All passkeys from cache"));
         deleteSelectedCacheButton().Text(LocalizedText(L"删除缓存中的所选通行密钥", L"Selected passkeys from cache"));
-        deleteSelectedLocalButton().Text(LocalizedText(L"删除所选通行密钥（全部位置）", L"Selected passkeys everywhere"));
+        deleteSelectedLocalButton().Text(LocalizedText(L"删除所选通行密钥", L"Delete selected passkey"));
         deleteAllLocalCredentialsMenuItem().Text(LocalizedText(L"清空本地库中的全部通行密钥", L"All passkeys from local"));
-        deleteAllCredentialsMenuItem().Text(LocalizedText(L"清空全部位置的通行密钥", L"All passkeys everywhere"));
+        deleteAllCredentialsMenuItem().Text(LocalizedText(L"清空全部通行密钥", L"Clear all passkeys"));
 
         logsSectionTitle().Text(LocalizedText(L"日志", L"Logs"));
         clearLogsButton().Content(winrt::box_value(LocalizedText(L"清空", L"Clear")));
