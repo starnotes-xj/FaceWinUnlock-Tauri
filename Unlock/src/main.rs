@@ -1071,11 +1071,18 @@ fn warm_up_camera(cam: &mut VideoCapture) {
 }
 
 fn open_configured_camera(index: i32) -> Option<(VideoCapture, &'static str)> {
-    // DShow 通常比 CAP_ANY 少一次后端枚举；失败时再退到 MSMF/Any，但始终只打开用户选择的索引。
+    // 后端顺序必须与录入端（UI 用 CAP_ANY）一致：录入时写入的 .face 特征，是经 CAP_ANY
+    // 解析到的实际后端（Windows 上通常是 MSMF）提取的。解锁端若强制 DShow，DShow(DirectShow)
+    // 与 MSMF 在部分设备/系统上的色彩/曝光/分辨率不同，会让同一张脸的 SFace 特征偏移、cosine
+    // 跌破阈值 → "检测到脸但匹配不上"。
+    // issue #3：Win10 锁屏不自动解锁（登录磁贴出现、圆圈一直转、摄像头亮但不登录），而**同版本**
+    // Win11 能解锁——正是因为 Win11 上 DShow 与 MSMF 帧恰好接近、掩盖了后端不一致，Win10 上差异
+    // 大就暴露了。旧版本在该机器锁屏界面用 CAP_ANY（日志"尝试第1个后端 None"）即可匹配成功，
+    // 也佐证 CAP_ANY 才是与录入端一致的正确后端。故 CAP_ANY 优先；仅当其打不开才回退 DShow/MSMF。
     for (backend_name, backend) in [
+        ("Any", videoio::CAP_ANY),
         ("DShow", videoio::CAP_DSHOW),
         ("MSMF", videoio::CAP_MSMF),
-        ("Any", videoio::CAP_ANY),
     ] {
         if let Ok(mut c) = VideoCapture::new(index, backend) {
             if c.is_opened().unwrap_or(false) {
