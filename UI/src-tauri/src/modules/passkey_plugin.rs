@@ -556,6 +556,13 @@ pub fn install_passkey_plugin(replace_sample: bool) -> Result<CustomResult, Cust
     if needs_install {
         install_or_update_package(&package_path, &certificate_path, formal.is_some())
             .map_err(|e| CustomResult::error(Some(e), None))?;
+        // 安装/重装后，若新 LocalState 无元数据但包外有备份则恢复，使卸载重装/全量更新后
+        // 免重新注册通行密钥（私钥本就在 KSP 中保留）。best-effort，不阻断安装。
+        if let Ok(Some(pkg)) = query_package(FORMAL_PACKAGE_NAME) {
+            if let Some(pfn) = pkg["package_family_name"].as_str() {
+                restore_passkey_credentials(pfn);
+            }
+        }
     }
 
     let status = status_value().map_err(|e| CustomResult::error(Some(e), None))?;
@@ -669,18 +676,111 @@ pub fn open_passkey_plugin_manager() -> Result<CustomResult, CustomResult> {
     Ok(CustomResult::success(None, None))
 }
 
-fn uninstall_passkey_plugin_impl(ignore_missing: bool) -> Result<(bool, Value), String> {
+/// 卸载模式：是否保留本地通行密钥（凭据元数据 + KSP 私钥 + 插件配置）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UninstallMode {
+    /// 保留：Remove-AppxPackage 用 `-PreserveApplicationData` 保留 MSIX LocalState 元数据，
+    /// 卸载前额外备份到包外目录，且不删 KSP 私钥/证书/注册表配置——卸载/重装/全量更新后
+    /// 仍可用之前注册的通行密钥，无需重新注册。私钥本就在 Microsoft Software KSP（密钥名
+    /// `facewinunlock/<userId>`，per-user）中、不随 MSIX 卸载删除。
+    KeepCredentials,
+    /// 彻底清除：删 MSIX 数据 + KSP 私钥(`facewinunlock/*`) + 证书 + 注册表配置 + 包外备份。
+    Purge,
+}
+
+const PASSKEY_CREDENTIALS_FILE: &str = "credentials.dat";
+
+/// 包外通行密钥元数据备份目录（per-user 持久，仅 Purge 时清除）。
+fn passkey_backup_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(|p| PathBuf::from(p).join("FaceWinUnlock").join("PasskeyBackup"))
+}
+
+/// 插件在 MSIX LocalState 下存元数据的目录（与 C++ 端 `PluginCredentialManager` 约定一致）：
+/// `%LOCALAPPDATA%\Packages\<FamilyName>\LocalState\CredentialsDB`。
+fn passkey_localstate_db_dir(package_family_name: &str) -> Option<PathBuf> {
+    if package_family_name.is_empty() {
+        return None;
+    }
+    std::env::var_os("LOCALAPPDATA").map(|p| {
+        PathBuf::from(p)
+            .join("Packages")
+            .join(package_family_name)
+            .join("LocalState")
+            .join("CredentialsDB")
+    })
+}
+
+/// 卸载前把凭据元数据备份到包外（best-effort），兜底 `-PreserveApplicationData` 失效或被清理。
+fn backup_passkey_credentials(package_family_name: &str) -> bool {
+    let (Some(db_dir), Some(backup_dir)) = (
+        passkey_localstate_db_dir(package_family_name),
+        passkey_backup_dir(),
+    ) else {
+        return false;
+    };
+    let src = db_dir.join(PASSKEY_CREDENTIALS_FILE);
+    if !src.exists() || std::fs::create_dir_all(&backup_dir).is_err() {
+        return false;
+    }
+    std::fs::copy(&src, backup_dir.join(PASSKEY_CREDENTIALS_FILE)).is_ok()
+}
+
+/// 安装/重装后恢复元数据（best-effort）：仅当当前 LocalState 无元数据、而包外备份存在时
+/// 才恢复，避免覆盖 `-PreserveApplicationData` 已保留的数据。
+pub(crate) fn restore_passkey_credentials(package_family_name: &str) -> bool {
+    let Some(backup) = passkey_backup_dir().map(|d| d.join(PASSKEY_CREDENTIALS_FILE)) else {
+        return false;
+    };
+    if !backup.exists() {
+        return false;
+    }
+    let Some(db_dir) = passkey_localstate_db_dir(package_family_name) else {
+        return false;
+    };
+    let dst = db_dir.join(PASSKEY_CREDENTIALS_FILE);
+    if dst.exists() || std::fs::create_dir_all(&db_dir).is_err() {
+        return false;
+    }
+    std::fs::copy(&backup, &dst).is_ok()
+}
+
+/// 清除包外通行密钥备份（仅 Purge 调用）。
+fn delete_passkey_backup() {
+    if let Some(dir) = passkey_backup_dir() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+fn uninstall_passkey_plugin_impl(
+    ignore_missing: bool,
+    mode: UninstallMode,
+) -> Result<(bool, Value), String> {
     let formal = query_package(FORMAL_PACKAGE_NAME)
         .map_err(|e| format!("查询正式 Passkey 插件失败: {e}"))?;
     let sample = query_package(SAMPLE_PACKAGE_NAME)
         .map_err(|e| format!("查询测试 Passkey 插件失败: {e}"))?;
 
     if formal.is_none() && sample.is_none() {
-        cleanup_passkey_registry_residue()?;
+        // 保留模式不动注册表/备份；彻底清除才清理残留 + 删备份。
+        if mode == UninstallMode::Purge {
+            cleanup_passkey_registry_residue()?;
+            delete_passkey_backup();
+        }
         if ignore_missing {
             return Ok((false, status_value()?));
         }
         return Err("没有检测到已安装的 Passkey 插件，无需卸载".to_string());
+    }
+
+    // 保留模式：卸载前把正式插件的凭据元数据备份到包外（兜底 -PreserveApplicationData 失效）。
+    if mode == UninstallMode::KeepCredentials {
+        if let Some(pfn) = formal
+            .as_ref()
+            .and_then(|p| p["package_family_name"].as_str())
+        {
+            let _ = backup_passkey_credentials(pfn);
+        }
     }
 
     let certificate_path = artifact_path("FaceWinUnlock-Passkey.cer");
@@ -690,10 +790,15 @@ fn uninstall_passkey_plugin_impl(ignore_missing: bool) -> Result<(bool, Value), 
         .join("scripts")
         .join("uninstall-passkey-plugin.ps1");
     if uninstall_script_path.exists() {
+        let mode_arg = match mode {
+            UninstallMode::Purge => "-Purge",
+            UninstallMode::KeepCredentials => "-PreserveApplicationData",
+        };
         let script = format!(
-            "& {} -CertificatePath {} -ErrorAction Stop",
+            "& {} -CertificatePath {} {} -ErrorAction Stop",
             powershell_literal(&uninstall_script_path),
             powershell_literal(&certificate_path),
+            mode_arg,
         );
         let output = run_powershell(&script).map_err(|e| format!("启动插件卸载失败: {e}"))?;
         if !output.status.success() {
@@ -703,8 +808,14 @@ fn uninstall_passkey_plugin_impl(ignore_missing: bool) -> Result<(bool, Value), 
             ));
         }
     } else {
-        // 内联卸载：停止进程 → Remove-AppxPackage（合并 per-user + all-users 覆盖所有安装上下文）
-        let script = format!(
+        // 内联卸载（fallback：随附脚本不存在时）。保留模式只卸 MSIX 并 -PreserveApplicationData
+        // 保留数据；彻底清除才删证书与 KSP 私钥（facewinunlock/*，best-effort）。
+        let preserve = if mode == UninstallMode::KeepCredentials {
+            "-PreserveApplicationData "
+        } else {
+            ""
+        };
+        let remove_pkgs = format!(
             "Get-Process -Name 'PasskeyManager' -ErrorAction SilentlyContinue | Stop-Process -Force; \
              $ErrorActionPreference = 'Stop'; \
              $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); \
@@ -712,31 +823,26 @@ fn uninstall_passkey_plugin_impl(ignore_missing: bool) -> Result<(bool, Value), 
                $pkgs = @(Get-AppxPackage -Name $name -ErrorAction SilentlyContinue); \
                if ($isAdmin) {{ $pkgs += @(Get-AppxPackage -AllUsers -Name $name -ErrorAction SilentlyContinue) }}; \
                if ($pkgs.Count -gt 1) {{ $pkgs = $pkgs | Sort-Object PackageFullName -Unique }}; \
-               $pkgs | Remove-AppxPackage -ErrorAction Stop; \
-             }}; \
-             if (Test-Path {cert_path}) {{ \
-               $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new({cert_path}); \
-               foreach ($storeName in @('TrustedPeople','Root')) {{ \
-                 & certutil.exe -user -store $storeName $cert.Thumbprint 2>$null | Out-Null; \
-                 if ($LASTEXITCODE -eq 0) {{ \
-                   & certutil.exe -user -delstore $storeName $cert.Thumbprint | Out-Null; \
-                   $deleteExit = $LASTEXITCODE; \
-                   & certutil.exe -user -store $storeName $cert.Thumbprint 2>$null | Out-Null; \
-                   if ($deleteExit -ne 0 -or $LASTEXITCODE -eq 0) {{ throw 'Failed to remove CurrentUser certificate' }} \
-                 }}; \
-                 if ($isAdmin) {{ \
-                   & certutil.exe -store $storeName $cert.Thumbprint 2>$null | Out-Null; \
-                   if ($LASTEXITCODE -eq 0) {{ \
-                     & certutil.exe -delstore $storeName $cert.Thumbprint | Out-Null; \
-                     $deleteExit = $LASTEXITCODE; \
-                     & certutil.exe -store $storeName $cert.Thumbprint 2>$null | Out-Null; \
-                     if ($deleteExit -ne 0 -or $LASTEXITCODE -eq 0) {{ throw 'Failed to remove LocalMachine certificate' }} \
-                   }} \
-                 }} \
-               }} \
-             }}",
-            cert_path = powershell_literal(&certificate_path),
+               $pkgs | Remove-AppxPackage {preserve}-ErrorAction Stop; \
+             }};"
         );
+        let purge_extra = if mode == UninstallMode::Purge {
+            format!(
+                " if (Test-Path {cert_path}) {{ \
+                   $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new({cert_path}); \
+                   foreach ($storeName in @('TrustedPeople','Root')) {{ \
+                     & certutil.exe -user -delstore $storeName $cert.Thumbprint 2>$null | Out-Null; \
+                     if ($isAdmin) {{ & certutil.exe -delstore $storeName $cert.Thumbprint 2>$null | Out-Null }} \
+                   }} \
+                 }}; \
+                 $keys = & certutil.exe -user -key -csp 'Microsoft Software Key Storage Provider' 2>$null; \
+                 if ($keys) {{ foreach ($line in $keys) {{ $t = \"$line\".Trim(); if ($t -like 'facewinunlock/*') {{ & certutil.exe -user -delkey \"$t\" 2>$null | Out-Null }} }} }}",
+                cert_path = powershell_literal(&certificate_path),
+            )
+        } else {
+            String::new()
+        };
+        let script = format!("{remove_pkgs}{purge_extra}");
         let output = run_powershell(&script).map_err(|e| format!("启动插件卸载失败: {e}"))?;
         if !output.status.success() {
             return Err(format!(
@@ -746,27 +852,45 @@ fn uninstall_passkey_plugin_impl(ignore_missing: bool) -> Result<(bool, Value), 
         }
     }
 
-    cleanup_passkey_registry_residue()?;
+    // 注册表配置与包外备份仅在彻底清除时删除；保留模式留着配置供重装复用。
+    if mode == UninstallMode::Purge {
+        cleanup_passkey_registry_residue()?;
+        delete_passkey_backup();
+    }
 
     Ok((true, status_value()?))
 }
 
-/// 主程序/核心卸载时调用：同步卸载 Passkey 插件并清理其本地通行密钥。
+/// 主程序/核心卸载时调用：卸载 Passkey 插件但**默认保留**本地通行密钥（MSIX 数据 +
+/// KSP 私钥 + 配置），便于卸载重装/全量更新后免重新注册。彻底清除仅在用户显式选择时执行。
 pub(crate) fn uninstall_passkey_plugin_for_core_uninstall() -> Result<Option<String>, String> {
-    let (removed, _) = uninstall_passkey_plugin_impl(true)?;
-    Ok(removed.then(|| "Passkey 插件已随核心组件卸载，本地通行密钥已删除".to_string()))
+    let (removed, _) = uninstall_passkey_plugin_impl(true, UninstallMode::KeepCredentials)?;
+    Ok(removed.then(|| "Passkey 插件已卸载（保留本地通行密钥，重装后可继续使用）".to_string()))
 }
 
 /// 手动卸载 Passkey 插件（仅在用户明确确认后调用）。
 ///
-/// 卸载会删除 MSIX 包及其本地存储的通行密钥，无法恢复。主程序更新不会触发此操作；
-/// 更新路径只执行 `Add-AppxPackage -Update`，保留已有通行密钥。
+/// - `purge = false`（默认/保留）：仅卸载 MSIX 包并 `-PreserveApplicationData` 保留凭据元数据，
+///   额外备份到包外目录，不删 KSP 私钥/证书/配置——重装或全量更新后可继续使用之前注册的通行密钥。
+/// - `purge = true`（彻底清除）：删除 MSIX 数据 + KSP 私钥(`facewinunlock/*`) + 证书 + 注册表 + 备份，
+///   不可恢复。
+///
+/// 主程序更新不触发本操作；更新路径走 `Add-AppxPackage -Update`，本就保留已有通行密钥。
 #[tauri::command]
-pub fn uninstall_passkey_plugin() -> Result<CustomResult, CustomResult> {
-    let (removed, status) =
-        uninstall_passkey_plugin_impl(false).map_err(|e| CustomResult::error(Some(e), None))?;
+pub fn uninstall_passkey_plugin(purge: bool) -> Result<CustomResult, CustomResult> {
+    let mode = if purge {
+        UninstallMode::Purge
+    } else {
+        UninstallMode::KeepCredentials
+    };
+    let (removed, status) = uninstall_passkey_plugin_impl(false, mode)
+        .map_err(|e| CustomResult::error(Some(e), None))?;
     let msg = if removed {
-        "Passkey 插件已卸载，所有本地存储的通行密钥已删除"
+        if purge {
+            "Passkey 插件已彻底卸载：本地通行密钥、私钥、证书与配置已清除"
+        } else {
+            "Passkey 插件已卸载，本地通行密钥已保留（重装/更新后可继续使用，无需重新注册）"
+        }
     } else {
         "没有检测到已安装的 Passkey 插件，无需卸载"
     };

@@ -82,13 +82,33 @@ async function openPasskeyPluginManager() {
 }
 
 async function uninstallPasskeyPlugin() {
+  // 二选项：保留通行密钥卸载（默认）vs 彻底清除。confirm=保留；cancel=彻底清除；关闭=取消。
+  let purge = false;
   try {
-    await ElMessageBox.confirm('卸载 Passkey 插件将删除所有本地保存的通行密钥。确定卸载吗？', '卸载 Passkey 插件',
-      { type: 'warning', confirmButtonText: '确认卸载', cancelButtonText: '取消' });
-  } catch { return; }
+    await ElMessageBox.confirm(
+      '选择卸载方式：<br/><br/>' +
+      '<b>保留通行密钥</b>（推荐）：卸载插件但保留本地通行密钥与私钥，重装/全量更新后可继续使用，无需重新注册。<br/><br/>' +
+      '<b>彻底清除</b>：删除插件及所有本地通行密钥、私钥、证书，不可恢复。',
+      '卸载 Passkey 插件',
+      {
+        type: 'warning', dangerouslyUseHTMLString: true,
+        confirmButtonText: '保留密钥卸载', cancelButtonText: '彻底清除',
+        distinguishCancelAndClose: true, showClose: true,
+      }
+    );
+    purge = false;
+  } catch (action) {
+    if (action === 'cancel') { purge = true; } else { return; }
+  }
+  if (purge) {
+    try {
+      await ElMessageBox.confirm('确定彻底清除？所有本地通行密钥与私钥将永久删除，无法恢复。', '彻底清除确认',
+        { type: 'error', confirmButtonText: '确认彻底清除', cancelButtonText: '取消' });
+    } catch { return; }
+  }
   passkeyPlugin.loading = true;
   try {
-    const result: any = await invoke('uninstall_passkey_plugin');
+    const result: any = await invoke('uninstall_passkey_plugin', { purge });
     ElMessage.success(result?.msg || 'Passkey 插件已卸载');
     await refreshPasskeyPluginStatus();
   } catch (error) { ElMessage.error(formatObjectString('卸载 Passkey 插件失败：', error)); }

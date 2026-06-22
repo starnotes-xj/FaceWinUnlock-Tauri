@@ -98,7 +98,9 @@
   ; ──────────────────────────────────────────────────────────────
   DetailPrint "正在卸载 FaceWinUnlock Passkey 插件..."
   IfFileExists "$INSTDIR\scripts\uninstall-passkey-plugin.ps1" 0 passkey_uninstall_inline
-    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\scripts\uninstall-passkey-plugin.ps1" -CertificatePath "$INSTDIR\FaceWinUnlock-Passkey.cer"'
+    ; app 卸载默认保留通行密钥（-PreserveApplicationData），便于重装后免重新注册；
+    ; 彻底清除由应用内「彻底卸载」选项 (uninstall_passkey_plugin purge=true) 提供。
+    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\scripts\uninstall-passkey-plugin.ps1" -CertificatePath "$INSTDIR\FaceWinUnlock-Passkey.cer" -PreserveApplicationData'
     Pop $0
     ${If} $0 == 0
       DetailPrint "FaceWinUnlock Passkey 插件已卸载。"
@@ -107,7 +109,7 @@
     ${EndIf}
     Goto passkey_uninstall_done
   passkey_uninstall_inline:
-    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-Process -Name PasskeyManager -ErrorAction SilentlyContinue | Stop-Process -Force; Get-AppxPackage -Name FaceWinUnlock.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage; Get-AppxPackage -Name Contoso.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage"'
+    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-Process -Name PasskeyManager -ErrorAction SilentlyContinue | Stop-Process -Force; Get-AppxPackage -Name FaceWinUnlock.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage -PreserveApplicationData; Get-AppxPackage -Name Contoso.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage"'
     Pop $0
     ${If} $0 == 0
       DetailPrint "FaceWinUnlock Passkey 插件已卸载。"

@@ -1,5 +1,10 @@
 param(
-    [string]$CertificatePath = ""
+    [string]$CertificatePath = "",
+    # 保留模式（默认行为由调用方传入）：Remove-AppxPackage 用 -PreserveApplicationData 留住
+    # LocalState 凭据元数据；不删证书/注册表/KSP 私钥，便于重装后免重新注册。
+    [switch]$PreserveApplicationData,
+    # 彻底清除：删 MSIX 数据 + 证书 + 注册表残留 + KSP 私钥(facewinunlock/*)。
+    [switch]$Purge
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,7 +69,12 @@ foreach ($packageName in $packageNames) {
         $packages = $packages | Sort-Object PackageFullName -Unique
     }
     foreach ($package in $packages) {
-        $package | Remove-AppxPackage -ErrorAction Stop
+        # 保留模式用 -PreserveApplicationData 留住 LocalState 凭据元数据；Purge 才连数据一起删。
+        if ($Purge) {
+            $package | Remove-AppxPackage -ErrorAction Stop
+        } else {
+            $package | Remove-AppxPackage -PreserveApplicationData -ErrorAction Stop
+        }
         $removedAnyPackage = $true
     }
 }
@@ -73,6 +83,14 @@ if (-not $removedAnyPackage) {
     Write-Host "No FaceWinUnlock Passkey package found." -ForegroundColor Yellow
 }
 
+if (-not $Purge) {
+    # 保留模式：凭据元数据已由 -PreserveApplicationData 留住，私钥本就在 KSP 中不删；
+    # 证书信任与注册表配置也保留，便于重装后免重新注册。
+    Write-Host "FaceWinUnlock Passkey plugin removed; credentials preserved for reinstall."
+    return
+}
+
+# 以下仅彻底清除 (-Purge) 时执行：清注册表残留 + 删证书 + 删 KSP 私钥。
 Remove-PasskeyRegistryResidue -PackageNames $packageNames
 
 if (Test-Path $CertificatePath) {
@@ -117,4 +135,15 @@ if (Test-Path $CertificatePath) {
     }
 }
 
-Write-Host "FaceWinUnlock Passkey plugin removed."
+# 删除 KSP 私钥（facewinunlock/*，best-effort；密钥名 = facewinunlock/<userId>）
+$keys = & certutil.exe -user -key -csp "Microsoft Software Key Storage Provider" 2>$null
+if ($keys) {
+    foreach ($line in $keys) {
+        $t = "$line".Trim()
+        if ($t -like "facewinunlock/*") {
+            & certutil.exe -user -delkey "$t" 2>$null | Out-Null
+        }
+    }
+}
+
+Write-Host "FaceWinUnlock Passkey plugin purged (credentials and keys removed)."
