@@ -836,7 +836,7 @@ fn uninstall_passkey_plugin_impl(
                    }} \
                  }}; \
                  $keys = & certutil.exe -user -key -csp 'Microsoft Software Key Storage Provider' 2>$null; \
-                 if ($keys) {{ foreach ($line in $keys) {{ $t = \"$line\".Trim(); if ($t -like 'facewinunlock/*') {{ & certutil.exe -user -delkey \"$t\" 2>$null | Out-Null }} }} }}",
+                 if ($keys) {{ foreach ($line in $keys) {{ $t = \"$line\".Trim(); if ($t -like 'facewinunlock/*') {{ & certutil.exe -user -csp 'Microsoft Software Key Storage Provider' -delkey \"$t\" 2>$null | Out-Null }} }} }}",
                 cert_path = powershell_literal(&certificate_path),
             )
         } else {
@@ -911,7 +911,7 @@ pub fn cleanup_passkey_residual_keys() -> Result<CustomResult, CustomResult> {
         if ($keys) { foreach ($line in $keys) { \
             $t = \"$line\".Trim(); \
             if ($t -like 'facewinunlock/*') { \
-                & certutil.exe -user -delkey \"$t\" 2>$null | Out-Null; \
+                & certutil.exe -user -csp 'Microsoft Software Key Storage Provider' -delkey \"$t\" 2>$null | Out-Null; \
                 if ($LASTEXITCODE -eq 0) { $deleted++ } \
             } \
         } }; \

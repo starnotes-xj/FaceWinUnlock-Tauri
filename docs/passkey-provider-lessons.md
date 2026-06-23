@@ -124,3 +124,12 @@ Relationship to keep-credentials uninstall: cleanup is the **active** opposite o
 keep — uninstall preserves keys for reinstall, this button deliberately purges the residue when
 the user no longer wants them. Same `certutil -delkey facewinunlock/*` primitive as Purge mode,
 but invokable without uninstalling. Needs Win11 24H2 to verify the actual KSP deletion.
+
+**Critical: `certutil -delkey` MUST include `-csp`.** Enumeration uses
+`certutil -user -key -csp 'Microsoft Software Key Storage Provider'`, and the delete must specify
+the SAME provider: `certutil -user -csp 'Microsoft Software Key Storage Provider' -delkey '<name>'`.
+Without `-csp`, certutil queries the default provider, can't find the CNG KSP key, and returns
+`NTE_BAD_KEYSET` (0x80090016) → 0 deleted. Both `cleanup_passkey_residual_keys` and the uninstall
+Purge script enumerated with `-csp` but deleted without it, so they silently removed nothing.
+The app runs elevated (`requireAdministrator`); elevation was suspected first, but a non-elevated
+manual `-delkey` failed identically until `-csp` was added — the real cause was the missing `-csp`.
