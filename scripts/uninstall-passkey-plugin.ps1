@@ -141,7 +141,7 @@ if ($keys) {
     foreach ($line in $keys) {
         $t = "$line".Trim()
         if ($t -like "facewinunlock/*") {
-            & certutil.exe -user -delkey "$t" 2>$null | Out-Null
+            & certutil.exe -user -csp "Microsoft Software Key Storage Provider" -delkey "$t" 2>$null | Out-Null
         }
     }
 }
