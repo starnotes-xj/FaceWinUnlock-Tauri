@@ -337,8 +337,7 @@
 		} catch (error) {
 			ElMessage.error(formatObjectString('检测推理后端失败：', error));
 		} finally {
-			// 探测完毕卸载模型，避免长期占用
-			await invoke('unload_model').catch(() => {});
+			// 让加载的模型保持就绪，后续页面（如面容管理）可直接使用，无需重复加载
 			loadingInstance.close();
 		}
 	};

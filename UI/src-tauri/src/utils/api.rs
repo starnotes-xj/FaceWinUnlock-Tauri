@@ -836,21 +836,9 @@ pub fn load_opencv_model(
         .lock()
         .map_err(|e| format!("获取app状态失败 {}", e))?;
 
-    // 三个模型已全部加载则直接返回（保持幂等）。无法得知此前是否回退，
-    // 按未回退处理，回退提示已在首次加载时给出。
-    if app_state.detector.is_some()
-        && app_state.recognizer.is_some()
-        && app_state.liveness.is_some()
-    {
-        return Ok(ModelLoadResult {
-            requested_backend: backend_id,
-            requested_target: target_id,
-            active_backend: backend_id,
-            active_target: target_id,
-            fell_back: false,
-            fallback_reason: None,
-        });
-    }
+    // 始终重新加载：不信任缓存的后端信息（无法判断当前加载的模型是哪个后端），
+    // 确保返回的 active_backend/active_target 准确反映当前加载的真实后端。
+    // 用户切换后端前先调用 unload_model 即可。
 
     // 先尝试用户选择的后端；失败且并非 CPU 时回退到 CPU(0,0)。
     let (detector, recognizer, liveness, active_backend, active_target, fell_back, fallback_reason) =
