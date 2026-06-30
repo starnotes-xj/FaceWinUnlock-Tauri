@@ -60,7 +60,11 @@
     };
 
     async function ensureModelLoaded() {
-        if (modelReady) return;
+        // 不能用 modelReady 早退（issue #12）：本组件被路由 <keep-alive> 缓存，modelReady 会跨导航
+        // 保留为 true；而「首选项」页切换推理后端的可用性探测会 unload 后端模型，使 UI 缓存的
+        // modelReady 与后端真实状态不同步——此时早退会跳过真正的重新加载，随后 verify_face 读到空
+        // 模型报「模型未加载,请先调用load_opencv_model」。改为始终调用 load_opencv_model（后端幂等：
+        // 已加载则秒级短路），让后端成为模型加载状态的唯一事实来源。
         if (modelLoadingPromise) return modelLoadingPromise;
 
         const loadingInstance = ElLoading.service({ fullscreen: true, text: '正在加载人脸识别模型...' });
