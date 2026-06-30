@@ -70,8 +70,8 @@ const PIPE_SERVER_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustServer";
 const PIPE_UNLOCK_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustUnlock";
 const PIPE_PASSKEY_FACE_NAME: &str = r"\\.\pipe\FaceWinUnlockPasskeyFaceAuth";
 const BUF_SIZE: u32 = 4096;
-const CAMERA_WARMUP_MAX_FRAMES: usize = 10;
-const CAMERA_WARMUP_READY_FRAMES: usize = 10;
+const CAMERA_WARMUP_MAX_FRAMES: usize = 4;
+const CAMERA_WARMUP_READY_FRAMES: usize = 1;
 const WORKER_ARG: &str = "--facewinunlock-worker";
 
 // ─── Shared state ─────────────────────────────────────────────────────────────

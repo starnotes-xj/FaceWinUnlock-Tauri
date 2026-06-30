@@ -414,6 +414,15 @@ namespace winrt::PasskeyManager::implementation
 
         PluginCredentialManager& pluginCredentialManager = PluginCredentialManager::getInstance();
         pluginCredentialManager.ReloadCredentialManager();
+        if (pluginCredentialManager.IsLocalCredentialMetadataLoaded() &&
+            pluginCredentialManager.GetLocalCredentialCount() > 0 &&
+            pluginCredentialManager.GetCachedCredentialCount() < pluginCredentialManager.GetLocalCredentialCount())
+        {
+            if (SUCCEEDED(pluginCredentialManager.AddAllPluginCredentials()))
+            {
+                pluginCredentialManager.ReloadCredentialManager();
+            }
+        }
 
         co_await wil::resume_foreground(DispatcherQueue());
         auto credentialViewList = pluginCredentialManager.GetCredentialListViewModel();

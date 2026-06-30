@@ -287,6 +287,7 @@
 
     function stopCamera(){
         isLoopRunning = false;
+        verificationMode.value = false;
         return new Promise((resolve, reject) => {
             invoke("stop_camera").then(()=>{
                 resolve();
@@ -297,6 +298,16 @@
                 reject();
             });
         })
+    }
+
+    async function leaveFacePage() {
+        try {
+            await stopCamera();
+        } catch (_) {
+            // stopCamera already reports the close failure; navigation should not be blocked.
+        }
+        verifyingStreamImage.value = '';
+        router.push('/faces');
     }
 
     // 切换验证模式
@@ -376,7 +387,7 @@
             ){
                 // 没有任何变化，直接成功
                 ElMessage.success('修改成功！');
-                router.push('/faces');
+                await leaveFacePage();
                 return;
             }
         }
@@ -444,7 +455,7 @@
             
             info(`${authForm.username} 面容${isEditMode.value ? '修改' : '添加'}成功！`);
             ElMessage.success(isEditMode.value ? '修改成功' : '添加成功');
-            router.push('/faces');
+            await leaveFacePage();
         } catch (error) {
             // 如果失败 删除上面生成的面容图片和特征文件
             removeFace(face_token);

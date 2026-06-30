@@ -18,7 +18,6 @@ const deployStatus = ref('');
 const isFinalizing = ref(false);
 const optionsStore = useOptionsStore();
 const riskDialogVisible = ref(false);
-const passkeyAutoSetupAttempted = ref(false);
 
 const passkeyPlugin = reactive({
   loading: false, installed: false, sampleInstalled: false,
@@ -121,19 +120,10 @@ if (is_initialized.index != -1 && is_initialized.data.val == 'true') { initializ
 let authForm = reactive({ username: '', password: '', accountType: 'local', domain: '' });
 invoke('get_now_username').then((data: any) => { if (data.code == 200) { authForm.username = data.data.username; } });
 
-async function maybeAutoSetupPasskeyPlugin() {
-  if (passkeyAutoSetupAttempted.value) return;
-  passkeyAutoSetupAttempted.value = true;
-  await refreshPasskeyPluginStatus();
-  if (!passkeyPlugin.osSupported) return; // 旧系统不自动尝试安装，避免弹错
-  if (passkeyPlugin.sampleInstalled && !passkeyPlugin.installed) return;
-  if (passkeyPlugin.installed || passkeyPlugin.available) { await setupPasskeyPlugin({ auto: true }); }
-}
-
 const handleNextStep = async () => {
   if (activeStep.value < 3) {
     activeStep.value++;
-    if (activeStep.value === 2) { await maybeAutoSetupPasskeyPlugin(); }
+    if (activeStep.value === 2) { await refreshPasskeyPluginStatus(); }
   }
 };
 
@@ -292,7 +282,7 @@ const finishInit = () => {
         <div v-if="activeStep === 2" class="step-panel">
           <div class="deploy-box">
             <h3>启用官方 Passkey Provider</h3>
-            <p>插件创建并持有自己的不可导出密钥，人脸识别只负责用户验证。</p>
+            <p>这是可选功能。启用后插件会作为独立通行密钥 Provider 出现在 Windows 中；如需继续使用 Windows Hello 原生通行密钥，可直接跳过。</p>
             <div class="passkey-alerts">
               <el-alert v-if="!passkeyPlugin.osSupported" type="info"
                 title="当前系统无需配置通行密钥"
@@ -301,14 +291,14 @@ const finishInit = () => {
               <el-alert v-else-if="passkeyPlugin.installed"
                 :type="passkeyPlugin.updateAvailable ? 'warning' : 'success'"
                 :title="`正式插件已安装${passkeyPlugin.version ? '（' + passkeyPlugin.version + '）' : ''}`"
-                :description="passkeyPlugin.updateAvailable ? `安装包内有更新版本，点击按钮会先更新再打开启用页面。` : '向导会自动注册插件并打开 Windows 设置页。'"
+                :description="passkeyPlugin.updateAvailable ? `安装包内有更新版本，点击按钮会先更新再打开启用页面。` : '需要使用 FaceWinUnlock 自有通行密钥时，再点击按钮打开注册与启用流程。'"
                 show-icon :closable="false" />
               <el-alert v-else-if="passkeyPlugin.sampleInstalled" type="warning"
                 title="检测到 Contoso 测试插件"
                 description="迁移到正式插件会删除测试插件本地凭据。" show-icon :closable="false" />
               <el-alert v-else type="info"
                 title="尚未安装 Passkey 插件"
-                description="点击下方按钮后会自动安装、注册插件并打开 Windows 启用页面。" show-icon :closable="false" />
+                description="可跳过此步骤。只有需要 FaceWinUnlock 自有通行密钥时，才点击下方按钮安装并在 Windows 设置中启用。" show-icon :closable="false" />
               <div class="passkey-actions">
                 <el-button type="primary" :loading="passkeyPlugin.loading"
                   :disabled="!passkeyPlugin.osSupported || ((!passkeyPlugin.installed || passkeyPlugin.updateAvailable) && !passkeyPlugin.available)"

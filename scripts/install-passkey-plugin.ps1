@@ -20,6 +20,31 @@ if (-not $CertificatePath) {
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
+function Restore-PasskeyCredentialsForCurrentUser {
+    param(
+        [string]$PackageFamilyName
+    )
+
+    if (-not $PackageFamilyName) {
+        return
+    }
+
+    $backup = Join-Path $env:LOCALAPPDATA "FaceWinUnlock\PasskeyBackup\credentials.dat"
+    if (-not (Test-Path $backup)) {
+        return
+    }
+
+    $dbDir = Join-Path $env:LOCALAPPDATA "Packages\$PackageFamilyName\LocalState\CredentialsDB"
+    $dst = Join-Path $dbDir "credentials.dat"
+    if (Test-Path $dst) {
+        return
+    }
+
+    New-Item -ItemType Directory -Force -Path $dbDir | Out-Null
+    Copy-Item -LiteralPath $backup -Destination $dst -Force
+    Write-Host "Restored passkey metadata from backup."
+}
+
 if (-not (Test-Path $PackagePath)) {
     throw "Passkey plugin package not found: $PackagePath"
 }
@@ -70,6 +95,8 @@ if (-not $package -and $isAdmin) {
 if (-not $package) {
     throw "FaceWinUnlock Passkey package was not installed."
 }
+
+Restore-PasskeyCredentialsForCurrentUser -PackageFamilyName $package.PackageFamilyName
 
 if ($OpenManager) {
     Start-Process "shell:AppsFolder\$($package.PackageFamilyName)!FaceWinUnlock.PasskeyManager"
