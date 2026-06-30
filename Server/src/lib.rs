@@ -28,7 +28,6 @@ pub mod CSampleProvider;
 pub mod CSampleCredential;
 pub mod CPipeListener;
 pub mod Pipe;
-pub mod animation;
 
 use CSampleProvider::SampleProvider;
 

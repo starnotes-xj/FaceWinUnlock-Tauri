@@ -64,7 +64,6 @@
 		showTile: optionsStore.getOptionValueByKey('showTile') ? (optionsStore.getOptionValueByKey('showTile') == 'false' ? false : true) : true,
 		unlockScene: (optionsStore.getOptionValueByKey('unlockScene') || '1,2,4').split(',').map((s: string) => s.trim()).filter(Boolean),
 		credUiAllowBroker: true,
-		animationFps: optionsStore.getOptionValueByKey('animationFps') || 'auto',
 	})
 
 	const passkeyPlugin = reactive({
@@ -417,17 +416,12 @@
 			{
 				key: "CREDUI_BROKER_FALLBACK_TIMEOUT",
 				value: "5.0"
-			},
-			{
-				key: "ANIMATION_FPS",
-				value: dllConfig.animationFps // "auto" 或具体数值，DLL 解析失败时自动跟随显示器
 			}
 		]}).then(()=>{
 			return optionsStore.saveOptions({
 				showTile: dllConfig.showTile,
 				unlockScene: dllConfig.unlockScene.join(','),
-				credUiAllowBroker: "true",
-				animationFps: dllConfig.animationFps
+				credUiAllowBroker: "true"
 			})
 		}).then((errorArray)=>{
 			if(errorArray.length > 0){
@@ -1014,22 +1008,6 @@
 							</p>
 						</div>
 
-						<div class="option-row">
-							<div class="row-text">
-								<p class="label">动画刷新率</p>
-								<p class="sub">锁屏动画的渲染帧率，"跟随显示器"会自动匹配当前显示器刷新率</p>
-							</div>
-							<el-select v-model="dllConfig.animationFps" style="width: 160px;">
-								<el-option label="跟随显示器" value="auto" />
-								<el-option label="30 FPS" value="30" />
-								<el-option label="60 FPS" value="60" />
-								<el-option label="75 FPS" value="75" />
-								<el-option label="120 FPS" value="120" />
-								<el-option label="144 FPS" value="144" />
-								<el-option label="165 FPS" value="165" />
-								<el-option label="240 FPS" value="240" />
-							</el-select>
-						</div>
 					</div>
 				</div>
 

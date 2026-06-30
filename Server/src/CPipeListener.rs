@@ -14,7 +14,6 @@ use windows::Win32::UI::{
     },
 };
 
-use crate::animation::{AnimState, AnimationSlot};
 use crate::{read_facewinunlock_registry, SharedCredentials};
 use crate::Pipe::{
     parse_credentials,
@@ -30,15 +29,6 @@ unsafe impl Send for SendableEvents {}
 impl SendableEvents {
     fn notify_changed(&self) -> windows::core::Result<()> {
         unsafe { self.0.CredentialsChanged(self.1) }
-    }
-}
-
-/// 通过 AnimationSlot 设置动画状态（槽位为空时静默忽略）
-fn set_anim_state(slot: &AnimationSlot, state: AnimState) {
-    if let Ok(guard) = slot.lock() {
-        if let Some(ctx) = guard.as_ref() {
-            ctx.set_state(state);
-        }
     }
 }
 
@@ -101,7 +91,6 @@ fn trigger_broker_pin_fallback(
     stop_flag: &AtomicBool,
     creds_pipe_raw: &AtomicIsize,
     send_events: &SendableEvents,
-    animation_slot: &AnimationSlot,
     reason: &str,
 ) {
     let already_fallback = {
@@ -127,7 +116,6 @@ fn trigger_broker_pin_fallback(
     // 全局标记 + disarm 钩子（路径 A：面容识别超时）
     mark_broker_pin_fallback();
 
-    set_anim_state(animation_slot, AnimState::Failure);
     request_broker_release(reason);
     stop_flag.store(true, Ordering::SeqCst);
 
@@ -350,7 +338,6 @@ impl CPipeListener {
         shared_creds: Arc<Mutex<SharedCredentials>>,
         is_primary_scenario: bool,
         broker_fallback_to_pin: bool,
-        animation_slot: AnimationSlot,
     ) -> Arc<Mutex<Self>> {
         let is_unlocked    = Arc::new(AtomicBool::new(false));
         let stop_flag      = Arc::new(AtomicBool::new(false));
@@ -372,7 +359,6 @@ impl CPipeListener {
         crate::dll_add_ref(); // client 线程生命周期内保持 DLL 加载（stop_and_join 分离不 join）
         let client_thread = {
             let stop_flag = stop_flag.clone();
-            let anim_slot = animation_slot.clone();
             let is_unlocked_for_client = is_unlocked.clone();
             let shared_creds_for_client = shared_creds.clone();
             let creds_pipe_raw_for_client = creds_pipe_raw.clone();
@@ -519,7 +505,6 @@ impl CPipeListener {
                                     broker_timeout.as_millis()
                                 );
                             }
-                            set_anim_state(&anim_slot, AnimState::Scanning);
                             if auto_run_on_connect {
                                 auto_run_sent = true;
                             }
@@ -545,7 +530,6 @@ impl CPipeListener {
                                         &stop_flag,
                                         &creds_pipe_raw_for_client,
                                         &send_events_for_client,
-                                        &anim_slot,
                                         "face timeout",
                                     );
                                     unsafe { let _ = CloseHandle(pipe); }
@@ -572,14 +556,13 @@ impl CPipeListener {
             })
         };
 
-        // ── Creds 线程（接收凭据 + 驱动 Success 动画）────────────────────
+        // ── Creds 线程（接收凭据）────────────────────
         crate::dll_add_ref(); // creds 线程生命周期内保持 DLL 加载（stop_and_join 分离不 join）
         let creds_thread = {
             let is_unlocked    = is_unlocked.clone();
             let stop_flag      = stop_flag.clone();
             let creds_pipe_raw = creds_pipe_raw.clone();
             let send_events    = SendableEvents(events, advise_context);
-            let anim_slot      = animation_slot.clone();
             thread::spawn(move || {
                 let _dll_ref = DllRefGuard; // 退出时 dll_release，分离安全
 
@@ -663,28 +646,10 @@ impl CPipeListener {
                                         }
                                         is_unlocked.store(true, Ordering::SeqCst);
 
-                                        // 动画：面容识别成功
-                                        set_anim_state(&anim_slot, AnimState::Success);
-
                                         if let Err(e) = send_events.notify_changed() {
                                             error!("CredentialsChanged 失败: {:?}", e);
                                         } else {
                                             info!("已通知 Windows 凭据已就绪");
-                                        }
-
-                                        // 启动独立线程：让 Success 动画短暂显示后再销毁
-                                        // 延迟 500ms 后通过 animation_slot 销毁 AnimationContext
-                                        {
-                                            let anim_slot = anim_slot.clone();
-                                            thread::spawn(move || {
-                                                thread::sleep(Duration::from_millis(500));
-                                                if let Ok(mut guard) = anim_slot.lock() {
-                                                    if guard.is_some() {
-                                                        info!("CPipeListener - 销毁动画（凭据已提交）");
-                                                        *guard = None;
-                                                    }
-                                                }
-                                            });
                                         }
                                     }
                                 }

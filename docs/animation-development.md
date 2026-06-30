@@ -2,6 +2,10 @@
 
 > 本文档跟踪 Credential Provider DLL 动画 UI 功能的设计与实现进度。
 > 起源于 [issue #99](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/99) 提出的"增加动画引导提示"建议。
+>
+> **v0.5.5 状态：已归档，不再继续实现。** 动画代码与资源已整体移除，因为 Credential Provider DLL
+> 注入 LogonUI / winlogon，DComp/D2D/D3D/DWrite 图形依赖在旧 Win10 上会导致加载失败，并且睡眠/唤醒
+> 生命周期中容易引发闪烁、卡转圈与资源释放问题。后续不要按本文档恢复动画；锁屏界面保留轻量文字提示。
 
 ---
 

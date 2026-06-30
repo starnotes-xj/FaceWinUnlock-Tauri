@@ -182,8 +182,6 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         .to_str()
         .unwrap_or(r"C:\Program Files\facewinunlock-tauri");
     let log_dir_value = log_dir.to_str().unwrap_or(root_dir_value);
-    let animation_frames_path = ROOT_DIR.join("resources").join("animation_frames.bin");
-    let animation_frames_value = animation_frames_path.to_str().unwrap_or("");
 
     // 默认配置（仅写入尚未存在的键，避免覆盖用户自定义设置）
     let defaults: &[(&str, &str)] = &[
@@ -197,9 +195,6 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         ("CREDUI_BROKER_FALLBACK_TIMEOUT", "5.0"),
         ("CREDUI_UIA_DETECT", "0"),
         ("DLL_LOG_PATH", log_dir_value),
-        ("ANIMATION_FRAMES_PATH", animation_frames_value),
-        // 动画 UI（阶段 B/C）— 默认启用以便 VM 测试
-        ("ANIMATION_UI_ENABLED", "1"),
     ];
 
     for &(name, value) in defaults {
@@ -249,13 +244,6 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         }
     }
 
-    if !animation_frames_value.is_empty() {
-        app_key
-            .set_value("ANIMATION_FRAMES_PATH", &animation_frames_value)
-            .map_err(|e| {
-                CustomResult::error(Some(format!("写 ANIMATION_FRAMES_PATH 失败: {e}")), None)
-            })?;
-    }
     app_key
         .set_value("PASSKEY_TAKEOVER_ENABLED", &"0")
         .map_err(|e| CustomResult::error(Some(format!("停用旧 Passkey 接管失败: {e}")), None))?;

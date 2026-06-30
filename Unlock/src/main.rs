@@ -70,8 +70,8 @@ const PIPE_SERVER_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustServer";
 const PIPE_UNLOCK_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustUnlock";
 const PIPE_PASSKEY_FACE_NAME: &str = r"\\.\pipe\FaceWinUnlockPasskeyFaceAuth";
 const BUF_SIZE: u32 = 4096;
-const CAMERA_WARMUP_MAX_FRAMES: usize = 4;
-const CAMERA_WARMUP_READY_FRAMES: usize = 1;
+const CAMERA_WARMUP_MAX_FRAMES: usize = 10;
+const CAMERA_WARMUP_READY_FRAMES: usize = 10;
 const WORKER_ARG: &str = "--facewinunlock-worker";
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
@@ -1070,27 +1070,44 @@ fn warm_up_camera(cam: &mut VideoCapture) {
     }
 }
 
-fn open_configured_camera(index: i32) -> Option<(VideoCapture, &'static str)> {
-    // 后端顺序必须与录入端（UI 用 CAP_ANY）一致：录入时写入的 .face 特征，是经 CAP_ANY
-    // 解析到的实际后端（Windows 上通常是 MSMF）提取的。解锁端若强制 DShow，DShow(DirectShow)
-    // 与 MSMF 在部分设备/系统上的色彩/曝光/分辨率不同，会让同一张脸的 SFace 特征偏移、cosine
-    // 跌破阈值 → "检测到脸但匹配不上"。
-    // issue #3：Win10 锁屏不自动解锁（登录磁贴出现、圆圈一直转、摄像头亮但不登录），而**同版本**
-    // Win11 能解锁——正是因为 Win11 上 DShow 与 MSMF 帧恰好接近、掩盖了后端不一致，Win10 上差异
-    // 大就暴露了。旧版本在该机器锁屏界面用 CAP_ANY（日志"尝试第1个后端 None"）即可匹配成功，
-    // 也佐证 CAP_ANY 才是与录入端一致的正确后端。故 CAP_ANY 优先；仅当其打不开才回退 DShow/MSMF。
+fn open_configured_camera(index: i32, exe_dir: &Path) -> Option<(VideoCapture, &'static str)> {
+    // 后端顺序必须与 UI 录入端 open_camera(None) 一致。v0.5.3 的 DShow 优先会造成
+    // Win10 部分机器录入/解锁帧管线不一致；v0.5.4 的 CAP_ANY 优先又会在 issue #3
+    // 的 Win10 机器上阻塞约 40 秒才亮摄像头。这里显式采用 UI 当前顺序并记录耗时，
+    // 便于继续区分"打不开"和"某个后端打开过慢"。
     for (backend_name, backend) in [
-        ("Any", videoio::CAP_ANY),
-        ("DShow", videoio::CAP_DSHOW),
         ("MSMF", videoio::CAP_MSMF),
+        ("DShow", videoio::CAP_DSHOW),
+        ("Any", videoio::CAP_ANY),
     ] {
+        let started = Instant::now();
         if let Ok(mut c) = VideoCapture::new(index, backend) {
             if c.is_opened().unwrap_or(false) {
                 let _ = c.set(videoio::CAP_PROP_FRAME_WIDTH, 640.0);
                 let _ = c.set(videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
                 warm_up_camera(&mut c);
+                log_service(
+                    exe_dir,
+                    "INFO",
+                    &format!(
+                        "camera backend {} opened in {}ms",
+                        backend_name,
+                        started.elapsed().as_millis()
+                    ),
+                );
                 return Some((c, backend_name));
             }
+        }
+        let elapsed_ms = started.elapsed().as_millis();
+        if elapsed_ms >= 1000 {
+            log_service(
+                exe_dir,
+                "WARN",
+                &format!(
+                    "camera backend {} unavailable after {}ms",
+                    backend_name, elapsed_ms
+                ),
+            );
         }
     }
     None
@@ -1469,7 +1486,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
         // 打开首选项中保存的摄像头索引，避免每次解锁都扫描 0-3 号设备。
         if cam.is_none() {
-            if let Some((c, backend_name)) = open_configured_camera(camera_index) {
+            if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
                 cam = Some(c);
                 log_service(
                     &exe_dir,
@@ -1589,7 +1606,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 log_service(&exe_dir, "INFO", &format!("no face in round {}, retrying ({}/{})", no_face_retries, no_face_retries + 1, MAX_NO_FACE_RETRIES));
                 // 释放当前摄像头后重开，获取新数据流（take() 取出旧值并 drop，显式释放）
                 drop(cam.take());
-                if let Some((c, backend_name)) = open_configured_camera(camera_index) {
+                if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
                     cam = Some(c);
                     log_service(&exe_dir, "INFO", &format!("camera reopened for retry via {}", backend_name));
                 } else {
@@ -1785,7 +1802,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         );
         let mut cam: Option<VideoCapture> = None;
         let camera_index = configured_camera_index(&db_path);
-        if let Some((c, backend_name)) = open_configured_camera(camera_index) {
+        if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
             log_service(&exe_dir, "INFO", &format!("auto-lock: camera opened via {}", backend_name));
             cam = Some(c);
         }

@@ -1,7 +1,8 @@
 param(
     [string]$CertificatePath = "",
-    # 保留模式（默认行为由调用方传入）：Remove-AppxPackage 用 -PreserveApplicationData 留住
-    # LocalState 凭据元数据；不删证书/注册表/KSP 私钥，便于重装后免重新注册。
+    # 保留模式（默认行为由调用方传入）：非提权卸载用 -PreserveApplicationData；
+    # 管理员/NSIS 卸载先备份各用户 LocalState 元数据，再 -AllUsers 移除包。
+    # 不删证书/注册表/KSP 私钥，便于重装后免重新注册。
     [switch]$PreserveApplicationData,
     # 彻底清除：删 MSIX 数据 + 证书 + 注册表残留 + KSP 私钥(facewinunlock/*)。
     [switch]$Purge
@@ -58,6 +59,59 @@ function Remove-PasskeyRegistryResidue {
     }
 }
 
+function Backup-PasskeyCredentialsFromProfiles {
+    param(
+        [string]$PackageFamilyName
+    )
+
+    if (-not $PackageFamilyName) {
+        return
+    }
+
+    $userRoot = Join-Path $env:SystemDrive 'Users'
+    if (-not (Test-Path $userRoot)) {
+        return
+    }
+
+    Get-ChildItem -Path $userRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $profile = $_.FullName
+        $src = Join-Path $profile "AppData\Local\Packages\$PackageFamilyName\LocalState\CredentialsDB\credentials.dat"
+        if (-not (Test-Path $src)) {
+            return
+        }
+
+        $backupDir = Join-Path $profile "AppData\Local\FaceWinUnlock\PasskeyBackup"
+        try {
+            New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+            Copy-Item -LiteralPath $src -Destination (Join-Path $backupDir 'credentials.dat') -Force
+            Write-Host "Backed up passkey metadata for profile $($_.Name)."
+        } catch {
+            Write-Warning "Failed to back up passkey metadata for profile $($_.Name): $($_.Exception.Message)"
+        }
+    }
+}
+
+function Remove-Package {
+    param(
+        [object]$Package
+    )
+
+    if ($Purge) {
+        Remove-AppxPackage -Package $Package.PackageFullName -ErrorAction Stop
+        return
+    }
+
+    if ($isAdmin) {
+        # -AllUsers cannot be combined with -PreserveApplicationData. Back up each user's
+        # LocalState metadata first, then remove the package for all users so NSIS uninstall
+        # does not leave the Passkey Manager app behind in the desktop user's account.
+        Backup-PasskeyCredentialsFromProfiles -PackageFamilyName $Package.PackageFamilyName
+        Remove-AppxPackage -Package $Package.PackageFullName -AllUsers -ErrorAction Stop
+    } else {
+        Remove-AppxPackage -Package $Package.PackageFullName -PreserveApplicationData -ErrorAction Stop
+    }
+}
+
 foreach ($packageName in $packageNames) {
     # An elevated process can miss per-user packages in the default view.
     # Merge both views and deduplicate by PackageFullName.
@@ -69,12 +123,7 @@ foreach ($packageName in $packageNames) {
         $packages = $packages | Sort-Object PackageFullName -Unique
     }
     foreach ($package in $packages) {
-        # 保留模式用 -PreserveApplicationData 留住 LocalState 凭据元数据；Purge 才连数据一起删。
-        if ($Purge) {
-            $package | Remove-AppxPackage -ErrorAction Stop
-        } else {
-            $package | Remove-AppxPackage -PreserveApplicationData -ErrorAction Stop
-        }
+        Remove-Package -Package $package
         $removedAnyPackage = $true
     }
 }
