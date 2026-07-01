@@ -397,6 +397,22 @@
 			loadingInstance.close();
 		});
 	}
+	// 自动锁屏开关/超时：拨动即时保存（防呆）。此前 autoLock 只随「软件配置」页的 saveAppConfig
+	// 落库，用户拨了开关却没点「保存」时 autoLockEnabled 从未写入 options 表，核心服务读到默认
+	// false → 自动锁屏永远不生效（用户实测：app.log 只有录人脸 INSERT、无 options 保存）。
+	// 核心服务每 30s 重读 options 表，保存后约半分钟内生效。
+	async function saveAutoLock() {
+		const errorArray = await optionsStore.saveOptions({
+			autoLockEnabled: config.autoLockEnabled ? "true" : "false",
+			autoLockTimeout: String(config.autoLockTimeout),
+		});
+		if (errorArray && errorArray.length > 0) {
+			ElMessage.error('自动锁屏设置保存失败：' + errorArray.join('；'));
+		} else {
+			ElMessage.success(config.autoLockEnabled ? '自动锁屏已启用（约 30 秒内生效）' : '自动锁屏已关闭');
+		}
+	}
+
 	const applyDllSettings = () => {
 		const loadingInstance = ElLoading.service({ fullscreen: true });
 
@@ -904,14 +920,14 @@
 									<p class="label">启用自动锁屏</p>
 									<p class="sub">鼠标键盘闲置超时后，通过摄像头核验当前使用者，若不是授权人员则自动锁屏</p>
 								</div>
-								<el-switch v-model="config.autoLockEnabled" />
+								<el-switch v-model="config.autoLockEnabled" @change="saveAutoLock" />
 							</div>
 							<div class="option-row" style="margin-top: 12px;">
 								<div class="row-text">
 									<p class="label">闲置超时</p>
 									<p class="sub">鼠标键盘无操作的秒数（默认 300 = 5分钟）</p>
 								</div>
-								<el-input-number v-model="config.autoLockTimeout" :min="30" :max="3600" :step="30" style="width: 140px"/>
+								<el-input-number v-model="config.autoLockTimeout" :min="30" :max="3600" :step="30" style="width: 140px" @change="saveAutoLock"/>
 							</div>
 						</el-collapse-item>
 					</el-collapse>
