@@ -958,7 +958,7 @@
 								<p class="label">FaceWinUnlock Passkey Provider</p>
 								<p class="sub">
 									官方 Windows 插件路线：插件持有自己的不可导出密钥，人脸识别只完成用户验证。<br />
-									不提取 Windows Hello 私钥，不保存 PIN，也不需要浏览器扩展；仅在你需要 FaceWinUnlock 自有通行密钥时手动安装和启用。
+									不提取 Windows Hello 私钥，不保存 PIN，也不需要浏览器扩展；安装后会自动注册插件并打开 Windows 启用页面。
 								</p>
 							</div>
 							<div class="plugin-actions">
@@ -1004,7 +1004,7 @@
 								迁移会删除测试插件本地凭据，网站端需使用正式插件重新注册通行密钥。
 							</p>
 							<p class="sub muted">
-								Passkey 插件启用后可能被 Windows 作为可用通行密钥 Provider 调用。若要继续优先使用 Windows Hello 原生通行密钥，可不安装此插件，或在 Windows 通行密钥高级设置中停用/在此处保留密钥卸载。
+								Passkey 插件依赖主程序的人脸识别服务（Unlock.exe）完成用户验证。卸载主程序或核心组件会同步卸载插件并删除插件本地通行密钥；普通更新会保留密钥，检测到新插件版本时只更新 MSIX 包体。
 							</p>
 						</div>
 
