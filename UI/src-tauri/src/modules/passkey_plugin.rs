@@ -366,6 +366,20 @@ fn is_passkey_os_supported() -> bool {
 
 fn status_value() -> Result<Value, String> {
     let formal = query_package(FORMAL_PACKAGE_NAME)?;
+    // 主动备份兜底（修「Geek 卸载重装后通行密钥凭据过期」）：插件已安装且 LocalState 有
+    // credentials.dat 时，把它备份到包外目录。v0.5.4 只在【应用内卸载】(uninstall_passkey_plugin)
+    // 时备份，而用户走 Geek/NSIS 卸载脚本的路径【不】做包外备份、Geek 深度清理又会抹掉
+    // LocalState，导致重装时 restore 无备份可恢复。改为每次状态查询（Options/初始化/安装后都会
+    // 调用本函数、且都在用户上下文）主动刷新备份，使无论经何种方式卸载，包外备份都已存在，
+    // 重装时 restore_passkey_credentials 即可恢复（私钥本就在 KSP 保留）。
+    // backup_passkey_credentials 在 LocalState 无 credentials.dat 时自动跳过、不会用空备份覆盖，
+    // 纯 best-effort，不影响状态查询结果。
+    if let Some(pfn) = formal
+        .as_ref()
+        .and_then(|p| p["package_family_name"].as_str())
+    {
+        backup_passkey_credentials(pfn);
+    }
     let sample = query_package(SAMPLE_PACKAGE_NAME)?;
     let msix_path = artifact_path("FaceWinUnlock-Passkey.msix");
     let bundled_version = query_msix_version(&msix_path).ok().flatten();
