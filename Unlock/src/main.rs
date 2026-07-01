@@ -70,8 +70,13 @@ const PIPE_SERVER_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustServer";
 const PIPE_UNLOCK_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustUnlock";
 const PIPE_PASSKEY_FACE_NAME: &str = r"\\.\pipe\FaceWinUnlockPasskeyFaceAuth";
 const BUF_SIZE: u32 = 4096;
-const CAMERA_WARMUP_MAX_FRAMES: usize = 4;
-const CAMERA_WARMUP_READY_FRAMES: usize = 1;
+// 预热帧数恢复到 10（issue #94：NVIDIA Broadcast 等虚拟摄像头需足够预热帧才稳定输出，
+// 否则花屏/黑帧）。有了「摄像头预热（秒解锁）」后，这段预热多在锁屏预开阶段完成、不在解锁关键路径上。
+const CAMERA_WARMUP_MAX_FRAMES: usize = 10;
+const CAMERA_WARMUP_READY_FRAMES: usize = 10;
+// 摄像头预热（秒解锁）空闲超时：锁屏预开摄像头后，这段时间内无 "run"（用户到场）则释放摄像头
+// 并抑制预热（关指示灯、省电），直到收到 run 或 release。
+const PREWARM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const WORKER_ARG: &str = "--facewinunlock-worker";
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
@@ -1183,6 +1188,10 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let mut delay_session_armed = false;
     let mut last_failed_at: Option<Instant> = None;
     let mut last_model_attempt = instant_secs_ago(5); // 首次尽快尝试（开机早期回退为 now）
+    // 摄像头预热（秒解锁）：prewarm_at = 锁屏预开摄像头的时刻；
+    // prewarm_suppressed = 空闲超时后抑制预热，直到下次 run（用户到场）或 release（锁屏消失）。
+    let mut prewarm_at: Option<Instant> = None;
+    let mut prewarm_suppressed = false;
 
     'main: loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -1190,6 +1199,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         if state.release_requested.swap(false, Ordering::SeqCst) {
             state.passkey_face_gate.reject_pending();
             cam = None;
+            prewarm_at = None;
+            prewarm_suppressed = false;
             delayed_run_at = None;
             delay_session_armed = false;
             last_failed_at = None;
@@ -1396,6 +1407,50 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             }
         }
 
+        // ── 摄像头预热（秒解锁）──────────────────────────────────────────────
+        // 锁屏/凭据界面活跃时提前打开摄像头，使随后用户动鼠标发的 "run" 秒识别，不必再等
+        // MSMF 打开摄像头的 2-3s。只【打开摄像头 + 预热帧】，绝不跑人脸识别（无 DNN 推理、
+        // 不耗 CPU，不违反 #115「锁屏后风扇狂转」）。安全兜底：预热后 PREWARM_IDLE_TIMEOUT
+        // 内若无 "run"（无人到场）则释放摄像头并抑制预热（关指示灯、省电），直到收到 run 或
+        // release；有连续失败（可能无人）或 broker 释放冷却期内不预热。
+        {
+            let pending = state.run_requested.load(Ordering::SeqCst)
+                || state.passkey_face_gate.pending_request_id().is_some();
+            let recognizing = state.recognition_active.load(Ordering::SeqCst);
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            let broker_cooldown = now_ms < state.after_release_cooldown_until.load(Ordering::SeqCst);
+            if prewarm_at.is_none()
+                && !prewarm_suppressed
+                && has_credential_client
+                && cam.is_none()
+                && !pending
+                && !recognizing
+                && !broker_cooldown
+                && state.consecutive_failures.load(Ordering::SeqCst) == 0
+            {
+                if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
+                    cam = Some(c);
+                    prewarm_at = Some(Instant::now());
+                    log_service(
+                        &exe_dir,
+                        "INFO",
+                        &format!("camera pre-warmed on lock via {} (秒解锁预开)", backend_name),
+                    );
+                }
+            }
+            if let Some(t) = prewarm_at {
+                if !pending && !recognizing && t.elapsed() > PREWARM_IDLE_TIMEOUT {
+                    cam = None;
+                    prewarm_at = None;
+                    prewarm_suppressed = true;
+                    log_service(&exe_dir, "INFO", "camera pre-warm idle timeout, released (省电)");
+                }
+            }
+        }
+
         let passkey_request_id = state.passkey_face_gate.pending_request_id();
         let normal_run_requested = if passkey_request_id.is_none() {
             state.run_requested.swap(false, Ordering::SeqCst)
@@ -1423,6 +1478,10 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             }
         }
         state.recognition_active.store(true, Ordering::SeqCst);
+        // 进入识别：用户已到场——清预热标记并解除抑制。本次识别复用锁屏预开的摄像头（line
+        // "if cam.is_none()" 处 cam 已 Some → 跳过 2-3s 打开 → 秒识别）；下一轮锁屏仍可预热。
+        prewarm_at = None;
+        prewarm_suppressed = false;
 
         // 定期重新加载人脸记录和配置
         if records.is_empty() || last_reload.elapsed() > Duration::from_secs(30) {
