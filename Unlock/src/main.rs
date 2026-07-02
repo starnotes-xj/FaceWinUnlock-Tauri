@@ -1439,6 +1439,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                         "INFO",
                         &format!("camera pre-warmed on lock via {} (秒解锁预开)", backend_name),
                     );
+                } else {
+                    // 预热打开失败（摄像头被占用/不存在）：抑制预热，避免每轮循环反复尝试打开、
+                    // 刷屏日志、空耗 CPU（code-review 发现）。用户真正动鼠标触发 "run" 时仍会在
+                    // 识别路径再尝试打开；release/成功识别会解除抑制。
+                    prewarm_suppressed = true;
                 }
             }
             if let Some(t) = prewarm_at {
