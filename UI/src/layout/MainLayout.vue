@@ -2,7 +2,7 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { RouterView, useRouter, useRoute } from 'vue-router';
 import { Sunny, Moon, ArrowLeft } from '@element-plus/icons-vue';
-import { ElNotification, ElMessageBox, ElLoading, ElMessage } from 'element-plus';
+import { ElMessageBox, ElLoading, ElMessage } from 'element-plus';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { useTheme } from '../hook/useTheme';
