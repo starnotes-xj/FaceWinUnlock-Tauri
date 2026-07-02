@@ -1430,6 +1430,10 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 && !recognizing
                 && !broker_cooldown
                 && state.consecutive_failures.load(Ordering::SeqCst) == 0
+                // 有关闭/释放请求待处理时不启动预热打开（open_configured_camera 阻塞 2-3s）：
+                // 让主循环尽快在下一轮响应 should_exit/release，避免关机/解锁被这次预热拖 2-3s。
+                && !state.should_exit.load(Ordering::SeqCst)
+                && !state.release_requested.load(Ordering::SeqCst)
             {
                 if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
                     cam = Some(c);
@@ -1808,6 +1812,13 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         }
 
         if !auto_lock_enabled { continue; }
+
+        // 屏幕已锁（凭据提供程序活跃、DLL creds 管道已连）时不再自动锁屏：既避免对已锁屏幕
+        // 重复锁定，也避免与解锁端「摄像头预热」抢占摄像头（autoLockTimeout 小于预热空闲超时
+        // 时二者会争用同一摄像头，导致本复查开摄像头失败）。屏幕已锁时自动锁屏本就无意义。
+        if state.dll_creds_pipe.load(Ordering::SeqCst) != INVALID_HANDLE_VALUE.0 as isize {
+            continue;
+        }
 
         let idle_ms = get_idle_millis();
         if idle_ms < (auto_lock_timeout * 1000) as u32 {
