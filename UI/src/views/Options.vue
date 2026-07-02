@@ -981,13 +981,16 @@
 								<el-tag v-if="passkeyPlugin.installed" type="success">
 									正式插件已安装{{ passkeyPlugin.version ? `（${passkeyPlugin.version}）` : '' }}
 								</el-tag>
-								<el-tag v-if="passkeyPlugin.installed && passkeyPlugin.updateAvailable" type="warning">
-									可更新到 {{ passkeyPlugin.bundledVersion }}
-								</el-tag>
 								<el-tag v-else-if="passkeyPlugin.sampleInstalled" type="warning">
 									Contoso 测试插件已安装
 								</el-tag>
 								<el-tag v-else type="info">未安装</el-tag>
+								<!-- 「可更新」是已安装时的附加提示，用独立 v-if、不参与上面的互斥链。
+								     修复：此前它的 v-if 夹在中间，把 已安装→sample→未安装 的链打断了，
+								     导致 installed=true 且无更新时，末尾的 v-else「未安装」也会同时显示。 -->
+								<el-tag v-if="passkeyPlugin.installed && passkeyPlugin.updateAvailable" type="warning">
+									可更新到 {{ passkeyPlugin.bundledVersion }}
+								</el-tag>
 								<el-button
 									type="primary"
 									size="small"

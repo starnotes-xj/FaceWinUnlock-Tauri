@@ -84,10 +84,14 @@ async function manualCheckUpdate() {
   try {
     const info: any = await invoke('check_update');
     if (info?.has_update) {
-      ElNotification({
-        title: '发现更新', message: `${formatUpdateMessage(info)}（点击前往下载）`, type: 'info', duration: 0,
-        onClick: () => { if (info.release_url) openUrl(info.release_url); }
-      });
+      try {
+        await ElMessageBox.confirm(
+          `${formatUpdateMessage(info)}，是否前往 GitHub 下载页？`,
+          '发现新版本',
+          { confirmButtonText: '前往下载', cancelButtonText: '稍后', type: 'info' }
+        );
+        if (info.release_url) openUrl(info.release_url);
+      } catch { /* 用户选“稍后” */ }
     } else { ElMessage.success(`已是最新版本 v${info?.current_version || version.value}`); }
   } catch (e) { ElMessage.error('检查更新失败: ' + (e?.toString() || '网络错误')); }
   finally { checkingUpdate.value = false; }
@@ -98,10 +102,15 @@ onMounted(async () => {
     const info: any = await invoke('check_update'); if (!info?.has_update) return;
     let diff: any;
     try { diff = await invoke('fetch_update_diff'); } catch {
-      ElNotification({
-        title: '发现更新', message: `${formatUpdateMessage(info)}（点击前往下载）`, type: 'info', duration: 10000,
-        onClick: () => { if (info.release_url) openUrl(info.release_url); }
-      }); return;
+      try {
+        await ElMessageBox.confirm(
+          `${formatUpdateMessage(info)}，是否前往 GitHub 下载页？`,
+          '发现新版本',
+          { confirmButtonText: '前往下载', cancelButtonText: '稍后', type: 'info' }
+        );
+        if (info.release_url) openUrl(info.release_url);
+      } catch {}
+      return;
     }
     if (!diff?.files_to_update?.length) return;
     try {
