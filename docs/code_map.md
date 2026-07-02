@@ -1,7 +1,7 @@
 # FaceWinUnlock-Tauri 代码地图
 
-> 精简版代码地图，覆盖三个可执行组件的架构、IPC 协议、动画管线与关键数据流。
-> 最后更新：2026-06-06
+> 精简版代码地图，覆盖三个可执行组件的架构、IPC 协议与关键数据流。
+> 最后更新：2026-06-30
 
 ---
 
@@ -43,10 +43,10 @@ DllGetClassObject
         ├── SetUsageScenario  ← 过滤场景（UNLOCK_SCENE / CREDUI_ALLOW_GENERIC 注册表；broker 失败回退 PIN）
         ├── Advise            ← 启动 CPipeListener
         ├── GetCredentialAt   → SampleCredential (ICredentialProviderCredential)
-        │   ├── Advise        ← OnCreatingWindow → AnimationContext（阶段 A）
+        │   ├── Advise        ← 接收 Credential Provider 事件回调
         │   ├── GetSerialization  ← CredPackAuthenticationBufferW + 重置 is_unlocked
         │   ├── ReportResult  ← 失败时清空凭据（#102）
-        │   └── UnAdvise      ← 释放 AnimationContext
+        │   └── UnAdvise      ← 清理事件回调
         └── UnAdvise          ← stop_and_join CPipeListener
 ```
 
@@ -132,94 +132,20 @@ UI 使用管道做健康检查：
 | `CREDUI_ALLOW_BROKER` | `"1"` | 兼容旧配置；当前默认允许 `credentialuibroker.exe` 托管的浏览器/passkey CredUI 先尝试人脸，失败后回退 PIN |
 | `CREDUI_BROKER_FALLBACK_TIMEOUT` | `"5.0"` | broker 场景发起人脸识别后等待凭据的秒数，超时隐藏本 Provider 并交还 Windows PIN |
 | `UNLOCK_GRACE_PERIOD` | `"5.0"` | 锁屏后宽限期秒数（#116） |
-| `ANIMATION_UI_ENABLED` | `"0"` | 动画 UI 开关（灰度，默认关） |
 
 ---
 
-## 六、动画管线（Server/src/animation.rs）— 阶段 C
+## 六、解锁动画（v0.5.5 已移除）
 
-### 架构（路径 C：DComp Topmost Layer）
+原 `Server/src/animation.rs` 的 Windows Hello 风格动画管线已整体删除：
 
-放弃了阶段 A 的独立子窗口方案，改为 DComp topmost 层直接绑定 LogonUI 父 HWND：
+- Server DLL 不再创建 `AnimationContext` / `AnimationSlot`；
+- `CPipeListener` 不再发送 Scanning / Success / Failure 动画状态；
+- `Server/Cargo.toml` 不再启用 DirectComposition / Direct2D / Direct3D / DirectWrite / DXGI features；
+- UI 安装包不再打包 `animation_frames.bin`，设置页不再暴露动画刷新率；
+- 安装器不再写入 `ANIMATION_*` 注册表值，仅在卸载时删除旧版本残留键。
 
-```
-LogonUI 父 HWND（OnCreatingWindow 返回）
-│
-├── [DComp Topmost Layer] ← 我们的动画（topmost=true）
-│   └── DComp Visual { SetOffsetX2/Y2 = 磁贴位置 }
-│       └── DComp VirtualSurface (128×128)
-│           └── BeginDraw → IDXGISurface → ID2D1Bitmap1
-│               └── D2D 旋转环 / 状态动画 (60 FPS GPU)
-│
-├── [Child Windows Layer] ← LogonUI 正常内容
-│   ├── 用户磁贴
-│   └── 凭据磁贴 ← EnumChildWindows 尺寸启发式定位
-│
-└── GPU 管线初始化：
-    ├── D3D11CreateDevice（BGRA_SUPPORT）→ ID3D11Device
-    ├── IDXGIDevice → DCompositionCreateDevice2 → IDCompositionDesktopDevice
-    ├── CreateTargetForHwnd(parent_hwnd, topmost=true) → IDCompositionTarget
-    ├── CreateVisual → IDCompositionVisual2 → SetContent(surface)
-    └── D2D1Factory → ID2D1Device → ID2D1DeviceContext
-```
-
-### 状态机
-
-```
-    ┌──────┐   CPipeListener "run"   ┌──────────┐
-    │ Idle │ ───────────────────►   │ Scanning │
-    └──────┘                         └────┬─────┘
-       ▲                     凭据到达  │   │ 重试3次未匹配
-       │                    ┌──────────┘   └──────────┐
-       │                    ▼                          ▼
-       │               ┌─────────┐              ┌─────────┐
-       └───────────────│ Success │              │ Failure │
-          2 秒后退回   └─────────┘              └─────────┘
-```
-
-驱动方式：`CPipeListener` 的 Client 线程（发 "run" → Scanning）和 Creds 线程（收凭据 → Success）通过 `AnimationSlot` 推送状态变化。
-
-### 磁贴定位策略
-
-`find_tile_position()` 按优先级尝试：
-1. **尺寸+可见性启发式** — EnumChildWindows 枚举子窗口，按尺寸接近 128-384px 的可见正方形窗口打分，上半区 +50 分（偏好头像区域）
-2. **注册表偏移** — `ANIMATION_OFFSET_X/Y`（保留，未实现）
-3. **兜底** — 父窗口 client 区域水平居中、垂直 **1/4** 处（VM 实测：2/3 = PIN 输入区；1/3 = 与用户头像重合；1/4 = 头像上方，位置最佳）
-
-### AnimationContext 结构
-
-```rust
-pub enum AnimState { Idle, Scanning, Success, Failure }
-
-pub type AnimationSlot = Arc<Mutex<Option<AnimationContext>>>;
-
-pub struct AnimationContext {
-    parent_hwnd: HWND,                      // LogonUI 父窗口（不拥有）
-    render_state: Arc<RenderState>,         // 原子 stop flag + 状态机数据
-    render_thread: Option<JoinHandle<()>>,  // 渲染线程句柄
-}
-unsafe impl Send for AnimationContext {}
-
-// RenderState 内部：
-//   stop: AtomicBool              — Drop 时设置，渲染线程退出
-//   anim: Mutex<AnimStateData>    — 当前状态 + 进入时间（用于动画过渡）
-```
-
-GPU 资源（DComp/D3D/D2D）全部在渲染线程内创建和销毁，`AnimationContext` 主线程侧只保留 HWND 和线程句柄。`Drop` 时 signal stop + join 线程，确保无资源泄漏。
-
-### 当前进度
-
-| 阶段 | 任务 | 状态 |
-|------|------|------|
-| A1-A6 | DComp/D3D/D2D 管线 + PoC 纯色填充 | ✅ |
-| A7 | 亮度功能从 Unlock.exe 迁移到 DLL | ⏸️ 延后 |
-| A8 | UnAdvise 清理（Drop AnimationContext） | ✅ |
-| A9 | 灰度开关 ANIMATION_UI_ENABLED | ✅ |
-| B | DComp topmost 路径 C + D2D 旋转环 60 FPS | ✅ |
-| C | 状态机（Idle/Scanning/Success/Failure）+ 管道驱动 | ✅ 已实现，VM 修复两个 Bug（弧截断 + 位置偏低），待回归验证 |
-| D | 摄像头预览到磁贴 | ⏳ 可选 |
-
-**下一步**：VM 回归验证 4 状态动画，通过后考虑合并主分支或进入阶段 D。
+移除原因：Credential Provider DLL 被注入 LogonUI / winlogon，图形库依赖在旧 Win10 上会导致 DLL 加载失败，并且动画资源释放与锁屏/睡眠生命周期耦合，容易引发闪烁、卡转圈、唤醒后无法进入桌面等问题。后续不要给 Server DLL 重新引入 DComp/D2D/D3D/DWrite/DXGI 依赖；改动后必须用 `dumpbin /imports` 复核导入表无 `d3d11` / `dcomp` / `dwrite` / `d2d1` / `dxgi`。
 
 ---
 
@@ -236,7 +162,7 @@ main()
 └── auto_lock_monitor()     → GetLastInputInfo 空闲检测 → LockWorkStation
 ```
 
-摄像头启动顺序：`CAP_MSMF → CAP_DSHOW → CAP_ANY`，索引 0-3，预热 10 帧（#94）
+摄像头启动顺序：`CAP_MSMF → CAP_DSHOW → CAP_ANY`，索引 0-3，预热 10 帧（#94；必须与 UI 录入端 `open_camera(None)` 顺序一致）
 
 ---
 
@@ -276,9 +202,6 @@ main()
 
 | 坑 | 正确写法 |
 |----|---------|
-| `D2D1CreateFactory` 是泛型，只有 2 个参数 | `D2D1CreateFactory(type, None)?` |
-| `IDCompositionVirtualSurface::BeginDraw` 第二参数是 `*mut POINT`（出参） | `BeginDraw(Some(&rect), &mut offset)?` |
-| `SetTransform` 不在 `ID2D1DeviceContext` 上直接暴露 | 阶段 A 跳过变换，或 cast 到 `ID2D1RenderTarget` |
 | `CreateNamedPipeW` 返回 `HANDLE`（非 `Result`） | 手动 `handle.is_invalid()` 检查 |
 | COM trait impl 中用 `Foundation::BOOL`，不是 `windows_core::BOOL` | 看错误 E0308 |
 | Rust 2021 partial capture：闭包捕获字段而非整个结构体 | 用 wrapper 方法（见 `SendableEvents::notify_changed`） |

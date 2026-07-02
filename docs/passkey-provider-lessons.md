@@ -76,9 +76,14 @@ Storage model (two separate parts):
 Implementation (`passkey_plugin.rs` + `scripts/uninstall-passkey-plugin.ps1` + `nsis/hooks.nsh`):
 
 - Two modes: `KeepCredentials` (default) / `Purge`.
-- KeepCredentials: `Remove-AppxPackage -PreserveApplicationData` keeps LocalState; back up
-  `credentials.dat` to `%LOCALAPPDATA%\FaceWinUnlock\PasskeyBackup` before removal (fallback
-  if LocalState gets wiped); keep private key + cert + registry config.
+- KeepCredentials:
+  - Non-elevated app uninstall uses `Remove-AppxPackage -PreserveApplicationData` for the current user.
+  - Elevated / NSIS uninstall cannot combine `-AllUsers` with `-PreserveApplicationData`. It must first
+    back up each user's `CredentialsDB\credentials.dat` to that user's
+    `%LOCALAPPDATA%\FaceWinUnlock\PasskeyBackup`, then remove the package with `Remove-AppxPackage -AllUsers`.
+    This prevents "Passkey Manager remains after uninstall" when NSIS runs under an administrator account
+    different from the desktop user.
+  - Keep private key + cert + registry config.
 - After install/reinstall, if LocalState has no metadata but a backup exists, restore it.
 - Purge: remove MSIX data + `certutil -delkey facewinunlock/*` (KSP private keys) + cert +
   registry + backup.
@@ -91,7 +96,8 @@ Caveats / must-verify on real hardware:
   path is reused on reinstall.
 - Private key is DPAPI per-user: same Windows user reinstall works; profile reset / different
   user invalidates it (expected).
-- `-PreserveApplicationData` needs Win10 1709+ (passkey itself needs 24H2, so satisfied).
+- `-PreserveApplicationData` needs Win10 1709+ (passkey itself needs 24H2, so satisfied), but it is
+  incompatible with `Remove-AppxPackage -AllUsers`; all-users uninstall must rely on the explicit backup.
 - End-to-end validation needs **Win11 24H2 + a previously registered site passkey**; the
   `-PreserveApplicationData` reuse, backup/restore and `certutil -delkey` cannot be verified
   on a dev box without that setup.

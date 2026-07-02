@@ -27,6 +27,15 @@
     CopyFiles /SILENT "$INSTDIR\resources\FaceWinUnlock-Server.exe" "$INSTDIR\"
     Delete "$INSTDIR\resources\FaceWinUnlock-Server.exe"
 
+  ; ── 杀软误删自愈（根治「安装后第二天 opencv_world4120.dll / FaceWinUnlock-Server.exe 丢失」）──
+  ; 两个无签名二进制（OpenCV DLL + 开摄像头/注入凭据的后台服务）可能被火绒/Defender
+  ; 云查杀当成可疑文件删除。resilience.ps1 -Mode Setup 会：①把两文件打成压缩备份
+  ; runtime-backup.zip；②注册 FaceWinUnlockHealer 计划任务（开机/登录/每15分钟检测缺失即恢复）；
+  ; ③尝试把安装目录加入 Windows Defender 排除。
+  DetailPrint "正在配置运行时文件自愈与杀软排除..."
+  nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\nsis\resilience.ps1" -Mode Setup -InstallDir "$INSTDIR"'
+  Pop $0
+
   ; 同步部署 Credential Provider DLL。登录/锁屏磁贴加载的是 System32 中注册的 DLL，
   ; 仅覆盖安装目录资源文件不会更新锁屏界面的文字和逻辑。
   SetRegView 64
@@ -73,7 +82,6 @@
   WriteRegStr HKLM "Software\facewinunlock-tauri" "SHOW_TILE" "1"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "CONNECT_TO_PIPE" "1"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "DLL_LOG_PATH" "$INSTDIR\logs"
-  WriteRegStr HKLM "Software\facewinunlock-tauri" "ANIMATION_FRAMES_PATH" "$INSTDIR\resources\animation_frames.bin"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "UNLOCK_GRACE_PERIOD" "0.0"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "RETRY_DELAY" "1.0"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "CREDUI_ALLOW_BROKER" "1"
@@ -163,6 +171,17 @@
   ; 增量更新可能残留的一次性任务
   nsExec::ExecToStack 'schtasks /Delete /TN "FaceWinUnlockNgcCrack" /F'
   Pop $0
+  ; 杀软误删自愈计划任务与 Defender 排除（POSTINSTALL 由 resilience.ps1 -Mode Setup 注册）
+  IfFileExists "$INSTDIR\nsis\resilience.ps1" 0 resilience_uninstall_fallback
+    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\nsis\resilience.ps1" -Mode Teardown -InstallDir "$INSTDIR"'
+    Pop $0
+    Goto resilience_uninstall_done
+  resilience_uninstall_fallback:
+    nsExec::ExecToStack 'schtasks /Delete /TN "FaceWinUnlockHealer" /F'
+    Pop $0
+    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Remove-MpPreference -ExclusionPath \"$INSTDIR\" -ErrorAction SilentlyContinue"'
+    Pop $0
+  resilience_uninstall_done:
 
   ; ─── 3. System32 DLL 残留 ────────────────────────────────────────
   Delete /REBOOTOK "$SYSDIR\FaceWinUnlock-Tauri.dll"

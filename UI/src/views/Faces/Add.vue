@@ -6,7 +6,7 @@
     import { invoke } from '@tauri-apps/api/core';
     import { formatObjectString, removeFace } from '../../utils/function'
     import { openUrl } from '@tauri-apps/plugin-opener';
-    import { useRoute, useRouter } from 'vue-router';
+    import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router';
     import { info, error as errorLog, warn } from '@tauri-apps/plugin-log';
     import { useFacesStore } from '../../stores/faces';
     import { useOptionsStore } from '../../stores/options';
@@ -60,7 +60,11 @@
     };
 
     async function ensureModelLoaded() {
-        if (modelReady) return;
+        // 不能用 modelReady 早退（issue #12）：本组件被路由 <keep-alive> 缓存，modelReady 会跨导航
+        // 保留为 true；而「首选项」页切换推理后端的可用性探测会 unload 后端模型，使 UI 缓存的
+        // modelReady 与后端真实状态不同步——此时早退会跳过真正的重新加载，随后 verify_face 读到空
+        // 模型报「模型未加载,请先调用load_opencv_model」。改为始终调用 load_opencv_model（后端幂等：
+        // 已加载则秒级短路），让后端成为模型加载状态的唯一事实来源。
         if (modelLoadingPromise) return modelLoadingPromise;
 
         const loadingInstance = ElLoading.service({ fullscreen: true, text: '正在加载人脸识别模型...' });
@@ -132,6 +136,17 @@
             } catch (error) {
                 ElMessage.error(formatObjectString("卸载模型失败：", error));
             }
+        }
+    })
+
+    // 离开录入页（含顶栏「返回」按钮 $router.back()、任意路由跳转）时务必停掉摄像头 +
+    // 一致性验证循环：页面被 <keep-alive> 缓存、onUnmounted 在导航时不触发，返回按钮又在
+    // MainLayout 里不经过本组件，故用路由守卫兜底——否则点返回后摄像头灯常亮、验证继续跑（用户反馈）。
+    onBeforeRouteLeave(async () => {
+        if (isLoopRunning || isCameraStreaming.value || verificationMode.value) {
+            try { await stopCamera(); } catch (_) {}
+            isCameraStreaming.value = false;
+            verifyingStreamImage.value = '';
         }
     })
 
@@ -283,6 +298,7 @@
 
     function stopCamera(){
         isLoopRunning = false;
+        verificationMode.value = false;
         return new Promise((resolve, reject) => {
             invoke("stop_camera").then(()=>{
                 resolve();
@@ -293,6 +309,16 @@
                 reject();
             });
         })
+    }
+
+    async function leaveFacePage() {
+        try {
+            await stopCamera();
+        } catch (_) {
+            // stopCamera already reports the close failure; navigation should not be blocked.
+        }
+        verifyingStreamImage.value = '';
+        router.push('/faces');
     }
 
     // 切换验证模式
@@ -327,6 +353,20 @@
     };
 
     const handleSave = async () => {
+        // 保存前先结束一致性验证 / 摄像头抓拍循环：避免与 save_face_registration 争用摄像头+模型
+        // 导致存不了；也让「确认修改/保存」在验证或抓拍进行中点击时先停掉再保存（用户反馈：
+        // 点确认更改要能取消验证并保存；从摄像头重新拍摄后也要能直接保存）。
+        const wasCapturing = isCameraStreaming.value && !verificationMode.value;
+        if (isLoopRunning || isCameraStreaming.value || verificationMode.value) {
+            try { await stopCamera(); } catch (_) {}
+            isCameraStreaming.value = false;
+            verifyingStreamImage.value = '';
+        }
+        // 直接从摄像头实时流保存 = 使用刚抓拍的新图片
+        if (wasCapturing && rawImageForSystem) {
+            isEditFaceImage = true;
+        }
+
         if (!authForm.username || !authForm.password) {
             ElMessage.warning('请填写完整的账号密码信息')
             return;
@@ -372,7 +412,7 @@
             ){
                 // 没有任何变化，直接成功
                 ElMessage.success('修改成功！');
-                router.push('/faces');
+                await leaveFacePage();
                 return;
             }
         }
@@ -440,7 +480,7 @@
             
             info(`${authForm.username} 面容${isEditMode.value ? '修改' : '添加'}成功！`);
             ElMessage.success(isEditMode.value ? '修改成功' : '添加成功');
-            router.push('/faces');
+            await leaveFacePage();
         } catch (error) {
             // 如果失败 删除上面生成的面容图片和特征文件
             removeFace(face_token);
@@ -573,7 +613,7 @@
                         <AccountAuthForm v-model="authForm" :small="true" :customTips="'请输入系统密码或微软账号密码，<span style=&quot;color: var(--v7-cinnabar-bright);&quot;>程序不支持 PIN</span><br/>此密码仅用于 DLL 调起 WinLogon 认证<br />不会上传至任何云端<br />注意：<strong>当前使用明文存储</strong>'"/>
 
                         <div class="footer-btns">
-                            <el-button type="success" size="large" @click="handleSave" :disabled="!capturedImage || isCameraStreaming" :loading="isProcessing">
+                            <el-button type="success" size="large" @click="handleSave" :disabled="!capturedImage" :loading="isProcessing">
                                 {{ isEditMode ? '确认修改' : '保存并录入系统' }}
                             </el-button>
                         </div>

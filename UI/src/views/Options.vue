@@ -64,7 +64,6 @@
 		showTile: optionsStore.getOptionValueByKey('showTile') ? (optionsStore.getOptionValueByKey('showTile') == 'false' ? false : true) : true,
 		unlockScene: (optionsStore.getOptionValueByKey('unlockScene') || '1,2,4').split(',').map((s: string) => s.trim()).filter(Boolean),
 		credUiAllowBroker: true,
-		animationFps: optionsStore.getOptionValueByKey('animationFps') || 'auto',
 	})
 
 	const passkeyPlugin = reactive({
@@ -398,6 +397,22 @@
 			loadingInstance.close();
 		});
 	}
+	// 自动锁屏开关/超时：拨动即时保存（防呆）。此前 autoLock 只随「软件配置」页的 saveAppConfig
+	// 落库，用户拨了开关却没点「保存」时 autoLockEnabled 从未写入 options 表，核心服务读到默认
+	// false → 自动锁屏永远不生效（用户实测：app.log 只有录人脸 INSERT、无 options 保存）。
+	// 核心服务每 30s 重读 options 表，保存后约半分钟内生效。
+	async function saveAutoLock() {
+		const errorArray = await optionsStore.saveOptions({
+			autoLockEnabled: config.autoLockEnabled ? "true" : "false",
+			autoLockTimeout: String(config.autoLockTimeout),
+		});
+		if (errorArray && errorArray.length > 0) {
+			ElMessage.error('自动锁屏设置保存失败：' + errorArray.join('；'));
+		} else {
+			ElMessage.success(config.autoLockEnabled ? '自动锁屏已启用（约 30 秒内生效）' : '自动锁屏已关闭');
+		}
+	}
+
 	const applyDllSettings = () => {
 		const loadingInstance = ElLoading.service({ fullscreen: true });
 
@@ -417,17 +432,12 @@
 			{
 				key: "CREDUI_BROKER_FALLBACK_TIMEOUT",
 				value: "5.0"
-			},
-			{
-				key: "ANIMATION_FPS",
-				value: dllConfig.animationFps // "auto" 或具体数值，DLL 解析失败时自动跟随显示器
 			}
 		]}).then(()=>{
 			return optionsStore.saveOptions({
 				showTile: dllConfig.showTile,
 				unlockScene: dllConfig.unlockScene.join(','),
-				credUiAllowBroker: "true",
-				animationFps: dllConfig.animationFps
+				credUiAllowBroker: "true"
 			})
 		}).then((errorArray)=>{
 			if(errorArray.length > 0){
@@ -910,14 +920,14 @@
 									<p class="label">启用自动锁屏</p>
 									<p class="sub">鼠标键盘闲置超时后，通过摄像头核验当前使用者，若不是授权人员则自动锁屏</p>
 								</div>
-								<el-switch v-model="config.autoLockEnabled" />
+								<el-switch v-model="config.autoLockEnabled" @change="saveAutoLock" />
 							</div>
 							<div class="option-row" style="margin-top: 12px;">
 								<div class="row-text">
 									<p class="label">闲置超时</p>
 									<p class="sub">鼠标键盘无操作的秒数（默认 300 = 5分钟）</p>
 								</div>
-								<el-input-number v-model="config.autoLockTimeout" :min="30" :max="3600" :step="30" style="width: 140px"/>
+								<el-input-number v-model="config.autoLockTimeout" :min="30" :max="3600" :step="30" style="width: 140px" @change="saveAutoLock"/>
 							</div>
 						</el-collapse-item>
 					</el-collapse>
@@ -971,13 +981,16 @@
 								<el-tag v-if="passkeyPlugin.installed" type="success">
 									正式插件已安装{{ passkeyPlugin.version ? `（${passkeyPlugin.version}）` : '' }}
 								</el-tag>
-								<el-tag v-if="passkeyPlugin.installed && passkeyPlugin.updateAvailable" type="warning">
-									可更新到 {{ passkeyPlugin.bundledVersion }}
-								</el-tag>
 								<el-tag v-else-if="passkeyPlugin.sampleInstalled" type="warning">
 									Contoso 测试插件已安装
 								</el-tag>
 								<el-tag v-else type="info">未安装</el-tag>
+								<!-- 「可更新」是已安装时的附加提示，用独立 v-if、不参与上面的互斥链。
+								     修复：此前它的 v-if 夹在中间，把 已安装→sample→未安装 的链打断了，
+								     导致 installed=true 且无更新时，末尾的 v-else「未安装」也会同时显示。 -->
+								<el-tag v-if="passkeyPlugin.installed && passkeyPlugin.updateAvailable" type="warning">
+									可更新到 {{ passkeyPlugin.bundledVersion }}
+								</el-tag>
 								<el-button
 									type="primary"
 									size="small"
@@ -1014,22 +1027,6 @@
 							</p>
 						</div>
 
-						<div class="option-row">
-							<div class="row-text">
-								<p class="label">动画刷新率</p>
-								<p class="sub">锁屏动画的渲染帧率，"跟随显示器"会自动匹配当前显示器刷新率</p>
-							</div>
-							<el-select v-model="dllConfig.animationFps" style="width: 160px;">
-								<el-option label="跟随显示器" value="auto" />
-								<el-option label="30 FPS" value="30" />
-								<el-option label="60 FPS" value="60" />
-								<el-option label="75 FPS" value="75" />
-								<el-option label="120 FPS" value="120" />
-								<el-option label="144 FPS" value="144" />
-								<el-option label="165 FPS" value="165" />
-								<el-option label="240 FPS" value="240" />
-							</el-select>
-						</div>
 					</div>
 				</div>
 

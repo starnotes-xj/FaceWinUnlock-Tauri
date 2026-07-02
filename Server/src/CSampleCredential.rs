@@ -19,7 +19,6 @@ use windows::Win32::{
 };
 use windows_core::{implement, PCWSTR, PWSTR};
 use windows::Win32::Foundation::BOOL;
-use crate::animation::{AnimationContext, AnimationSlot};
 use crate::{CLSID_SampleProvider, SharedCredentials};
 
 /// 凭据实现类，代表登录界面上的一个磁贴
@@ -33,9 +32,6 @@ pub struct SampleCredential {
     provider_events: Mutex<Option<ICredentialProviderEvents>>,
     provider_advise_context: usize,
     broker_fallback_enabled: bool,
-    /// 动画 UI 上下文（阶段 A）。Advise 时在 LogonUI 进程内创建子窗口+DComp 管线，
-    /// UnAdvise 时释放。失败不影响登录功能。
-    animation: AnimationSlot,
     /// Hello PIN 输入缓冲区。PIN 启用时，用户输入的 PIN 暂存于此。
     /// 提交后清零（SecureZeroMemory 风格）。
     pin_buffer: Mutex<String>,
@@ -46,7 +42,6 @@ impl SampleCredential {
     pub fn new(
         shared_creds: Arc<Mutex<SharedCredentials>>,
         auth_package_id: u32,
-        animation: AnimationSlot,
         provider_events: Option<ICredentialProviderEvents>,
         provider_advise_context: usize,
         broker_fallback_enabled: bool,
@@ -59,7 +54,6 @@ impl SampleCredential {
             provider_events: Mutex::new(provider_events),
             provider_advise_context,
             broker_fallback_enabled,
-            animation,
             pin_buffer: Mutex::new(String::new()),
         }
     }
@@ -79,58 +73,12 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         let mut events = self.events.lock().unwrap();
         *events = pcpce.clone(); // 保存事件接口
 
-        // ── 动画 UI 管线（路径 C：DComp topmost + 磁贴定位）──────
-        // 绑定 DComp 到 LogonUI 父窗口（topmost=true），通过
-        // EnumChildWindows 定位凭据磁贴，在头像区叠加 60 FPS GPU 动画。
-        if let Some(ev) = events.as_ref() {
-            // autologon 阶段：人脸匹配成功后 is_ready=true，LogonUI 会复用同一凭据实例
-            // 再次 Advise（紧接着 GetSerialization 提交凭据并登录）。若在这第二次 Advise
-            // 重新创建 topmost DComp 叠加层，它会盖在「登录→桌面」过渡之上、且 240fps 渲染
-            // 线程未及时清理，导致一直转圈进不了桌面（需重启）。因此凭据已就绪时跳过动画
-            // 创建——只在首次「扫描」阶段播放动画。
-            let creds_ready = self.shared_creds.lock().unwrap().is_ready;
-            if is_animation_enabled() && !creds_ready {
-                match unsafe { ev.OnCreatingWindow() } {
-                    Ok(parent_hwnd) => {
-                        info!("SampleCredential::Advise - LogonUI 父 HWND: {:?}", parent_hwnd);
-                        // 用磁贴文本片段定位（容错：EnumChildWindows 找不到时回退到默认位置）
-                        match AnimationContext::new(parent_hwnd, "FaceWinUnlock") {
-                            Ok(ctx) => {
-                                info!("SampleCredential::Advise - 动画渲染线程已启动（路径 C：topmost 叠加）");
-                                *self.animation.lock().unwrap() = Some(ctx);
-                            }
-                            Err(e) => {
-                                warn!("SampleCredential::Advise - AnimationContext 失败: {:?}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("SampleCredential::Advise - OnCreatingWindow 失败: {:?}", e);
-                    }
-                }
-            } else if creds_ready {
-                info!("SampleCredential::Advise - 凭据已就绪（autologon 阶段），跳过动画创建以避免阻塞桌面过渡");
-            } else {
-                info!("SampleCredential::Advise - ANIMATION_UI_ENABLED=0，跳过");
-            }
-        }
-
         Ok(())
     }
 
     /// 取消事件通知
     fn UnAdvise(&self) -> windows_core::Result<()> {
         info!("SampleCredential::UnAdvise - 取消事件通知");
-
-        // 先释放动画上下文（销毁子窗口、Release COM 对象）
-        // 必须在 events 清空前完成，避免 DComp Commit 时 LogonUI 已经卸载
-        {
-            let mut animation = self.animation.lock().unwrap();
-            if animation.is_some() {
-                info!("SampleCredential::UnAdvise - 释放动画 UI 资源");
-                *animation = None; // 触发 AnimationContext 的 Drop
-            }
-        }
 
         let mut events = self.events.lock().unwrap();
         *events = None; // 清除事件接口
@@ -450,20 +398,6 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
             s.is_unlocked = false;
         }
 
-        // 销毁动画 UI 资源：确保 DComp 叠加层在登录→桌面过渡之前完全释放。
-        // CPipeListener 凭据线程已启动 500ms 延迟销毁，但在 autologon 快速路径中
-        // GetSerialization 可能在 500ms 内被调用——此处作为最后防线，在凭据返回
-        // Windows 之前同步销毁 AnimationContext，阻止渲染线程在 LogonUI 销毁期间
-        // 继续提交 DComp Commit 导致 DWM 卡死（开机冷启动转圈）。
-        {
-            if let Ok(mut anim) = self.animation.lock() {
-                if anim.is_some() {
-                    info!("SampleCredential::GetSerialization - 凭据就绪，同步销毁动画 UI");
-                    *anim = None;
-                }
-            }
-        }
-
         unsafe {
             (*pcpcs).ulAuthenticationPackage = self.auth_package_id;
             (*pcpcs).cbSerialization         = cb_packed;
@@ -540,14 +474,6 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
 // 将 String 转换为符合 Win32 要求的 UTF-16 向量（带 null 结尾）
 fn to_wide_vec(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// A9：动画 UI 灰度开关 — 注册表 ANIMATION_UI_ENABLED == "1" 才启用
-/// 初始化向导默认写入 "1"；缺少注册表值时保持关闭，保护未初始化环境。
-fn is_animation_enabled() -> bool {
-    crate::read_facewinunlock_registry("ANIMATION_UI_ENABLED")
-        .map(|v| v.trim() == "1")
-        .unwrap_or(false)
 }
 
 /// 获取当前登录用户的 SID 字符串

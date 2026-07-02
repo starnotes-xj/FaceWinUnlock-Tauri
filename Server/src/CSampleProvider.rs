@@ -1,7 +1,7 @@
 // 引入必要的Win32 API和同步原语
 use windows::Win32::{Foundation::{E_NOTIMPL, HANDLE, STATUS_SUCCESS}, Security::Authentication::Identity::{LsaConnectUntrusted, LsaDeregisterLogonProcess, LsaLookupAuthenticationPackage, LSA_STRING}, UI::Shell::*};
 use std::sync::{Arc, Mutex};
-use crate::{dll_add_ref, dll_release, read_facewinunlock_registry, CPipeListener::CPipeListener, CSampleCredential::SampleCredential, SharedCredentials, animation::{self, AnimationSlot}};
+use crate::{dll_add_ref, dll_release, read_facewinunlock_registry, CPipeListener::CPipeListener, CSampleCredential::SampleCredential, SharedCredentials};
 use windows_core::{implement, PSTR, PWSTR};
 use windows::Win32::Foundation::BOOL;
 
@@ -22,8 +22,6 @@ struct ProviderInner {
     pub shared_creds: Arc<Mutex<SharedCredentials>>,
     pub auth_package_id: u32,
     pub credential: Option<ICredentialProviderCredential>,
-    /// 动画槽位（Provider/Credential/PipeListener 三方共享）
-    pub animation_slot: AnimationSlot,
 }
 
 impl SampleProvider {
@@ -55,7 +53,6 @@ impl SampleProvider {
                 shared_creds: shared,
                 auth_package_id: auth_id,
                 credential: None,
-                animation_slot: animation::make_slot(),
             }),
         }
     }
@@ -182,14 +179,12 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
                 // 已移除整个 broker_detect 模块。人脸未匹配或提交凭据被拒时，由运行期
                 // broker_fallback_to_pin（CSampleCredential::ReportResult、CPipeListener）回退
                 // Windows PIN——用户可在通行密钥选择器里改用原生，原生 passkey 仍可走 PIN。
-                let slot = inner.animation_slot.clone();
                 inner.listener = Some(CPipeListener::start(
                     events.clone(),
                     upadvisecontext,
                     inner.shared_creds.clone(),
                     is_primary,
                     is_broker,
-                    slot,
                 ));
             }
         }
@@ -363,7 +358,6 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             let cred = SampleCredential::new(
                 inner.shared_creds.clone(),
                 inner.auth_package_id,
-                inner.animation_slot.clone(),
                 inner.events.clone(),
                 inner.advise_context,
                 is_broker,

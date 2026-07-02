@@ -179,7 +179,7 @@ DLL-level settings are mirrored to both SQLite and the registry when the user cl
   - UI clients: read commands ("hello server" health check, "exit" shutdown)
   - DLL clients: wait for matched credentials and push them via pipe
 - **`face_recognition_loop`** — Main recognition loop:
-  - On `run_requested`: opens camera (CAP_ANY, indices 0-3), captures up to 60 frames, runs face detection (FaceDetectorYN) + feature extraction (FaceRecognizerSF), computes cosine similarity against stored `.face` feature files from `<exe_dir>/faces/`
+  - On `run_requested`: opens camera with the same backend order as UI enrollment (MSMF → DShow → Any, indices 0-3), captures frames, runs face detection (FaceDetectorYN) + feature extraction (FaceRecognizerSF), computes cosine similarity against stored `.face` feature files from `<exe_dir>/faces/`
   - Loads face records from SQLite `faces` table via `rusqlite`
   - Periodically reloads face records (every 30s) to pick up changes
   - Checks `block/test_creds.tmp` for test credentials (UI test mode)
@@ -326,27 +326,14 @@ Models are loaded into `APP_STATE` by `load_opencv_model(backend, target)`. All 
 
 ---
 
-## 动画 UI 开发（进行中）
+## 解锁动画（已于 v0.5.5 移除）
 
-正在为 Credential Provider DLL 添加 Windows Hello 风格的解锁动画，详细计划与进度跟踪见 [docs/animation-development.md](docs/animation-development.md)。
-
-### 核心约束
-
-- **技术方案**：路径 C — DComp Topmost Layer 绑定 LogonUI 父 HWND + Direct2D 原生绘制（60 FPS GPU）
-- **绝不使用**：WebView2（已实证在 winlogon 不工作）、Sciter/Ultralight（未验证 + 体积大）、Hook 内部 API（不稳定）
-- **当前阶段**：C — 状态机动画（Idle/Scanning/Success/Failure）+ 管道驱动已实现，VM 测试修复两个 Bug 后待回归验证
-- **测试要求**：所有阶段必须在 VM（Hyper-V/VMware）内连续 100 次锁屏/解锁验证后才能合并主分支
-- **灰度开关**：注册表 `ANIMATION_UI_ENABLED`（默认 `"0"`），用于安全启用/禁用
-
-### AI 协作规则
-
-| 任务类型 | 模型 |
-|---|---|
-| 架构设计、技术选型、深度调研 | **Opus** (`claude-opus-4-7`) |
-| 代码编写、Bug 修复、Git 操作 | **Sonnet** (`claude-sonnet-4-6`) |
-| 调试逻辑 Bug（Sonnet 卡住时） | Opus 兜底 |
-
-每次开始新阶段前先用 Opus 设计方案，再切到 Sonnet 实施。详细切换规则见 [docs/animation-development.md](docs/animation-development.md) 第 5 节。
+Windows Hello 风格的解锁动画（DComp topmost + Direct2D，原 `Server/src/animation.rs`）**已整体移除**。
+原因：动画引入 D3D11/DComp/D2D/DWrite 图形依赖，在旧 Win10 LogonUI 上加载失败（issue #3），并导致锁屏圈
+闪烁（#14/#16）、睡眠后图形资源释放卡死（#15）；用户反馈纯文字状态提示比转圈更好。移除后 CP DLL 不再
+依赖任何图形库（`dumpbin /imports` 已复核无 `d3d11/dcomp/dwrite/d2d1/dxgi`）。锁屏磁贴改为静态文字提示
+（`SampleCredential::GetStringValue` 字段 1 文本 + `CPFT_SMALL_TEXT` 标签）。**绝不**重新引入解锁动画或任何
+让 CP DLL（注入 winlogon/LogonUI）静态/动态依赖图形库的代码（见下方回归禁令）。
 
 ### 已修复 Issue 回归禁令
 
@@ -374,22 +361,27 @@ Models are loaded into `APP_STATE` by `load_opencv_model(backend, target)`. All 
 | broker 三场景区分（查看密码/passkey/设置PIN，反复 ≥6 次）| `Server/src/CSampleProvider.rs` + `Server/src/lib.rs` | `SetUsageScenario` 用 `classify_broker_scene()` 读**触发应用窗口标题**区分：含「密码」→人脸；含「通行密钥/passkey/安全密钥」→`E_NOTIMPL` 跳过；其它→跳过。**绝不**用 cpus/dwflags/UIA/进程名区分（实测三场景同构、UIA 在 broker 进程被封）、**绝不**让 broker 无条件先人脸（拦 PIN 输入）、**绝不**按时间冷却拒绝 run（死亡螺旋）。改后必须验证四场景各一遍。详见 [docs/credui-broker-scene-and-autolock-fixes.md](docs/credui-broker-scene-and-autolock-fixes.md) |
 | 自动锁屏摄像头乱亮（每秒/每60s/无日志）| `Unlock/src/main.rs` | `auto_lock_monitor` 授权成功后设冷却 `max(60s, autoLockTimeout)`（**非固定 60s**，否则用户在场时每 60s 仍开摄像头复查，依旧乱亮），冷却期内不开摄像头——人脸识别**不**重置 OS `GetLastInputInfo`；真实键鼠输入/锁屏时清空冷却；**开摄像头/授权/锁屏必须写 `unlock.log`**（`auto-lock:`，无日志会被误判为乱亮 bug）。详见 [docs/credui-broker-scene-and-autolock-fixes.md](docs/credui-broker-scene-and-autolock-fixes.md) |
 | opencv_world4120.dll / FaceWinUnlock-Server.exe 从 NSIS 安装包丢失 | `UI/src-tauri/tauri.conf.json` + `UI/src-tauri/nsis/hooks.nsh` | 运行报「找不到 opencv_world4120.dll」/后台服务不自启。根因：`bundle.resources` 含 `"."` 目录展开时，Tauri v2+NSIS 漏掉映射到**安装根的单文件**。**绝不**把运行时单文件直接映射到安装根，统一走 `resources/` 子目录 + hooks 复制到根。详见 [docs/opencv-world-packaging-fix.md](docs/opencv-world-packaging-fix.md) |
-| 旧 Win10 锁屏无面容磁贴 / 无 DLL 日志 / 解锁失败（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3)）| `Server/src/animation.rs` | 动画图形 API 必须经 `dyngfx` 子模块**运行时 LoadLibrary+GetProcAddress** 动态加载。**绝不**用 windows-rs 静态导入自由函数（`D3D11CreateDevice`/`DCompositionCreateDevice2`/`DCompositionWaitForCompositorClock`/`D2D1CreateFactory`/`DWriteCreateFactory`）——会让 CP DLL 硬依赖 `dcomp.dll!DCompositionWaitForCompositorClock`(Win10 1803+) 等，旧 Win10 的 LogonUI 加载 DLL 即失败、无磁贴无日志无解锁（原版无图形依赖可加载）。COM 接口方法走 vtable 不产生导入、无需改。改后必须 `dumpbin /imports` 复核导入表无 `d3d11/dcomp/dwrite/d2d1`。详见 [docs/issue-3-dll-graphics-import-win10.md](docs/issue-3-dll-graphics-import-win10.md) |
+| 旧 Win10 锁屏无面容磁贴 / 无 DLL 日志 / 解锁失败（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3)）| `Server/src/*`（CP DLL）| **根治：v0.5.5 已整体移除解锁动画**，CP DLL 不再含任何图形代码、不依赖任何图形库。**绝不**给 CP DLL（注入 winlogon/LogonUI）引入图形库依赖：静态导入自由函数（`D3D11CreateDevice`/`DComposition*`/`D2D1CreateFactory`/`DWriteCreateFactory`）会让 DLL 硬依赖 `dcomp.dll`(Win10 1803+) 等，旧 Win10 LogonUI 加载 DLL 即失败、无磁贴无日志无解锁。COM 接口方法走 vtable 不产生导入。**绝不**为"美观"重新加解锁动画。改后必须 `dumpbin /imports` 复核导入表无 `d3d11/dcomp/dwrite/d2d1/dxgi`。详见 [docs/issue-3-dll-graphics-import-win10.md](docs/issue-3-dll-graphics-import-win10.md) |
 | 初始化第三步 Passkey 在旧 Win10 报 `0x80073CFD`（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3)）| `UI/src-tauri/src/modules/passkey_plugin.rs` + `UI/src/views/Init.vue` | 第三方 passkey Provider 是 Win11 24H2(build 26100) 专属功能。`get_passkey_plugin_status` 返回 `os_supported`(build≥26100)，前端不支持时优雅跳过+友好提示、不自动装、不弹错；`install_passkey_plugin` 后端兜底返回可读提示。**绝不**为兼容 Win10 降 MSIX `MinVersion`（装上也用不了）。详见 [docs/issue-3-dll-graphics-import-win10.md](docs/issue-3-dll-graphics-import-win10.md) |
 | 更新检查「已是最新版仍反复提示更新」（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3)）| `UI/src-tauri/Cargo.toml` + `.github/workflows/release.yml` | `check_update` 的 current_version 用 `CARGO_PKG_VERSION`（=`UI/src-tauri/Cargo.toml` version），而安装包文件名/程序内部版本用 `tauri.conf.json` version。**发版时两者必须都等于 tag**；CI「Sync version from tag」步骤已从 tag **同时**同步这两个文件。**绝不**只改其一（漏 Cargo.toml → 更新检查永远 current<latest 反复提示；漏 tauri.conf.json → 安装包文件名/版本号不对，见上方 v0.5.2 0.5.1 文件名事故） |
 | GPU(OpenCL/OpenCL FP16) 后端在部分设备识别极慢/匹配失败（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3)）| `UI/src/views/Options.vue` + `UI/src/views/Faces/Add.vue` | OpenCL FP16 等 GPU 后端**加载会"成功"但运行时可能极慢（单次解锁~90s）+ 匹配不上**（GPU kernel 编译 / FP16 精度，加载阶段无法预知），表现为锁屏转圈不解锁、一致性检查黑屏卡住、占用偏高；CPU 后端正常。方案：**UI 警告 + 引导改回 CPU**（切 GPU 后端弹实验性警告，一致性检查出错提示改回 CPU）。**绝不**默认/强制 GPU 后端；**绝不**因「load_opencv_model 成功」就认定后端可用（#125 的加载回退检测覆盖不到「加载成功但运行时坏」）；自动回退因无法判别「首帧编译慢 vs 一直慢」且可能误判正常 GPU 设备，暂不做。**OpenCL「慢」的优化**：`Unlock/src/main.rs` + `UI/src-tauri/src/main.rs` 启动早期设 `OPENCV_OCL4DNN_CONFIG_PATH`（SYSTEM→ProgramData、UI→LOCALAPPDATA，须先建目录）持久化 ocl4dnn auto-tuning，消除「每次 forward 重 tuning → 每次解锁 90s」；**set_var 必须在任何 OpenCV OpenCL 调用前**。只解决「慢」，不解决 FP16 精度导致的「匹配不上」 |
-| Passkey 卸载/重装后需重新注册密钥（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3)）| `UI/src-tauri/src/modules/passkey_plugin.rs` + `scripts/uninstall-passkey-plugin.ps1` + `UI/src-tauri/nsis/hooks.nsh` | passkey **私钥**在 Microsoft Software KSP（密钥名 `facewinunlock/<userId>`，per-user，**不在 MSIX 包内**，无 `NCryptDeleteKey` 则任何卸载都不删）；**凭据元数据**在 MSIX LocalState `CredentialsDB/credentials.dat`，随包卸载被删 → 重装后私钥还在但无元数据用不了（GetAssertion 靠元数据把 credentialId→userId 再重建密钥名开 KSP 私钥）。卸载分 `KeepCredentials`(默认)/`Purge`：Keep 用 `Remove-AppxPackage -PreserveApplicationData` 保留元数据 + 包外备份/恢复兜底、不删私钥/证书/注册表；Purge 才 `certutil -delkey facewinunlock/*` + 全清。核心/NSIS 卸载默认 Keep；全量更新走 `Add-AppxPackage -Update` 本就保留。**绝不**让默认卸载删元数据/私钥（退回"每次重装重注册"）；**绝不**改 PackageFamilyName（Identity Name/Publisher，否则 LocalState 路径变、保留失效）。需 Win11 24H2 实机验证。详见 [docs/passkey-provider-lessons.md](docs/passkey-provider-lessons.md) |
+| Passkey 卸载/重装后需重新注册密钥 / 卸载后管理器残留（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3), [#17](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/17)）| `UI/src-tauri/src/modules/passkey_plugin.rs` + `scripts/uninstall-passkey-plugin.ps1` + `UI/src-tauri/nsis/hooks.nsh` | passkey **私钥**在 Microsoft Software KSP（密钥名 `facewinunlock/<userId>`，per-user，**不在 MSIX 包内**，无 `NCryptDeleteKey` 则任何卸载都不删）；**凭据元数据**在 MSIX LocalState `CredentialsDB/credentials.dat`，普通包卸载会删。卸载分 `KeepCredentials`(默认)/`Purge`：非提权 Keep 可用 `Remove-AppxPackage -PreserveApplicationData`；NSIS/管理员卸载场景因 `-AllUsers` 不能和 `-PreserveApplicationData` 组合，必须先把各用户 `credentials.dat` 备份到各自 `%LOCALAPPDATA%\FaceWinUnlock\PasskeyBackup`，再 `Remove-AppxPackage -AllUsers`，避免只卸载管理员账户而桌面用户仍看到 Passkey 管理器；KSP 私钥/证书/注册表默认保留。Purge 才 `certutil -delkey facewinunlock/*` + 全清。**绝不**让默认卸载删私钥；**绝不**改 PackageFamilyName（Identity Name/Publisher，否则 LocalState 路径变、备份/恢复失效）。需 Win11 24H2 实机验证。详见 [docs/passkey-provider-lessons.md](docs/passkey-provider-lessons.md) |
 | Passkey 清理/Purge 删私钥「删 0 个」`NTE_BAD_KEYSET`（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3)）| `UI/src-tauri/src/modules/passkey_plugin.rs` + `scripts/uninstall-passkey-plugin.ps1` | `certutil -delkey` **必须带 `-csp 'Microsoft Software Key Storage Provider'`**（与枚举同 provider），否则去默认 provider 找不到 CNG KSP 私钥 → `NTE_BAD_KEYSET`(0x80090016)、删 0 个。`cleanup_passkey_residual_keys` 与卸载 Purge 都曾「枚举带 -csp、删除漏 -csp」故从未真删。**主程序 `requireAdministrator` 提权一度被误判为主因**，但非提权手动 `-delkey` 同样失败、加 `-csp` 后即成功——真因是漏 `-csp`（v0.5.4 修）。**绝不**写不带 `-csp` 的 `certutil -delkey`。详见 [docs/passkey-provider-lessons.md](docs/passkey-provider-lessons.md) |
 | Passkey 残留私钥清理 + 简化插件删除 UI（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3)）| `UI/src-tauri/src/modules/passkey_plugin.rs` + `UI/src/views/Options.vue` + `PasskeyPlugin/MainPage.xaml(.cpp)` | 插件「清空/删除通行密钥」只删元数据+Windows 索引、**不删 KSP 私钥**（残留 `%APPDATA%MicrosoftCryptoKeys`，是上一行「卸载保留私钥」的反向主动清理）。应用内「清理残留私钥」按钮 → `cleanup_passkey_residual_keys`（`certutil -user -key` 枚举 KSP → `certutil -user -delkey facewinunlock/*`，返回删除数；确认弹窗因会使已注册站点密钥失效）。插件删除菜单收成「删除所选通行密钥/清空全部通行密钥」两项，其余缓存/本地库细分项 +「添加(写入缓存)」按钮 `Visibility="Collapsed"`，**保留全部 x:Name**（`MainPage.xaml.cpp` code-behind 设其 .Text()/.IsEnabled()）。**绝不删 XAML 元素**（破坏 C++/WinRT code-behind + LocalizedText 覆盖）；**绝不**因「清空」就以为删了私钥（只删元数据）。需 Win11 24H2 验证实际删除。详见 [docs/passkey-provider-lessons.md](docs/passkey-provider-lessons.md) |
-| Win10 锁屏人脸"检测到但匹配不上" / 不自动解锁（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3)）| `Unlock/src/main.rs` `open_configured_camera` | 解锁端摄像头后端**必须与录入端(UI 用 CAP_ANY)一致**：录入写入的 `.face` 特征是 CAP_ANY 解析到的后端(Windows 通常 MSMF)提取的；v0.5.3 为启动提速改 **DShow-first**，DShow(DirectShow) 与 MSMF 帧的色彩 / 曝光 / 分辨率差异使同一张脸 SFace 特征偏移、cosine 跌破阈值(默认 0.60)→ **检测到脸但匹配不上**(登录磁贴出现、圆圈一直转、摄像头亮但不登录；unlock.log 无 "no face" 也无 retry，整 10s 后 "without a match"=saw_face 真)。**同版本 Win11 能解锁、Win10 不能**——Win11 上两后端帧恰好接近掩盖、Win10 暴露(旧版同机锁屏用 CAP_ANY 即匹配成功亦佐证)。**绝不**为启动提速让解锁端用 DShow-first 或与录入端不同的后端顺序；CAP_ANY 优先(其打不开才回退 DShow/MSMF)。`#94` 的 640×480+预热在该函数内、与顺序无关。验证：unlock.log 应为 `camera opened ... via Any`，Win10/Win11 各跑一遍 Win+L。「识别慢~6s」是另一问题(模型加载，非本修复)。详见 [docs/issue-3-win10-lockscreen-camera-backend.md](docs/issue-3-win10-lockscreen-camera-backend.md) |
+| Win10 锁屏人脸"检测到但匹配不上" / 触发后摄像头几十秒才亮（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3)）| `Unlock/src/main.rs` `open_configured_camera` + `UI/src-tauri/src/utils/api.rs::open_camera` | 解锁端摄像头后端**必须与录入端默认顺序一致**。当前 UI 录入 `open_camera(None)` 是 `MSMF → DShow → Any`；解锁端若强制 DShow-first，DShow 与 MSMF 帧差异会导致 SFace 特征偏移、检测到脸但匹配不上；若 CAP_ANY-first，#3 日志显示部分 Win10 上 `VideoCapture::new(CAP_ANY)` 会阻塞约 40s 才开摄像头。v0.5.5 统一为 `MSMF → DShow → Any`，并记录每个后端打开耗时。**绝不**为启动提速改成 DShow-first，也不要再按旧记忆改回 CAP_ANY-first；未来若 UI 录入端后端顺序变化，必须同步修改 Unlock。`#94` 的 640×480+10帧预热在该函数内。验证：unlock.log 应出现 `camera backend MSMF opened in ...ms` 或明确的后端耗时，再出现 `camera opened ... via MSMF`。详见 [docs/issue-3-win10-lockscreen-camera-backend.md](docs/issue-3-win10-lockscreen-camera-backend.md) |
 | 插件 UI 改了但「更新」推不动 / 检查更新点击不跳转下载（[issue #3](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/issues/3)）| `PasskeyPlugin/Package.appxmanifest` + `.github/workflows/release.yml` + `UI/src/layout/MainLayout.vue` | **① MSIX 清单 Identity Version 必须随 tag 同步**：清单版本写死且 CI 不同步时，插件 UI/代码改了但包版本不变，`Add-AppxPackage -Update`（应用内「更新」）按同版本跳过 → 老用户拿不到新插件 UI（只能卸载重装，而 `-PreserveApplicationData` 卸载又易抛 0x80073CFA，提权进程更甚）。CI 在**「Build Passkey plugin MSIX」步骤内、构建前**同步清单版本（x.y.z→x.y.z.0；**必须在 MSIX 构建之前**——放其后的「Sync version from tag」步骤对已生成的 MSIX 无效，v0.5.4 曾靠硬编码侥幸正确），与 `tauri.conf.json`/`Cargo.toml`（仍在「Sync version from tag」步骤同步）并列为**第三个**版本源；正则 `(<Identity[\s\S]*?Version=")[^"]*"` 只改 Identity、不动 Min/MaxVersionTested。**绝不**改插件 UI 却不 bump 清单版本。**② 更新通知打开下载链接必须用 `openUrl`（@tauri-apps/plugin-opener），绝不用 `window.open(url,'_blank')`**——Tauri webview 内被拦截、点击毫无反应。关联上方「发版版本号双来源」 |
 
-### 关键改动文件
+### 解锁动画移除（v0.5.5）
 
-| 文件 | 变更 |
-|---|---|
-| `Server/src/animation.rs`（~595 行） | DComp topmost 管线、D2D 旋转环渲染、4 状态机（Idle/Scanning/Success/Failure）、磁贴定位（尺寸启发式 + 1/4 兜底）、弧几何体预创建、帧率控制；**`dyngfx` 子模块运行时动态加载图形 API（D3D11/DComp/D2D/DWrite），消除 PE 静态导入以兼容旧 Win10（issue #3）** |
-| `Server/src/CSampleCredential.rs` | `Advise()` → `OnCreatingWindow` 获取父 HWND → 创建 `AnimationContext`；接受外部 `AnimationSlot` |
-| `Server/src/CPipeListener.rs` | 接受 `AnimationSlot` 参数；Client 线程发 "run" → Scanning，3 次未匹配 → Failure；Creds 线程收凭据 → Success |
-| `Server/src/CSampleProvider.rs` | 创建 `AnimationSlot`（`Arc<Mutex<Option<AnimationContext>>>`），传递给 CPipeListener 和 SampleCredential |
-| `Server/Cargo.toml` | 添加 `Win32_Graphics_*` + `Foundation_Numerics` features |
+动画相关代码已全部删除，作为 issue #3/#14/#15/#16 的根治：
+- `Server/src/animation.rs`：整文件删除；
+- `CSampleProvider.rs` / `CSampleCredential.rs` / `CPipeListener.rs`：移除 `AnimationSlot`/`AnimationContext`、
+  `start`/`SampleCredential::new` 的动画参数、Advise 创建 / UnAdvise 释放 / GetSerialization 同步销毁、
+  Scanning/Failure/Success 状态驱动、`is_animation_enabled`；
+- `Server/Cargo.toml`：移除 `Win32_Graphics_Direct2D(_Common)` / `Direct3D(11)` / `DirectComposition` /
+  `DirectWrite` / `Dxgi(_Common)` + `Foundation_Numerics`（**仅保留 `Win32_Graphics_Gdi`** 供 `GetBitmapValue`
+  的 `HBITMAP`，实测无 gdi32 运行时导入）；
+- `UI/src-tauri/src/modules/init.rs` + `nsis/hooks.nsh`：移除 `ANIMATION_FRAMES_PATH`/`ANIMATION_UI_ENABLED`
+  注册表写入（hooks 卸载段保留 `DeleteRegValue` 清理旧键）；
+- `tauri.conf.json`：移除 `animation_frames.bin` 资源；`UI/src/views/Options.vue`：移除「动画刷新率」设置；
+- 删除 `UI/resources/{animation_frames.bin(36MB),animation_render.html,capture_frames.js,package*.json}`。
