@@ -1,4 +1,4 @@
-use std::{os::windows::process::CommandExt, process::Command, thread, time::Duration};
+use std::{os::windows::process::CommandExt, process::Command, thread, time::{Duration, Instant}};
 
 use crate::{utils::custom_result::CustomResult, OpenCVResource, APP_STATE, GLOBAL_TRAY, ROOT_DIR};
 use opencv::{
@@ -762,11 +762,26 @@ fn build_opencv_models(
     backend_id: i32,
     target_id: i32,
 ) -> Result<(Ptr<FaceDetectorYN>, Ptr<FaceRecognizerSF>, opencv::dnn::Net), String> {
-    let detector_path = ROOT_DIR
-        .join("resources")
-        .join("face_detection_yunet_2023mar.onnx");
+    let res = ROOT_DIR.join("resources");
+    let detector_path = res
+        .join("face_detection_yunet_2023mar.onnx")
+        .to_string_lossy()
+        .into_owned();
+    let recognizer_path = res
+        .join("face_recognition_sface_2021dec.onnx")
+        .to_string_lossy()
+        .into_owned();
+    let liveness_path = res
+        .join("face_liveness.onnx")
+        .to_string_lossy()
+        .into_owned();
+
+    let t0 = Instant::now();
+
+    // 先在主线程加载 detector：它最小最快，且借此触发 OpenCV DNN 的一次性全局初始化（层工厂注册等），
+    // 使随后并行加载 recognizer/liveness 时不会多线程并发触发该全局初始化的竞态（issue #3）。
     let detector = FaceDetectorYN::create(
-        detector_path.to_str().unwrap_or(""),
+        &detector_path,
         "",
         Size::new(320, 320),
         0.9,
@@ -776,27 +791,40 @@ fn build_opencv_models(
         target_id,
     )
     .map_err(|e| format!("初始化检测器模型失败: {:?}", e))?;
+    let det_ms = t0.elapsed().as_millis();
 
-    let recognizer_path = ROOT_DIR
-        .join("resources")
-        .join("face_recognition_sface_2021dec.onnx");
-    let recognizer = FaceRecognizerSF::create(
-        recognizer_path.to_str().unwrap_or(""),
-        "",
+    // recognizer（SFace，最重）与 liveness 相互独立、全局初始化已完成，**并行加载**——顺序加载 3 个
+    // ONNX 模型是 UI 首次抓拍/一致性验证慢(~4s)的主因；并行后总耗时 ≈ 最慢单个模型（issue #3）。
+    let t1 = Instant::now();
+    let rec_handle = thread::spawn(move || -> Result<Ptr<FaceRecognizerSF>, String> {
+        FaceRecognizerSF::create(&recognizer_path, "", backend_id, target_id)
+            .map_err(|e| format!("初始化识别器模型失败: {:?}", e))
+    });
+    let live_handle = thread::spawn(move || -> Result<opencv::dnn::Net, String> {
+        let mut net = opencv::dnn::read_net_from_onnx(&liveness_path)
+            .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?;
+        net.set_preferable_backend(backend_id)
+            .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
+        net.set_preferable_target(target_id)
+            .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
+        Ok(net)
+    });
+
+    let recognizer = rec_handle
+        .join()
+        .map_err(|_| "识别器加载线程 panic".to_string())??;
+    let liveness = live_handle
+        .join()
+        .map_err(|_| "活体检测加载线程 panic".to_string())??;
+
+    info!(
+        "OpenCV 模型加载：detector {}ms(主线程) + recognizer/liveness 并行 {}ms = 合计 {}ms (backend={}, target={})",
+        det_ms,
+        t1.elapsed().as_millis(),
+        t0.elapsed().as_millis(),
         backend_id,
-        target_id,
-    )
-    .map_err(|e| format!("初始化识别器模型失败: {:?}", e))?;
-
-    let liveness_path = ROOT_DIR.join("resources").join("face_liveness.onnx");
-    let mut liveness = opencv::dnn::read_net_from_onnx(liveness_path.to_str().unwrap_or(""))
-        .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?;
-    liveness
-        .set_preferable_backend(backend_id)
-        .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
-    liveness
-        .set_preferable_target(target_id)
-        .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
+        target_id
+    );
 
     Ok((detector, recognizer, liveness))
 }
@@ -998,6 +1026,7 @@ fn try_open_camera_with_backend(
     backend: CameraBackend,
     camear_index: i32,
 ) -> Result<VideoCapture, Box<dyn std::error::Error>> {
+    let t0 = Instant::now();
     let mut cam = VideoCapture::new(camear_index, backend.into())?;
 
     if !cam.is_opened()? {
@@ -1028,6 +1057,11 @@ fn try_open_camera_with_backend(
         }
     }
 
+    info!(
+        "摄像头后端 {:?} 打开+预热耗时 {}ms",
+        backend,
+        t0.elapsed().as_millis()
+    );
     Ok(cam)
 }
 // 枚举系统摄像头：逐索引探测，收集所有可用设备

@@ -231,8 +231,12 @@
             cameraIndex = 0;
         }
         try {
-            await ensureModelLoaded();
-            await invoke("open_camera", { backend: null, camearIndex: cameraIndex });
+            // 模型加载(~3-4s)与摄像头打开(~2-3s MSMF)无依赖，并行执行避免串行等待
+            // （issue #3：面容管理抓拍/一致性验证等约 7 秒 → ~4 秒）。
+            await Promise.all([
+                ensureModelLoaded(),
+                invoke("open_camera", { backend: null, camearIndex: cameraIndex }),
+            ]);
             isCameraStreaming.value = true;
             isLoopRunning = true;
             streamLoop();
@@ -371,12 +375,15 @@
         verificationMode.value = true;
         isProcessing.value = true;
         try {
-            await ensureModelLoaded();
             let cameraIndex = parseInt(optionsStore.getOptionValueByKey("camera"));
             if(isNaN(cameraIndex)){
                 cameraIndex = 0;
             }
-            await invoke("open_camera", { backend: null, camearIndex: cameraIndex });
+            // 模型加载与摄像头打开并行（issue #3：一致性验证等约 7 秒 → ~4 秒）
+            await Promise.all([
+                ensureModelLoaded(),
+                invoke("open_camera", { backend: null, camearIndex: cameraIndex }),
+            ]);
             isLoopRunning = true;
             streamLoop();
         } catch (error) {
