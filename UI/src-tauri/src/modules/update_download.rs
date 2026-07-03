@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use crate::ROOT_DIR;
 
@@ -54,8 +55,11 @@ pub struct DiffResult {
 
 /// 步骤1：下载 manifest 并比对差异（不下载任何二进制文件，供确认弹窗预估流量）。
 #[tauri::command]
-pub fn fetch_update_diff() -> Result<DiffResult, String> {
-    fetch_update_diff_internal()
+pub async fn fetch_update_diff() -> Result<DiffResult, String> {
+    // 阻塞式网络放 blocking 线程池，避免主线程被 github.com 下载 manifest 卡住冻 UI（issue #3）。
+    tauri::async_runtime::spawn_blocking(fetch_update_diff_internal)
+        .await
+        .map_err(|e| format!("更新差异任务失败: {e}"))?
 }
 
 pub(crate) fn fetch_update_diff_internal() -> Result<DiffResult, String> {
@@ -66,7 +70,14 @@ pub(crate) fn fetch_update_diff_internal() -> Result<DiffResult, String> {
 /// 步骤2：下载差异文件到 `ROOT_DIR/update_temp`（退出时由 `close_app` 负责替换到安装目录）。
 /// 返回临时目录路径。
 #[tauri::command]
-pub fn apply_update() -> Result<String, String> {
+pub async fn apply_update() -> Result<String, String> {
+    // 大文件下载放 blocking 线程池，避免主线程被长时间下载卡住冻 UI（issue #3）。
+    tauri::async_runtime::spawn_blocking(apply_update_inner)
+        .await
+        .map_err(|e| format!("更新下载任务失败: {e}"))?
+}
+
+fn apply_update_inner() -> Result<String, String> {
     let manifest = download_manifest()?;
     let diff = compute_diff(&manifest)?;
 
@@ -106,6 +117,8 @@ pub(crate) fn download_manifest() -> Result<UpdateManifest, String> {
     let resp = ureq::get(MANIFEST_URL)
         .set("User-Agent", USER_AGENT)
         .set("Accept", "application/json")
+        // 国内直连 github.com 常慢/不通；不设超时会卡到 TCP 默认超时(~20s+)冻住 UI(issue #3)。
+        .timeout(Duration::from_secs(8))
         .call()
         .map_err(|e| format!("下载更新清单失败: {e}"))?;
     let manifest: UpdateManifest = resp
@@ -192,6 +205,8 @@ fn download_file(url: &str, dest: &Path, expected_size: u64) -> Result<(), Strin
     }
     let resp = ureq::get(url)
         .set("User-Agent", USER_AGENT)
+        // 下载文件较大，给较宽松的总超时，但仍避免连不上时无限卡住（issue #3）。
+        .timeout(Duration::from_secs(120))
         .call()
         .map_err(|e| format!("下载 {url} 失败: {e}"))?;
 

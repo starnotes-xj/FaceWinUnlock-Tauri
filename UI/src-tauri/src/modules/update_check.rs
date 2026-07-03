@@ -6,6 +6,7 @@
 ///   只要本地文件与最新 Release 资产不一致，也提示同步更新
 /// - 若最新 Release 版本低于当前版本，不提示“降级更新”
 use std::cmp::Ordering;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -31,12 +32,22 @@ pub struct UpdateInfo {
 
 /// 检查 GitHub Release 是否有新版本（GET latest release；必要时再读取 manifest 做同版本 hash 校验）
 #[tauri::command]
-pub fn check_update() -> Result<UpdateInfo, String> {
+pub async fn check_update() -> Result<UpdateInfo, String> {
+    // 阻塞式网络请求放到 blocking 线程池执行，避免 Tauri 同步命令在主线程运行时把 UI 冻成未响应
+    // （issue #3：国内直连 GitHub 慢，进主界面自动查更新曾把窗口卡到未响应，配合上面的 timeout 双保险）。
+    tauri::async_runtime::spawn_blocking(check_update_inner)
+        .await
+        .map_err(|e| format!("更新检查任务失败: {e}"))?
+}
+
+fn check_update_inner() -> Result<UpdateInfo, String> {
     let current = CURRENT_VERSION.trim_start_matches('v');
 
     let resp = ureq::get(GITHUB_API)
         .set("User-Agent", "FaceWinUnlock-Tauri-UpdateCheck")
         .set("Accept", "application/vnd.github+json")
+        // 国内直连 GitHub 常慢/不通；不设超时会卡到 TCP 默认超时(~20s+)，把 UI 冻成未响应(issue #3)。
+        .timeout(Duration::from_secs(8))
         .call()
         .map_err(|e| format!("网络请求失败: {e}"))?;
 
