@@ -1,5 +1,5 @@
 <script setup lang="ts">
-    import { reactive, ref, onMounted, computed, onUnmounted } from 'vue';
+    import { reactive, ref, onMounted, onActivated, computed, onUnmounted } from 'vue';
     import { ElMessage, ElMessageBox, ElLoading } from 'element-plus';
     import AccountAuthForm from '../../components/AccountAuthForm.vue';
     import { open } from '@tauri-apps/plugin-dialog';
@@ -47,7 +47,6 @@
     });
 
     const isEditMode = computed(() => route.query.mode === 'edit');
-    const targetId = route.query.id;
     let modelReady = false;
     let modelLoadingPromise: Promise<void> | null = null;
 
@@ -92,40 +91,78 @@
         return modelLoadingPromise;
     }
 
-    onMounted(async () => {
-        if (isEditMode.value) {
-            editFaceData = facesStore.getFaceById(targetId);
-            if(editFaceData){
-                // 添加账户信息
+    // 重置录入表单 / 图片状态。本组件被 <keep-alive> 缓存，进入「添加新面容」时必须清掉上一次录入
+    // 残留的图片与表单（issue #20：上一次添加的图片不销毁）。
+    function resetEnrollForm() {
+        capturedImage.value = '';
+        rawImageForSystem = '';
+        isEditFaceImage = false;
+        verificationMode.value = false;
+        verifyingStreamImage.value = '';
+        matchConfidence.value = 0;
+        verifyMessage.value = '';
+        isProcessing.value = false;
+        editFaceData = null;
+        faceName.value = '';
+        threshold.value = 40;
+        faceDetectionThreshold.value = 90;
+        authForm.accountType = 'local';
+        authForm.username = '';
+        authForm.password = '';
+        authForm.domain = '';
+    }
+
+    // 按当前路由初始化本页：先清空残留，再按 编辑/新增 分别载入。onMounted 与 onActivated（再次进入）
+    // 共用，确保 <keep-alive> 缓存下每次进入都是干净且与当前路由一致的状态（issue #20）。用 route.query
+    // 现取（不缓存 id），使编辑不同面容 / 新增 之间切换也能正确刷新。
+    async function initForRoute() {
+        resetEnrollForm();
+        if (route.query.mode === 'edit') {
+            editFaceData = facesStore.getFaceById(route.query.id);
+            if (editFaceData) {
                 authForm.username = editFaceData.user_name;
                 authForm.password = editFaceData.user_pwd;
                 authForm.accountType = editFaceData.account_type;
                 authForm.domain = editFaceData.json_data.domain || '';
-                // 添加其他信息
                 faceName.value = editFaceData.json_data.alias;
                 threshold.value = editFaceData.json_data.threshold;
                 faceDetectionThreshold.value = editFaceData.json_data.faceDetectionThreshold * 100;
-                // 添加人脸信息
                 try {
                     await ensureModelLoaded();
-                    await loadFaceFormPath(localStorage.getItem("exe_dir") + "\\faces\\"+editFaceData.face_token+".faceimg");
+                    await loadFaceFormPath(localStorage.getItem("exe_dir") + "\\faces\\" + editFaceData.face_token + ".faceimg");
                 } catch (error) {
                     const info = formatObjectString("载入图片失败：", error);
                     errorLog(info);
                     ElMessage.error(info);
                 }
-            }else{
+            } else {
                 ElMessage.warning('未找到该人脸数据');
                 router.push('/faces');
             }
         } else {
-            // 获取当前用户名
-            invoke('get_now_username').then((data)=>{
-                if(data.code == 200){
+            invoke('get_now_username').then((data) => {
+                if (data.code == 200) {
                     authForm.username = data.data.username;
                 }
-            })
+            });
         }
+    }
+
+    onMounted(async () => {
+        await initForRoute();
+    });
+
+    // <keep-alive> 缓存本组件：再次进入时 onMounted 不再触发，若不重置，上一次录入的图片/表单会残留
+    // （issue #20）。首次挂载已由 onMounted 处理，用 flag 跳过以避免重复初始化。
+    let addPageActivatedOnce = false;
+    onActivated(async () => {
+        if (!addPageActivatedOnce) {
+            addPageActivatedOnce = true;
+            return;
+        }
+        try { await stopCamera(); } catch (_) {}
+        isCameraStreaming.value = false;
+        await initForRoute();
     });
 
     onUnmounted(async ()=>{

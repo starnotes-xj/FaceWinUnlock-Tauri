@@ -64,6 +64,27 @@ fn base64_to_mat(b64: &str) -> Result<Mat, String> {
     imgcodecs::imdecode(&buf, imgcodecs::IMREAD_COLOR).map_err(|e| format!("图片解码失败: {:?}", e))
 }
 
+/// 大图（如 4K 3840×2160）会让 YuNet 检测极慢甚至漏检（issue #20，用户反馈"像素问题"导入本地图片
+/// 出错）。按最长边降采样到 <= MAX_SIDE，保持宽高比；已足够小则原样返回。SFace 会对人脸区域对齐裁剪，
+/// 降采样不影响特征质量。
+fn clamp_detect_size(frame: Mat) -> Result<Mat, String> {
+    const MAX_SIDE: i32 = 1600;
+    let (w, h) = (frame.cols(), frame.rows());
+    let longest = w.max(h);
+    if longest <= MAX_SIDE || longest <= 0 {
+        return Ok(frame);
+    }
+    let scale = MAX_SIDE as f64 / longest as f64;
+    let new_size = Size::new(
+        ((w as f64) * scale).round() as i32,
+        ((h as f64) * scale).round() as i32,
+    );
+    let mut out = Mat::default();
+    imgproc::resize(&frame, &mut out, new_size, 0.0, 0.0, imgproc::INTER_AREA)
+        .map_err(|e| format!("图片降采样失败: {:?}", e))?;
+    Ok(out)
+}
+
 /// 从帧中检测人脸，返回检测结果 Mat（rows == 0 表示未检测到）
 fn detect_faces(frame: &Mat, threshold: f32) -> Result<Mat, String> {
     let mut state = APP_STATE
@@ -265,14 +286,21 @@ pub fn check_face_from_img(
     img_path: String,
     face_detection_threshold: f64,
 ) -> Result<CustomResult, CustomResult> {
-    let frame = imgcodecs::imread(&img_path, imgcodecs::IMREAD_COLOR)
-        .map_err(|e| CustomResult::error(Some(format!("读取图片失败: {:?}", e)), None))?;
+    // 中文 / Unicode 路径：OpenCV imread 底层用 fopen，打不开非 ASCII 路径（issue #20）。改为用
+    // Rust 读取字节再 imdecode，Unicode 路径安全。
+    let bytes = std::fs::read(&img_path)
+        .map_err(|e| CustomResult::error(Some(format!("读取图片失败: {}", e)), None))?;
+    let buf = Vector::<u8>::from_iter(bytes);
+    let frame = imgcodecs::imdecode(&buf, imgcodecs::IMREAD_COLOR)
+        .map_err(|e| CustomResult::error(Some(format!("图片解码失败: {:?}", e)), None))?;
     if frame.empty() {
         return Err(CustomResult::error(
             Some(format!("图片为空或路径无效: {}", img_path)),
             None,
         ));
     }
+    // 4K 等大图降采样，避免 YuNet 漏检 / 极慢（issue #20）
+    let frame = clamp_detect_size(frame).map_err(|e| CustomResult::error(Some(e), None))?;
     check_face_inner(frame, face_detection_threshold)
 }
 
@@ -285,6 +313,8 @@ pub fn save_face_registration(
     face_detection_threshold: f64,
 ) -> Result<CustomResult, CustomResult> {
     let frame = base64_to_mat(&reference_base64).map_err(|e| CustomResult::error(Some(e), None))?;
+    // 本地导入的大图（如 4K）同样降采样后再检测 / 提取特征（issue #20）
+    let frame = clamp_detect_size(frame).map_err(|e| CustomResult::error(Some(e), None))?;
 
     let threshold = face_detection_threshold as f32;
     let faces = detect_faces(&frame, threshold).map_err(|e| CustomResult::error(Some(e), None))?;
@@ -490,4 +520,54 @@ pub fn verify_face(
             "message": message
         })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opencv::core::CV_8UC3;
+
+    // #20a：4K 等大图应按最长边降采样到 <=1600 且保持宽高比
+    #[test]
+    fn clamp_downscales_4k_keeps_aspect() {
+        let big = Mat::new_rows_cols_with_default(2160, 3840, CV_8UC3, Scalar::all(0.0)).unwrap();
+        let out = clamp_detect_size(big).unwrap();
+        assert_eq!(out.cols(), 1600, "最长边应=1600");
+        assert_eq!(out.rows(), 900, "16:9 应缩到 1600x900");
+    }
+
+    // 已足够小的图应原样返回（不放大、不改尺寸）
+    #[test]
+    fn clamp_keeps_small_untouched() {
+        let small = Mat::new_rows_cols_with_default(480, 640, CV_8UC3, Scalar::all(0.0)).unwrap();
+        let out = clamp_detect_size(small).unwrap();
+        assert_eq!((out.cols(), out.rows()), (640, 480));
+    }
+
+    // #20c：中文路径下 std::fs::read + imdecode 能成功解码（imread 底层 fopen 通常打不开）
+    #[test]
+    fn chinese_path_decodes_via_fs_read() {
+        let dir = std::env::temp_dir().join("facewin_测试_录入");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("人脸图片_测试.jpg");
+
+        let img = Mat::new_rows_cols_with_default(120, 100, CV_8UC3, Scalar::all(128.0)).unwrap();
+        let mut jpg = Vector::<u8>::new();
+        imgcodecs::imencode(".jpg", &img, &mut jpg, &Vector::<i32>::new()).unwrap();
+        std::fs::write(&path, jpg.as_slice()).unwrap();
+
+        // 修复后路径：fs::read + imdecode
+        let bytes = std::fs::read(&path).unwrap();
+        let buf = Vector::<u8>::from_iter(bytes);
+        let frame = imgcodecs::imdecode(&buf, imgcodecs::IMREAD_COLOR).unwrap();
+        assert!(!frame.empty(), "中文路径应能解码出非空图");
+        assert_eq!((frame.cols(), frame.rows()), (100, 120));
+
+        // 对照旧路径 imread（仅打印，不同 OpenCV 构建行为可能不同）
+        let via_imread =
+            imgcodecs::imread(path.to_str().unwrap(), imgcodecs::IMREAD_COLOR).unwrap();
+        println!("对照 imread(中文路径) empty = {}", via_imread.empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
