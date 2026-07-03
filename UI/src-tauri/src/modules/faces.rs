@@ -521,3 +521,53 @@ pub fn verify_face(
         })),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opencv::core::CV_8UC3;
+
+    // #20a：4K 等大图应按最长边降采样到 <=1600 且保持宽高比
+    #[test]
+    fn clamp_downscales_4k_keeps_aspect() {
+        let big = Mat::new_rows_cols_with_default(2160, 3840, CV_8UC3, Scalar::all(0.0)).unwrap();
+        let out = clamp_detect_size(big).unwrap();
+        assert_eq!(out.cols(), 1600, "最长边应=1600");
+        assert_eq!(out.rows(), 900, "16:9 应缩到 1600x900");
+    }
+
+    // 已足够小的图应原样返回（不放大、不改尺寸）
+    #[test]
+    fn clamp_keeps_small_untouched() {
+        let small = Mat::new_rows_cols_with_default(480, 640, CV_8UC3, Scalar::all(0.0)).unwrap();
+        let out = clamp_detect_size(small).unwrap();
+        assert_eq!((out.cols(), out.rows()), (640, 480));
+    }
+
+    // #20c：中文路径下 std::fs::read + imdecode 能成功解码（imread 底层 fopen 通常打不开）
+    #[test]
+    fn chinese_path_decodes_via_fs_read() {
+        let dir = std::env::temp_dir().join("facewin_测试_录入");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("人脸图片_测试.jpg");
+
+        let img = Mat::new_rows_cols_with_default(120, 100, CV_8UC3, Scalar::all(128.0)).unwrap();
+        let mut jpg = Vector::<u8>::new();
+        imgcodecs::imencode(".jpg", &img, &mut jpg, &Vector::<i32>::new()).unwrap();
+        std::fs::write(&path, jpg.as_slice()).unwrap();
+
+        // 修复后路径：fs::read + imdecode
+        let bytes = std::fs::read(&path).unwrap();
+        let buf = Vector::<u8>::from_iter(bytes);
+        let frame = imgcodecs::imdecode(&buf, imgcodecs::IMREAD_COLOR).unwrap();
+        assert!(!frame.empty(), "中文路径应能解码出非空图");
+        assert_eq!((frame.cols(), frame.rows()), (100, 120));
+
+        // 对照旧路径 imread（仅打印，不同 OpenCV 构建行为可能不同）
+        let via_imread =
+            imgcodecs::imread(path.to_str().unwrap(), imgcodecs::IMREAD_COLOR).unwrap();
+        println!("对照 imread(中文路径) empty = {}", via_imread.empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
