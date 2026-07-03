@@ -64,6 +64,27 @@ fn base64_to_mat(b64: &str) -> Result<Mat, String> {
     imgcodecs::imdecode(&buf, imgcodecs::IMREAD_COLOR).map_err(|e| format!("图片解码失败: {:?}", e))
 }
 
+/// 大图（如 4K 3840×2160）会让 YuNet 检测极慢甚至漏检（issue #20，用户反馈"像素问题"导入本地图片
+/// 出错）。按最长边降采样到 <= MAX_SIDE，保持宽高比；已足够小则原样返回。SFace 会对人脸区域对齐裁剪，
+/// 降采样不影响特征质量。
+fn clamp_detect_size(frame: Mat) -> Result<Mat, String> {
+    const MAX_SIDE: i32 = 1600;
+    let (w, h) = (frame.cols(), frame.rows());
+    let longest = w.max(h);
+    if longest <= MAX_SIDE || longest <= 0 {
+        return Ok(frame);
+    }
+    let scale = MAX_SIDE as f64 / longest as f64;
+    let new_size = Size::new(
+        ((w as f64) * scale).round() as i32,
+        ((h as f64) * scale).round() as i32,
+    );
+    let mut out = Mat::default();
+    imgproc::resize(&frame, &mut out, new_size, 0.0, 0.0, imgproc::INTER_AREA)
+        .map_err(|e| format!("图片降采样失败: {:?}", e))?;
+    Ok(out)
+}
+
 /// 从帧中检测人脸，返回检测结果 Mat（rows == 0 表示未检测到）
 fn detect_faces(frame: &Mat, threshold: f32) -> Result<Mat, String> {
     let mut state = APP_STATE
@@ -265,14 +286,21 @@ pub fn check_face_from_img(
     img_path: String,
     face_detection_threshold: f64,
 ) -> Result<CustomResult, CustomResult> {
-    let frame = imgcodecs::imread(&img_path, imgcodecs::IMREAD_COLOR)
-        .map_err(|e| CustomResult::error(Some(format!("读取图片失败: {:?}", e)), None))?;
+    // 中文 / Unicode 路径：OpenCV imread 底层用 fopen，打不开非 ASCII 路径（issue #20）。改为用
+    // Rust 读取字节再 imdecode，Unicode 路径安全。
+    let bytes = std::fs::read(&img_path)
+        .map_err(|e| CustomResult::error(Some(format!("读取图片失败: {}", e)), None))?;
+    let buf = Vector::<u8>::from_iter(bytes);
+    let frame = imgcodecs::imdecode(&buf, imgcodecs::IMREAD_COLOR)
+        .map_err(|e| CustomResult::error(Some(format!("图片解码失败: {:?}", e)), None))?;
     if frame.empty() {
         return Err(CustomResult::error(
             Some(format!("图片为空或路径无效: {}", img_path)),
             None,
         ));
     }
+    // 4K 等大图降采样，避免 YuNet 漏检 / 极慢（issue #20）
+    let frame = clamp_detect_size(frame).map_err(|e| CustomResult::error(Some(e), None))?;
     check_face_inner(frame, face_detection_threshold)
 }
 
@@ -285,6 +313,8 @@ pub fn save_face_registration(
     face_detection_threshold: f64,
 ) -> Result<CustomResult, CustomResult> {
     let frame = base64_to_mat(&reference_base64).map_err(|e| CustomResult::error(Some(e), None))?;
+    // 本地导入的大图（如 4K）同样降采样后再检测 / 提取特征（issue #20）
+    let frame = clamp_detect_size(frame).map_err(|e| CustomResult::error(Some(e), None))?;
 
     let threshold = face_detection_threshold as f32;
     let faces = detect_faces(&frame, threshold).map_err(|e| CustomResult::error(Some(e), None))?;

@@ -2080,6 +2080,12 @@ fn main() {
         }
     }
 
+    // MSMF 摄像头后端在部分 Win10 上打开极慢（issue #3：ViCrack 日志实测 MSMF open 41011ms /
+    // 39756ms ≈ 40 秒摄像头才亮）。根因是 OpenCV MSMF 默认启用的硬件帧变换（HW transforms）在这些
+    // 机器上初始化挂起。关掉它让 MSMF 打开恢复正常速度，同时**保留 MSMF 后端**——录入端也走 MSMF，
+    // 特征空间一致，不必退回 DShow（会造成"检测到脸但匹配不上"）。必须在任何 VideoCapture 打开前设置。
+    std::env::set_var("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0");
+
     // ── NGC 解密链 Smoke Test（CLI 模式）────────────────────────────
     let args: Vec<String> = std::env::args().collect();
     let is_cli_mode = args.iter().any(|a| a == "--ngc-smoke-test" || a == "--ngc-probe" || a == "--ngc-dump" || a == "--ngc-keys" || a == "--ngc-enum-cng" || a == "--ngc-sign-probe" || a == "--ngc-container-dump" || a == "--ngc-srk" || a == "--ngc-ncrypt" || a == "--ngc-ncrypt-vault" || a == "--ngc-ncrypt-export" || a == "--ngc-dump-enc" || a == "--ngc-cbor-deep-dump" || a == "--ngc-phase1" || a == "--ngc-phase1-path-a" || a == "--ngc-probe-derive" || a == "--uia-dump-credui" || a == "--uia-dump-all" || a == "--uia-autofill-pin" || a == "--uia-blind-inject" || a == "--pin-save");

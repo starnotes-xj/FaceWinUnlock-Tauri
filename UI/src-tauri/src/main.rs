@@ -151,5 +151,9 @@ fn main() {
         }
     }
 
+    // MSMF 摄像头打开慢（issue #3）：同 Unlock 服务，关掉 MSMF 硬件帧变换让摄像头打开恢复速度，
+    // 修复面容管理里"抓拍摄像头启动比 0.3.5 慢很多"。必须在打开摄像头前设置。
+    std::env::set_var("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0");
+
     facewinunlock_tauri_lib::run()
 }
