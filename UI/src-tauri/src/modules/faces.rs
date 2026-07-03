@@ -64,25 +64,52 @@ fn base64_to_mat(b64: &str) -> Result<Mat, String> {
     imgcodecs::imdecode(&buf, imgcodecs::IMREAD_COLOR).map_err(|e| format!("图片解码失败: {:?}", e))
 }
 
-/// 大图（如 4K 3840×2160）会让 YuNet 检测极慢甚至漏检（issue #20，用户反馈"像素问题"导入本地图片
-/// 出错）。按最长边降采样到 <= MAX_SIDE，保持宽高比；已足够小则原样返回。SFace 会对人脸区域对齐裁剪，
-/// 降采样不影响特征质量。
-fn clamp_detect_size(frame: Mat) -> Result<Mat, String> {
-    const MAX_SIDE: i32 = 1600;
-    let (w, h) = (frame.cols(), frame.rows());
-    let longest = w.max(h);
-    if longest <= MAX_SIDE || longest <= 0 {
-        return Ok(frame);
+/// 按最长边缩放到 target（只缩小不放大），保持宽高比。用于多尺度检测。
+fn resize_longest(src: &Mat, target: i32) -> Result<Mat, String> {
+    let (w, h) = (src.cols(), src.rows());
+    let longest = w.max(h).max(1);
+    if target >= longest {
+        return src.try_clone().map_err(|e| format!("克隆图像失败: {:?}", e));
     }
-    let scale = MAX_SIDE as f64 / longest as f64;
+    let scale = target as f64 / longest as f64;
     let new_size = Size::new(
-        ((w as f64) * scale).round() as i32,
-        ((h as f64) * scale).round() as i32,
+        ((w as f64) * scale).round().max(1.0) as i32,
+        ((h as f64) * scale).round().max(1.0) as i32,
     );
     let mut out = Mat::default();
-    imgproc::resize(&frame, &mut out, new_size, 0.0, 0.0, imgproc::INTER_AREA)
-        .map_err(|e| format!("图片降采样失败: {:?}", e))?;
+    imgproc::resize(src, &mut out, new_size, 0.0, 0.0, imgproc::INTER_AREA)
+        .map_err(|e| format!("图片缩放失败: {:?}", e))?;
     Ok(out)
+}
+
+/// 多尺度人脸检测（issue #20）：YuNet 对「人脸占画面的绝对像素大小」敏感——近景大脸在大图上会
+/// 超出可检测范围而漏检（用户实测：同一照片 607×341 检得到、608×342 起就检不到，1600 更检不到）。
+/// 这里从大到小依次在多个「最长边」目标尺寸上检测，返回**第一个检到人脸**的（帧, 检测结果）：由大
+/// 到小保证优先用能检到的最大尺度（SFace 特征质量更好），帧与检测结果同尺度，便于绘框/提取特征坐标
+/// 一致。全部尺度都检不到时返回最小尺度帧 + 空检测，让上层照常报「未检测到人脸」。
+fn detect_faces_multiscale(src: &Mat, threshold: f32) -> Result<(Mat, Mat), String> {
+    const TARGETS: [i32; 5] = [1024, 768, 576, 448, 320];
+    let longest = src.cols().max(src.rows()).max(1);
+    let mut used_original = false;
+    let mut fallback: Option<(Mat, Mat)> = None;
+    for &target in TARGETS.iter() {
+        // 源不大于该目标时用原图，且只用一次（避免多个 >=longest 的目标重复同一尺度）
+        let frame = if target >= longest {
+            if used_original {
+                continue;
+            }
+            used_original = true;
+            src.try_clone().map_err(|e| format!("克隆图像失败: {:?}", e))?
+        } else {
+            resize_longest(src, target)?
+        };
+        let faces = detect_faces(&frame, threshold)?;
+        if faces.rows() > 0 {
+            return Ok((frame, faces));
+        }
+        fallback = Some((frame, faces));
+    }
+    fallback.ok_or_else(|| "多尺度检测未产生结果".to_string())
 }
 
 /// 从帧中检测人脸，返回检测结果 Mat（rows == 0 表示未检测到）
@@ -223,11 +250,23 @@ fn liveness_score(frame: &Mat, faces: &Mat) -> Result<f32, String> {
 
 // ─── 共用：从给定帧检测人脸并返回带框/原始 base64 ────────────────────────────
 
-fn check_face_inner(frame: Mat, detection_threshold: f64) -> Result<CustomResult, CustomResult> {
+fn check_face_inner(
+    frame: Mat,
+    detection_threshold: f64,
+    multiscale: bool,
+) -> Result<CustomResult, CustomResult> {
     let threshold = detection_threshold as f32;
 
-    let faces = detect_faces(&frame, threshold)
-        .map_err(|e| CustomResult::error(Some(format!("人脸检测失败: {}", e)), None))?;
+    // 本地导入图片走多尺度检测（近景大脸在大图上会漏检，issue #20）；摄像头帧固定 640×480，单次
+    // 检测即可，避免逐帧多尺度拖慢预览。多尺度可能在缩小后的尺度检到，故 frame 一并被替换为该尺度。
+    let (frame, faces) = if multiscale {
+        detect_faces_multiscale(&frame, threshold)
+            .map_err(|e| CustomResult::error(Some(format!("人脸检测失败: {}", e)), None))?
+    } else {
+        let faces = detect_faces(&frame, threshold)
+            .map_err(|e| CustomResult::error(Some(format!("人脸检测失败: {}", e)), None))?;
+        (frame, faces)
+    };
 
     let raw_b64 = mat_to_data_url(&frame).map_err(|e| CustomResult::error(Some(e), None))?;
 
@@ -277,7 +316,7 @@ pub fn check_face_from_camera(
     };
     let frame =
         rotate_frame(&frame, camera_rotation).map_err(|e| CustomResult::error(Some(e), None))?;
-    check_face_inner(frame, face_detection_threshold)
+    check_face_inner(frame, face_detection_threshold, false)
 }
 
 /// 从图片文件加载并检测人脸
@@ -299,9 +338,8 @@ pub fn check_face_from_img(
             None,
         ));
     }
-    // 4K 等大图降采样，避免 YuNet 漏检 / 极慢（issue #20）
-    let frame = clamp_detect_size(frame).map_err(|e| CustomResult::error(Some(e), None))?;
-    check_face_inner(frame, face_detection_threshold)
+    // 导入图片走多尺度检测（近景大脸在大图上会漏检，issue #20）
+    check_face_inner(frame, face_detection_threshold, true)
 }
 
 /// 保存人脸注册信息（特征 .face 文件 + 图片 .faceimg 文件），返回 { file_name: uuid }
@@ -313,11 +351,12 @@ pub fn save_face_registration(
     face_detection_threshold: f64,
 ) -> Result<CustomResult, CustomResult> {
     let frame = base64_to_mat(&reference_base64).map_err(|e| CustomResult::error(Some(e), None))?;
-    // 本地导入的大图（如 4K）同样降采样后再检测 / 提取特征（issue #20）
-    let frame = clamp_detect_size(frame).map_err(|e| CustomResult::error(Some(e), None))?;
 
     let threshold = face_detection_threshold as f32;
-    let faces = detect_faces(&frame, threshold).map_err(|e| CustomResult::error(Some(e), None))?;
+    // 多尺度检测（issue #20）：近景大脸在大图上会漏检，取第一个检到脸的尺度；frame 一并替换为该
+    // 尺度，后续 extract_feature 用同一帧保证坐标一致。
+    let (frame, faces) = detect_faces_multiscale(&frame, threshold)
+        .map_err(|e| CustomResult::error(Some(e), None))?;
 
     if faces.rows() == 0 {
         return Err(CustomResult::error(
@@ -527,20 +566,20 @@ mod tests {
     use super::*;
     use opencv::core::CV_8UC3;
 
-    // #20a：4K 等大图应按最长边降采样到 <=1600 且保持宽高比
+    // #20a：按最长边缩放（多尺度用），4K→576 且保持宽高比
     #[test]
-    fn clamp_downscales_4k_keeps_aspect() {
+    fn resize_longest_downscales_keeps_aspect() {
         let big = Mat::new_rows_cols_with_default(2160, 3840, CV_8UC3, Scalar::all(0.0)).unwrap();
-        let out = clamp_detect_size(big).unwrap();
-        assert_eq!(out.cols(), 1600, "最长边应=1600");
-        assert_eq!(out.rows(), 900, "16:9 应缩到 1600x900");
+        let out = resize_longest(&big, 576).unwrap();
+        assert_eq!(out.cols(), 576, "最长边应=576");
+        assert_eq!(out.rows(), 324, "16:9 应缩到 576x324");
     }
 
-    // 已足够小的图应原样返回（不放大、不改尺寸）
+    // 目标 >= 原图最长边时原样返回（只缩小不放大）
     #[test]
-    fn clamp_keeps_small_untouched() {
+    fn resize_longest_keeps_small_untouched() {
         let small = Mat::new_rows_cols_with_default(480, 640, CV_8UC3, Scalar::all(0.0)).unwrap();
-        let out = clamp_detect_size(small).unwrap();
+        let out = resize_longest(&small, 1024).unwrap();
         assert_eq!((out.cols(), out.rows()), (640, 480));
     }
 
