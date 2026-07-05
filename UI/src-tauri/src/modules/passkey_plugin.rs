@@ -737,12 +737,25 @@ fn backup_passkey_credentials(package_family_name: &str) -> bool {
     if !src.exists() || std::fs::create_dir_all(&backup_dir).is_err() {
         return false;
     }
-    std::fs::copy(&src, backup_dir.join(PASSKEY_CREDENTIALS_FILE)).is_ok()
+    let ok = std::fs::copy(&src, backup_dir.join(PASSKEY_CREDENTIALS_FILE)).is_ok();
+    // 同时备份「保险库注册表材料」——它是解开 credentials.dat 中封装私钥的钥匙；只备份 credentials.dat
+    // 会导致 Geek 等删注册表后重装虽显示凭据却签名失败（issue #3）。best-effort，不影响本函数返回。
+    let _ = backup_passkey_vault_registry();
+    ok
 }
 
 /// 安装/重装后恢复元数据（best-effort）：仅当当前 LocalState 无元数据、而包外备份存在时
 /// 才恢复，避免覆盖 `-PreserveApplicationData` 已保留的数据。
 pub(crate) fn restore_passkey_credentials(package_family_name: &str) -> bool {
+    // 「保险库注册表材料」独立恢复：即使 credentials.dat 被 -PreserveApplicationData 保住，注册表也可能
+    // 被 Geek 等单独删（issue #3：删注册表后凭据显示但用私钥签名失败）。仅在键缺失时导入，不覆盖有效数据。
+    let vault_restored = restore_passkey_vault_registry();
+    let creds_restored = restore_passkey_credentials_dat(package_family_name);
+    vault_restored || creds_restored
+}
+
+/// 仅恢复 credentials.dat 元数据（LocalState 无、包外备份有时才恢复，避免覆盖 -PreserveApplicationData 数据）。
+fn restore_passkey_credentials_dat(package_family_name: &str) -> bool {
     let Some(backup) = passkey_backup_dir().map(|d| d.join(PASSKEY_CREDENTIALS_FILE)) else {
         return false;
     };
@@ -757,6 +770,50 @@ pub(crate) fn restore_passkey_credentials(package_family_name: &str) -> bool {
         return false;
     }
     std::fs::copy(&backup, &dst).is_ok()
+}
+
+const PASSKEY_VAULT_BACKUP_FILE: &str = "vault.reg";
+
+/// 备份 passkey 保险库注册表材料（`HKCU\Software\FaceWinUnlock\PasskeyManager` 下的 `HMACSecretInput`
+/// + `EncryptedVaultData` 等）到包外。C++ 端 PluginRegistrationManager 把它写在这里（DPAPI 加密、per-user），
+/// 是解开 credentials.dat 中封装私钥的「保险库钥匙」。`reg export` 一次性捕获全部值与类型。
+/// best-effort：键不存在（从未注册）时 export 失败、静默返回 false。
+fn backup_passkey_vault_registry() -> bool {
+    let Some(backup_dir) = passkey_backup_dir() else {
+        return false;
+    };
+    if std::fs::create_dir_all(&backup_dir).is_err() {
+        return false;
+    }
+    let out = backup_dir.join(PASSKEY_VAULT_BACKUP_FILE);
+    let script = format!(
+        "reg export 'HKCU\\{}' {} /y",
+        PASSKEY_PLUGIN_REG_PATH,
+        powershell_literal(&out)
+    );
+    matches!(run_powershell(&script), Ok(o) if o.status.success())
+}
+
+/// 恢复 passkey 保险库注册表材料：仅当注册表键当前缺失（被 Geek 等删掉）时才 `reg import`，
+/// 避免覆盖 -PreserveApplicationData 已保住的有效数据（issue #3）。
+fn restore_passkey_vault_registry() -> bool {
+    let Some(backup) = passkey_backup_dir().map(|d| d.join(PASSKEY_VAULT_BACKUP_FILE)) else {
+        return false;
+    };
+    if !backup.exists() || passkey_vault_registry_exists() {
+        return false;
+    }
+    let script = format!("reg import {}", powershell_literal(&backup));
+    matches!(run_powershell(&script), Ok(o) if o.status.success())
+}
+
+/// 保险库注册表键是否存在（存在则不覆盖恢复）。
+fn passkey_vault_registry_exists() -> bool {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    use winreg::RegKey;
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(PASSKEY_PLUGIN_REG_PATH, KEY_READ)
+        .is_ok()
 }
 
 /// 清除包外通行密钥备份（仅 Purge 调用）。
@@ -822,22 +879,35 @@ fn uninstall_passkey_plugin_impl(
             ));
         }
     } else {
-        // 内联卸载（fallback：随附脚本不存在时）。保留模式只卸 MSIX 并 -PreserveApplicationData
-        // 保留数据；彻底清除才删证书与 KSP 私钥（facewinunlock/*，best-effort）。
-        let preserve = if mode == UninstallMode::KeepCredentials {
-            "-PreserveApplicationData "
+        // 内联卸载（fallback：随附脚本不存在时）。保留模式只在系统支持
+        // -PreserveApplicationData 时卸 MSIX；否则保留包体，避免删掉本地通行密钥。
+        // 彻底清除才删证书与 KSP 私钥（facewinunlock/*，best-effort）。
+        let preserve_application_data = if mode == UninstallMode::KeepCredentials {
+            "$true"
         } else {
-            ""
+            "$false"
         };
         let remove_pkgs = format!(
             "Get-Process -Name 'PasskeyManager' -ErrorAction SilentlyContinue | Stop-Process -Force; \
              $ErrorActionPreference = 'Stop'; \
+             $preserveApplicationData = {preserve_application_data}; \
+             $removeAppxCommand = Get-Command Remove-AppxPackage -ErrorAction Stop; \
+             $removeAppxArgs = @{{ ErrorAction = 'Stop' }}; \
+             if ($preserveApplicationData) {{ \
+               if ($removeAppxCommand.Parameters.ContainsKey('PreserveApplicationData')) {{ \
+                 $removeAppxArgs['PreserveApplicationData'] = $true; \
+               }} else {{ \
+                 Write-Warning 'Remove-AppxPackage does not support -PreserveApplicationData; keeping the Passkey package installed to avoid deleting local passkeys.'; \
+                 $skipPackageRemoval = $true; \
+               }} \
+             }}; \
              $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); \
              foreach ($name in @('{FORMAL_PACKAGE_NAME}', '{SAMPLE_PACKAGE_NAME}')) {{ \
+               if ($skipPackageRemoval) {{ break }}; \
                $pkgs = @(Get-AppxPackage -Name $name -ErrorAction SilentlyContinue); \
                if ($isAdmin) {{ $pkgs += @(Get-AppxPackage -AllUsers -Name $name -ErrorAction SilentlyContinue) }}; \
                if ($pkgs.Count -gt 1) {{ $pkgs = $pkgs | Sort-Object PackageFullName -Unique }}; \
-               $pkgs | Remove-AppxPackage {preserve}-ErrorAction Stop; \
+               $pkgs | Remove-AppxPackage @removeAppxArgs; \
              }};"
         );
         let purge_extra = if mode == UninstallMode::Purge {
