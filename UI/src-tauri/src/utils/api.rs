@@ -1064,15 +1064,107 @@ fn try_open_camera_with_backend(
     );
     Ok(cam)
 }
-// 枚举系统摄像头：逐索引探测，收集所有可用设备
+// 枚举系统摄像头，返回 (真实设备名, 索引)。
+// 用 Media Foundation 枚举视频捕获设备的友好名（与 OpenCV MSMF 后端同一枚举顺序，故索引可直接对应
+// open_camera 打开的设备）——修复复原版只显示占位名「Camera N」导致多摄像头/多虚拟摄像头机器上
+// 用户分不清、选错摄像头（选到 NVIDIA Broadcast/OBS 等虚拟摄像头出黑帧 → 无法录入/解锁）的问题
+// （issue #17）。MF 枚举失败时回退到逐索引探测的占位名，保证不比原实现差。
 fn get_windows_video_devices() -> windows::core::Result<Vec<(String, u32)>> {
-    let mut devices = Vec::new();
-    for index in 0u32..8 {
-        if is_camera_index_valid(index).unwrap_or(false) {
-            devices.push((format!("Camera {}", index), index));
+    match enumerate_video_devices_mf() {
+        Ok(list) if !list.is_empty() => Ok(list),
+        _ => {
+            // 回退：MF 不可用/无结果时，逐索引探测给占位名。
+            let mut devices = Vec::new();
+            for index in 0u32..8 {
+                if is_camera_index_valid(index).unwrap_or(false) {
+                    devices.push((format!("摄像头 {}", index), index));
+                }
+            }
+            Ok(devices)
         }
     }
-    Ok(devices)
+}
+
+// Media Foundation 视频设备友好名枚举。
+fn enumerate_video_devices_mf() -> windows::core::Result<Vec<(String, u32)>> {
+    use windows::core::PWSTR;
+    use windows::Win32::Media::MediaFoundation::{
+        MFCreateAttributes, MFEnumDeviceSources, MFShutdown, MFStartup, IMFActivate, IMFAttributes,
+        MFSTARTUP_LITE, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_VERSION,
+    };
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED,
+    };
+
+    unsafe {
+        // COM/MF 初始化（已初始化则忽略错误；MFStartup 幂等）。
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        MFStartup(MF_VERSION, MFSTARTUP_LITE)?;
+
+        let result = (|| -> windows::core::Result<Vec<(String, u32)>> {
+            let mut attributes: Option<IMFAttributes> = None;
+            MFCreateAttributes(&mut attributes, 1)?;
+            let attributes = attributes.ok_or_else(windows::core::Error::empty)?;
+            attributes.SetGUID(
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+            )?;
+
+            let mut devices_ptr: *mut Option<IMFActivate> = std::ptr::null_mut();
+            let mut count: u32 = 0;
+            MFEnumDeviceSources(&attributes, &mut devices_ptr, &mut count)?;
+
+            let mut list = Vec::new();
+            if !devices_ptr.is_null() {
+                let devices = std::slice::from_raw_parts(devices_ptr, count as usize);
+                for (i, dev) in devices.iter().enumerate() {
+                    if let Some(dev) = dev {
+                        let mut name_ptr = PWSTR::null();
+                        let mut name_len: u32 = 0;
+                        let name = if dev
+                            .GetAllocatedString(
+                                &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+                                &mut name_ptr,
+                                &mut name_len,
+                            )
+                            .is_ok()
+                            && !name_ptr.is_null()
+                        {
+                            let s = name_ptr.to_string().unwrap_or_default();
+                            CoTaskMemFree(Some(name_ptr.0 as *const _));
+                            if s.trim().is_empty() {
+                                format!("摄像头 {}", i)
+                            } else {
+                                s
+                            }
+                        } else {
+                            format!("摄像头 {}", i)
+                        };
+                        list.push((name, i as u32));
+                    }
+                }
+                CoTaskMemFree(Some(devices_ptr as *const _));
+            }
+            Ok(list)
+        })();
+
+        let _ = MFShutdown();
+        result
+    }
+}
+
+#[cfg(test)]
+mod camera_enum_tests {
+    use super::*;
+    #[test]
+    fn print_real_camera_names() {
+        let devices = get_windows_video_devices().unwrap_or_default();
+        println!("MF 枚举到 {} 个摄像头设备:", devices.len());
+        for (name, idx) in &devices {
+            println!("  索引 {} => {}", idx, name);
+        }
+    }
 }
 
 // 验证摄像头有效性
