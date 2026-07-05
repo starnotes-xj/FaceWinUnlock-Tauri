@@ -20,6 +20,16 @@ Get-Process -Name PasskeyManager -ErrorAction SilentlyContinue | Stop-Process -F
 $removedAnyPackage = $false
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $packageNames = @("FaceWinUnlock.PasskeyManager", "Contoso.PasskeyManager")
+$removeAppxCommand = Get-Command Remove-AppxPackage -ErrorAction Stop
+$removeAppxArgs = @{ ErrorAction = "Stop" }
+if (-not $Purge) {
+    if ($removeAppxCommand.Parameters.ContainsKey("PreserveApplicationData")) {
+        $removeAppxArgs["PreserveApplicationData"] = $true
+    } else {
+        Write-Warning "Remove-AppxPackage does not support -PreserveApplicationData on this system; keeping the Passkey package installed to avoid deleting local passkeys."
+        $skipPackageRemoval = $true
+    }
+}
 
 function Remove-PasskeyRegistryResidue {
     param(
@@ -59,6 +69,9 @@ function Remove-PasskeyRegistryResidue {
 }
 
 foreach ($packageName in $packageNames) {
+    if ($skipPackageRemoval) {
+        break
+    }
     # An elevated process can miss per-user packages in the default view.
     # Merge both views and deduplicate by PackageFullName.
     $packages = @(Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue)
@@ -70,11 +83,7 @@ foreach ($packageName in $packageNames) {
     }
     foreach ($package in $packages) {
         # 保留模式用 -PreserveApplicationData 留住 LocalState 凭据元数据；Purge 才连数据一起删。
-        if ($Purge) {
-            $package | Remove-AppxPackage -ErrorAction Stop
-        } else {
-            $package | Remove-AppxPackage -PreserveApplicationData -ErrorAction Stop
-        }
+        $package | Remove-AppxPackage @removeAppxArgs
         $removedAnyPackage = $true
     }
 }
