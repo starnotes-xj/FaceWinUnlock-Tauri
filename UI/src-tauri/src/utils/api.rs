@@ -1,4 +1,4 @@
-use std::{os::windows::process::CommandExt, process::Command, thread, time::Duration};
+use std::{os::windows::process::CommandExt, process::Command, thread, time::{Duration, Instant}};
 
 use crate::{utils::custom_result::CustomResult, OpenCVResource, APP_STATE, GLOBAL_TRAY, ROOT_DIR};
 use opencv::{
@@ -762,11 +762,26 @@ fn build_opencv_models(
     backend_id: i32,
     target_id: i32,
 ) -> Result<(Ptr<FaceDetectorYN>, Ptr<FaceRecognizerSF>, opencv::dnn::Net), String> {
-    let detector_path = ROOT_DIR
-        .join("resources")
-        .join("face_detection_yunet_2023mar.onnx");
+    let res = ROOT_DIR.join("resources");
+    let detector_path = res
+        .join("face_detection_yunet_2023mar.onnx")
+        .to_string_lossy()
+        .into_owned();
+    let recognizer_path = res
+        .join("face_recognition_sface_2021dec.onnx")
+        .to_string_lossy()
+        .into_owned();
+    let liveness_path = res
+        .join("face_liveness.onnx")
+        .to_string_lossy()
+        .into_owned();
+
+    let t0 = Instant::now();
+
+    // 先在主线程加载 detector：它最小最快，且借此触发 OpenCV DNN 的一次性全局初始化（层工厂注册等），
+    // 使随后并行加载 recognizer/liveness 时不会多线程并发触发该全局初始化的竞态（issue #3）。
     let detector = FaceDetectorYN::create(
-        detector_path.to_str().unwrap_or(""),
+        &detector_path,
         "",
         Size::new(320, 320),
         0.9,
@@ -776,27 +791,40 @@ fn build_opencv_models(
         target_id,
     )
     .map_err(|e| format!("初始化检测器模型失败: {:?}", e))?;
+    let det_ms = t0.elapsed().as_millis();
 
-    let recognizer_path = ROOT_DIR
-        .join("resources")
-        .join("face_recognition_sface_2021dec.onnx");
-    let recognizer = FaceRecognizerSF::create(
-        recognizer_path.to_str().unwrap_or(""),
-        "",
+    // recognizer（SFace，最重）与 liveness 相互独立、全局初始化已完成，**并行加载**——顺序加载 3 个
+    // ONNX 模型是 UI 首次抓拍/一致性验证慢(~4s)的主因；并行后总耗时 ≈ 最慢单个模型（issue #3）。
+    let t1 = Instant::now();
+    let rec_handle = thread::spawn(move || -> Result<Ptr<FaceRecognizerSF>, String> {
+        FaceRecognizerSF::create(&recognizer_path, "", backend_id, target_id)
+            .map_err(|e| format!("初始化识别器模型失败: {:?}", e))
+    });
+    let live_handle = thread::spawn(move || -> Result<opencv::dnn::Net, String> {
+        let mut net = opencv::dnn::read_net_from_onnx(&liveness_path)
+            .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?;
+        net.set_preferable_backend(backend_id)
+            .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
+        net.set_preferable_target(target_id)
+            .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
+        Ok(net)
+    });
+
+    let recognizer = rec_handle
+        .join()
+        .map_err(|_| "识别器加载线程 panic".to_string())??;
+    let liveness = live_handle
+        .join()
+        .map_err(|_| "活体检测加载线程 panic".to_string())??;
+
+    info!(
+        "OpenCV 模型加载：detector {}ms(主线程) + recognizer/liveness 并行 {}ms = 合计 {}ms (backend={}, target={})",
+        det_ms,
+        t1.elapsed().as_millis(),
+        t0.elapsed().as_millis(),
         backend_id,
-        target_id,
-    )
-    .map_err(|e| format!("初始化识别器模型失败: {:?}", e))?;
-
-    let liveness_path = ROOT_DIR.join("resources").join("face_liveness.onnx");
-    let mut liveness = opencv::dnn::read_net_from_onnx(liveness_path.to_str().unwrap_or(""))
-        .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?;
-    liveness
-        .set_preferable_backend(backend_id)
-        .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
-    liveness
-        .set_preferable_target(target_id)
-        .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
+        target_id
+    );
 
     Ok((detector, recognizer, liveness))
 }
@@ -998,6 +1026,7 @@ fn try_open_camera_with_backend(
     backend: CameraBackend,
     camear_index: i32,
 ) -> Result<VideoCapture, Box<dyn std::error::Error>> {
+    let t0 = Instant::now();
     let mut cam = VideoCapture::new(camear_index, backend.into())?;
 
     if !cam.is_opened()? {
@@ -1028,17 +1057,114 @@ fn try_open_camera_with_backend(
         }
     }
 
+    info!(
+        "摄像头后端 {:?} 打开+预热耗时 {}ms",
+        backend,
+        t0.elapsed().as_millis()
+    );
     Ok(cam)
 }
-// 枚举系统摄像头：逐索引探测，收集所有可用设备
+// 枚举系统摄像头，返回 (真实设备名, 索引)。
+// 用 Media Foundation 枚举视频捕获设备的友好名（与 OpenCV MSMF 后端同一枚举顺序，故索引可直接对应
+// open_camera 打开的设备）——修复复原版只显示占位名「Camera N」导致多摄像头/多虚拟摄像头机器上
+// 用户分不清、选错摄像头（选到 NVIDIA Broadcast/OBS 等虚拟摄像头出黑帧 → 无法录入/解锁）的问题
+// （issue #17）。MF 枚举失败时回退到逐索引探测的占位名，保证不比原实现差。
 fn get_windows_video_devices() -> windows::core::Result<Vec<(String, u32)>> {
-    let mut devices = Vec::new();
-    for index in 0u32..8 {
-        if is_camera_index_valid(index).unwrap_or(false) {
-            devices.push((format!("Camera {}", index), index));
+    match enumerate_video_devices_mf() {
+        Ok(list) if !list.is_empty() => Ok(list),
+        _ => {
+            // 回退：MF 不可用/无结果时，逐索引探测给占位名。
+            let mut devices = Vec::new();
+            for index in 0u32..8 {
+                if is_camera_index_valid(index).unwrap_or(false) {
+                    devices.push((format!("摄像头 {}", index), index));
+                }
+            }
+            Ok(devices)
         }
     }
-    Ok(devices)
+}
+
+// Media Foundation 视频设备友好名枚举。
+fn enumerate_video_devices_mf() -> windows::core::Result<Vec<(String, u32)>> {
+    use windows::core::PWSTR;
+    use windows::Win32::Media::MediaFoundation::{
+        MFCreateAttributes, MFEnumDeviceSources, MFShutdown, MFStartup, IMFActivate, IMFAttributes,
+        MFSTARTUP_LITE, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_VERSION,
+    };
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED,
+    };
+
+    unsafe {
+        // COM/MF 初始化（已初始化则忽略错误；MFStartup 幂等）。
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        MFStartup(MF_VERSION, MFSTARTUP_LITE)?;
+
+        let result = (|| -> windows::core::Result<Vec<(String, u32)>> {
+            let mut attributes: Option<IMFAttributes> = None;
+            MFCreateAttributes(&mut attributes, 1)?;
+            let attributes = attributes.ok_or_else(windows::core::Error::empty)?;
+            attributes.SetGUID(
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+            )?;
+
+            let mut devices_ptr: *mut Option<IMFActivate> = std::ptr::null_mut();
+            let mut count: u32 = 0;
+            MFEnumDeviceSources(&attributes, &mut devices_ptr, &mut count)?;
+
+            let mut list = Vec::new();
+            if !devices_ptr.is_null() {
+                let devices = std::slice::from_raw_parts(devices_ptr, count as usize);
+                for (i, dev) in devices.iter().enumerate() {
+                    if let Some(dev) = dev {
+                        let mut name_ptr = PWSTR::null();
+                        let mut name_len: u32 = 0;
+                        let name = if dev
+                            .GetAllocatedString(
+                                &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+                                &mut name_ptr,
+                                &mut name_len,
+                            )
+                            .is_ok()
+                            && !name_ptr.is_null()
+                        {
+                            let s = name_ptr.to_string().unwrap_or_default();
+                            CoTaskMemFree(Some(name_ptr.0 as *const _));
+                            if s.trim().is_empty() {
+                                format!("摄像头 {}", i)
+                            } else {
+                                s
+                            }
+                        } else {
+                            format!("摄像头 {}", i)
+                        };
+                        list.push((name, i as u32));
+                    }
+                }
+                CoTaskMemFree(Some(devices_ptr as *const _));
+            }
+            Ok(list)
+        })();
+
+        let _ = MFShutdown();
+        result
+    }
+}
+
+#[cfg(test)]
+mod camera_enum_tests {
+    use super::*;
+    #[test]
+    fn print_real_camera_names() {
+        let devices = get_windows_video_devices().unwrap_or_default();
+        println!("MF 枚举到 {} 个摄像头设备:", devices.len());
+        for (name, idx) in &devices {
+            println!("  索引 {} => {}", idx, name);
+        }
+    }
 }
 
 // 验证摄像头有效性
