@@ -126,25 +126,55 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             // 通行密钥→含「通行密钥」、设置 PIN→「设置」。用 GetWindowTextW 读应用窗口标题
             //（应用进程非受限，不像 broker 进程内 UIA COM 被封）。
             let scene = crate::classify_broker_scene();
-            info!("SampleProvider::SetUsageScenario - broker 场景分类: {:?}", scene);
-            if scene != crate::BrokerScene::Password {
+            // 实验开关：网页内「填充密码」和 passkey 登录的触发窗口都是登录页（无「密码/通行密钥」
+            // 关键词）→ 均归 Unknown，标题无法区分。CREDUI_BROKER_TRY_FACE_UNKNOWN=1 时对 Unknown
+            // 也尝试人脸，供实测「网页填密码能否走人脸」；默认 0（不改变发行行为，passkey 不受影响）。
+            // Passkey（标题含「通行密钥」）永远跳过，绝不因本开关误触发。
+            let try_face_unknown = crate::read_facewinunlock_registry("CREDUI_BROKER_TRY_FACE_UNKNOWN")
+                .map(|v| v.trim() == "1")
+                .unwrap_or(false);
+            let should_try_face = scene == crate::BrokerScene::Password
+                || (scene == crate::BrokerScene::Unknown && try_face_unknown);
+            info!(
+                "SampleProvider::SetUsageScenario - broker 场景分类: {:?}，try_face_unknown={}，试人脸={}",
+                scene, try_face_unknown, should_try_face
+            );
+            if !should_try_face {
                 // 通行密钥(选原生 Hello)/设置 PIN/未知 → 不介入，交还 Windows 原生（PIN/Hello）。
                 // 返回 E_NOTIMPL 后本 Provider 完全不参与：不启动人脸监听、不装输入 Hook、
                 // 不创建动画、摄像头不亮——根治「选原生 Hello 移动鼠标触发人脸」与「启用插件输 PIN 卡死」。
-                info!("SampleProvider::SetUsageScenario - 非「查看密码」场景，跳过人脸，交还 Windows");
+                info!("SampleProvider::SetUsageScenario - 跳过人脸，交还 Windows");
                 inner.is_scenario_supported = false;
                 return Err(E_NOTIMPL.into());
             }
-            info!("SampleProvider::SetUsageScenario - 「查看密码」场景，启用先人脸、失败后回退 Windows PIN");
+            info!("SampleProvider::SetUsageScenario - 启用先人脸、失败后回退 Windows PIN");
         }
 
         Ok(())
     }
 
-    /// 设置序列化的凭据信息（用于预填充凭据，这里空实现）
-    /// _pcpcs: 序列化的凭据数据
-    fn SetSerialization(&self, _pcpcs: *const CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION) -> windows_core::Result<()> {
-        info!("SampleProvider::SetSerialization - 空实现");
+    /// 设置序列化的凭据信息（用于预填充凭据）。
+    /// 诊断用途：credentialuibroker 的「网页填密码」与「passkey 登录」触发窗口标题相同、无法区分，
+    /// 而调用方(Chrome)传入的序列化(auth 包 / CLSID / 字节)很可能不同——这是唯一未挖过的可靠信号。
+    /// 此处把序列化全量打进 facewinunlock.log，供对比两场景后确定区分字段（下版据此自动分类）。
+    fn SetSerialization(&self, pcpcs: *const CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION) -> windows_core::Result<()> {
+        unsafe {
+            if let Some(cs) = pcpcs.as_ref() {
+                let hex = if !cs.rgbSerialization.is_null() && cs.cbSerialization > 0 {
+                    let n = (cs.cbSerialization as usize).min(96);
+                    let slice = std::slice::from_raw_parts(cs.rgbSerialization, n);
+                    slice.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+                } else {
+                    String::from("(空)")
+                };
+                info!(
+                    "SampleProvider::SetSerialization - authPkg={} clsidCP={:?} cbSer={} hex[..96]={}",
+                    cs.ulAuthenticationPackage, cs.clsidCredentialProvider, cs.cbSerialization, hex
+                );
+            } else {
+                info!("SampleProvider::SetSerialization - pcpcs=null");
+            }
+        }
         Ok(())
     }
 
