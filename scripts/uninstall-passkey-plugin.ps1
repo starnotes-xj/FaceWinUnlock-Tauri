@@ -20,6 +20,42 @@ Get-Process -Name PasskeyManager -ErrorAction SilentlyContinue | Stop-Process -F
 $removedAnyPackage = $false
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $packageNames = @("FaceWinUnlock.PasskeyManager", "Contoso.PasskeyManager")
+
+# 卸载前先让插件以自身身份反注册 WebAuthn 认证器。认证器注册（WebAuthNPluginAddAuthenticator）
+# 独立于 MSIX 包，Remove-AppxPackage 删不掉，残留后仍列在「保存通行密钥的位置」里、点了报错
+# （后端 exe 已删）。做法：写 HKCU 标志 PendingUnregister=1，再用 explorer 以中等完整性（用户
+# 上下文）拉起插件——NSIS/Geek 卸载器提权(高完整性)运行、无法直接激活 MSIX，故走 explorer；
+# 插件无参启动读到标志即调 WebAuthNPluginRemoveAuthenticator 后退出（不显示界面）。Keep/Purge 都做。
+function Invoke-PasskeyPluginUnregister {
+    param([string[]]$PackageNames)
+    $regPath = "HKCU:\Software\FaceWinUnlock\PasskeyManager"
+    $launched = $false
+    foreach ($packageName in $PackageNames) {
+        $pkg = Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $pkg) { continue }
+        try {
+            $manifest = Get-AppxPackageManifest $pkg -ErrorAction Stop
+            $appId = $manifest.Package.Applications.Application.Id
+            if ($appId -is [array]) { $appId = $appId[0] }
+            $aumid = "$($pkg.PackageFamilyName)!$appId"
+            if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+            New-ItemProperty -Path $regPath -Name "PendingUnregister" -Value 1 -PropertyType DWord -Force | Out-Null
+            Write-Host "Launching $aumid via explorer to self-unregister WebAuthn authenticator..."
+            Start-Process -FilePath "explorer.exe" -ArgumentList "shell:AppsFolder\$aumid" -ErrorAction SilentlyContinue
+            $launched = $true
+        } catch {
+            Write-Warning "Plugin self-unregister launch failed for ${packageName}: $($_.Exception.Message)"
+        }
+    }
+    if ($launched) {
+        Start-Sleep -Seconds 6
+        Get-Process -Name PasskeyManager -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        # 清理标志，避免插件未能启动时标志残留（重装后误反注册）
+        Remove-ItemProperty -Path $regPath -Name "PendingUnregister" -ErrorAction SilentlyContinue
+    }
+}
+
+Invoke-PasskeyPluginUnregister -PackageNames $packageNames
 $removeAppxCommand = Get-Command Remove-AppxPackage -ErrorAction Stop
 $removeAppxArgs = @{ ErrorAction = "Stop" }
 if (-not $Purge) {
