@@ -78,6 +78,11 @@ const CAMERA_WARMUP_READY_FRAMES: usize = 10;
 // 并抑制预热（关指示灯、省电），直到收到 run 或 release。
 const PREWARM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const WORKER_ARG: &str = "--facewinunlock-worker";
+/// UI（录入 / 一致性校验 / 预览）请求让位摄像头后，抑制预热 + 自动开摄像头的兜底时长（毫秒）。
+/// UI 发 "ui_release" 时把 `camera_yield_until` 设为 now+此值，发 "ui_done"(stop_camera) 时清零。
+/// 修复「录入采集黑屏」——后台预热(prewarm)占着摄像头时 UI open_camera 抢不到、只出黑帧；
+/// 兜底超时应对 UI 崩溃未发 ui_done（超时后自动恢复预热，不影响秒解锁）。
+const UI_CAMERA_YIELD_FALLBACK_MS: i64 = 60_000;
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
 
@@ -113,6 +118,10 @@ struct State {
     /// 0 表示无冷却。冷却解决 credentialuibroker.exe 每次请求
     /// 创建新进程导致 DLL 端 static 变量归零的问题。
     after_release_cooldown_until: AtomicI64,
+    /// UI 让位摄像头的截止时间（Unix 毫秒）。UI 录入 / 一致性校验 / 预览前发 "ui_release"
+    /// 设为 now + UI_CAMERA_YIELD_FALLBACK_MS，发 "ui_done" 清零。> now 时后台不预热、不自动
+    /// 开摄像头，把摄像头让给 UI，修复录入采集黑屏（UI 与后台服务争抢同一摄像头）。
+    camera_yield_until: AtomicI64,
     /// 浏览器 passkey assertion 的一次性人脸授权门。
     passkey_face_gate: Arc<passkey::FaceAuthorizationGate>,
 }
@@ -135,6 +144,7 @@ impl State {
             last_successful_unlock_at: AtomicI64::new(0),
             consecutive_failures: AtomicU32::new(0),
             after_release_cooldown_until: AtomicI64::new(0),
+            camera_yield_until: AtomicI64::new(0),
             passkey_face_gate: Arc::new(passkey::FaceAuthorizationGate::default()),
         })
     }
@@ -548,6 +558,27 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                     state.recognition_active.store(false, Ordering::SeqCst);
                     state.release_requested.store(true, Ordering::SeqCst);
                     *state.matched_creds.lock().unwrap() = None;
+                }
+                "ui_release" => {
+                    // UI（录入 / 一致性校验 / 预览）要用摄像头：立即释放后台占用，并在兜底窗口内
+                    // 抑制预热，把摄像头让给 UI，修复录入采集黑屏（与后台服务争抢同一摄像头）。
+                    log_service(&state.exe_dir, "INFO", "received ui_release, yielding camera to UI");
+                    state.run_requested.store(false, Ordering::SeqCst);
+                    state.recognition_active.store(false, Ordering::SeqCst);
+                    state.release_requested.store(true, Ordering::SeqCst);
+                    *state.matched_creds.lock().unwrap() = None;
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    state
+                        .camera_yield_until
+                        .store(now_ms + UI_CAMERA_YIELD_FALLBACK_MS, Ordering::SeqCst);
+                }
+                "ui_done" => {
+                    // UI 用完摄像头（stop_camera）：解除让位，允许预热恢复（不影响秒解锁）。
+                    log_service(&state.exe_dir, "INFO", "received ui_done, resuming camera prewarm");
+                    state.camera_yield_until.store(0, Ordering::SeqCst);
                 }
                 "broker_release" => {
                     log_service(&state.exe_dir, "INFO", "received broker_release command, closing camera with cooldown");
@@ -1429,6 +1460,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 && !pending
                 && !recognizing
                 && !broker_cooldown
+                // UI 正用摄像头（录入/预览）时不预热，把摄像头让给 UI，修复录入采集黑屏。
+                && now_ms >= state.camera_yield_until.load(Ordering::SeqCst)
                 && state.consecutive_failures.load(Ordering::SeqCst) == 0
                 // 有关闭/释放请求待处理时不启动预热打开（open_configured_camera 阻塞 2-3s）：
                 // 让主循环尽快在下一轮响应 should_exit/release，避免关机/解锁被这次预热拖 2-3s。
@@ -1831,6 +1864,15 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
 
         // 空闲超时，且没有正在进行的解锁请求（避免冲突）
         if state.run_requested.load(Ordering::SeqCst) { continue; }
+
+        // UI 正用摄像头（录入/预览）时不开摄像头做在场检测，把摄像头让给 UI（防抢占黑屏）。
+        {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            if now_ms < state.camera_yield_until.load(Ordering::SeqCst) { continue; }
+        }
 
         // 加载模型（仅首次）
         if models.is_none() {

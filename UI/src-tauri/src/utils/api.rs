@@ -171,7 +171,10 @@ pub fn get_camera() -> Result<CustomResult, CustomResult> {
     // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
     // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
 
-    match get_windows_video_devices() {
+    // 列举摄像头前先请求后台让出摄像头，使 is_camera_index_valid 探测准确（否则被后台预热占用的
+    // 真实摄像头会被误标为不可用）；探测完发 ui_done 立即解除让位，避免长时间抑制秒解锁预热。
+    notify_unlock_camera("ui_release");
+    let result = match get_windows_video_devices() {
         Ok(devices) => {
             let valid_cameras: Vec<ValidCameraInfo> = devices
                 .into_iter()
@@ -190,6 +193,18 @@ pub fn get_camera() -> Result<CustomResult, CustomResult> {
             Some(format!("获取摄像头列表失败: {e}")),
             None,
         )),
+    };
+    notify_unlock_camera("ui_done");
+    result
+}
+
+// 向 Unlock 后台服务发送摄像头协调命令：
+//   "ui_release" — UI 要用摄像头，请后台立即释放并在兜底窗口内不再预热（让位给 UI）；
+//   "ui_done"    — UI 用完摄像头（stop_camera），后台可恢复锁屏预热（秒解锁）。
+// 非致命：服务未运行 / 管道连接失败均忽略。
+fn notify_unlock_camera(cmd: &str) {
+    if let Ok(client) = Client::new(r"\\.\pipe\MansonWindowsUnlockRustUnlock") {
+        let _ = crate::utils::pipe::write(client.handle, String::from(cmd));
     }
 }
 
@@ -199,6 +214,11 @@ pub fn open_camera(
     backend: Option<CameraBackend>,
     camear_index: i32,
 ) -> Result<CustomResult, CustomResult> {
+    // 先请求 Unlock 后台服务让出摄像头：锁屏预热(prewarm) / 自动锁屏在场检测可能正占着摄像头，
+    // 不让位会导致 UI open_camera 抢不到、录入采集只出黑帧（用户反馈：无脸时锁屏走开→鼠标触发
+    // 识别→PIN 解锁后摄像头常亮期间录入黑屏）。ui_release 让后台立即释放并在兜底窗口内不再预热。
+    notify_unlock_camera("ui_release");
+
     // 按指定后端或依次尝试 MSMF → DShow → Any
     let backends_to_try: Vec<CameraBackend> = match backend {
         Some(b) => vec![b],
@@ -209,20 +229,29 @@ pub fn open_camera(
         ],
     };
 
+    // 后台释放摄像头可能需 ~几百 ms 到 ~3s（若它正卡在 open_configured_camera 的 2-3s 打开中），
+    // 故在此重试打开直到成功或超时：单访问摄像头被占用时 try_open 会失败，后台释放后即成功。
     let mut last_err = String::from("无可用摄像头后端");
-    for b in backends_to_try {
-        match try_open_camera_with_backend(b, camear_index) {
-            Ok(cam) => {
-                let mut state = APP_STATE.lock().map_err(|e| {
-                    CustomResult::error(Some(format!("获取 app 状态失败: {}", e)), None)
-                })?;
-                state.camera = Some(OpenCVResource { inner: cam });
-                return Ok(CustomResult::success(None, None));
-            }
-            Err(e) => {
-                last_err = e.to_string();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        for b in backends_to_try.iter().copied() {
+            match try_open_camera_with_backend(b, camear_index) {
+                Ok(cam) => {
+                    let mut state = APP_STATE.lock().map_err(|e| {
+                        CustomResult::error(Some(format!("获取 app 状态失败: {}", e)), None)
+                    })?;
+                    state.camera = Some(OpenCVResource { inner: cam });
+                    return Ok(CustomResult::success(None, None));
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                }
             }
         }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
     }
 
     Err(CustomResult::error(Some(last_err), None))
@@ -231,10 +260,14 @@ pub fn open_camera(
 // 关闭摄像头
 #[tauri::command]
 pub fn stop_camera() -> Result<CustomResult, CustomResult> {
-    let mut app_state = APP_STATE
-        .lock()
-        .map_err(|e| CustomResult::error(Some(format!("获取app状态失败 {}", e)), None))?;
-    app_state.camera = None;
+    {
+        let mut app_state = APP_STATE
+            .lock()
+            .map_err(|e| CustomResult::error(Some(format!("获取app状态失败 {}", e)), None))?;
+        app_state.camera = None;
+    }
+    // 通知 Unlock 后台服务：UI 已用完摄像头，可解除让位、恢复锁屏预热（秒解锁）。
+    notify_unlock_camera("ui_done");
     Ok(CustomResult::success(None, None))
 }
 
