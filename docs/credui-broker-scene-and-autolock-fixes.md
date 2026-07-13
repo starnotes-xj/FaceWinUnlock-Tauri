@@ -19,12 +19,13 @@
 1. **Windows 设置里启用 Passkey 插件、输入 PIN 后卡死**（输入 PIN 时键盘被拦、动画遮挡）。
 2. **Chrome 用通行密钥登录、选「Windows 原生 Hello」时，移动鼠标/敲键盘触发人脸识别**，
    摄像头乱亮、无法正常输 PIN。
-3. 但 **Chrome 查看已保存密码必须走人脸**。
+3. 但 **Chrome 查看已保存密码必须走人脸**；网页登录框里**填充已保存密码**也需要可选覆盖。
 
 期望行为：
 | 场景 | 走人脸？ |
 |---|---|
 | Chrome 查看密码 | ✅ 要 |
+| Chrome / Edge 网页内填充保存密码 | ✅ 要（默认 `CREDUI_BROWSER_PASSWORD_FILL=1`） |
 | 通行密钥选「使用插件」 | ✅ 要（走插件独立通道 `passkey_face_gate`，本来就走） |
 | 通行密钥选「Windows 原生 Hello」 | ❌ 不要 |
 | 设置启用插件输 PIN | ❌ 不要 |
@@ -55,25 +56,62 @@
 > 而那次修复**只验证了首次成功、没验证重试**，所以同一症状反复回归。**改 broker 代码后必须
 > 验证"连续重试"和"四个场景各一遍"，不能只验证 happy path。**
 
-### 最终方案（已验证）：读「触发应用窗口标题」分类
+### 最终方案（2026-07-13）：WebAuthn 活动守卫 + Win32 owner 上下文
 
-**关键洞察**：broker 弹窗（`GetForegroundWindow`）本身无区分信息，但它的**所有者窗口**
-（`GW_OWNER` / `GA_ROOTOWNER`）就是**触发它的应用**（Chrome / 设置），其标题直接说明用户意图。
-而且这是用 `GetWindowTextW` 读**应用进程**的窗口（非受限），能稳定读到——
-**不像 broker 进程内 UIA COM 被封**。
+窗口标题能识别明确的“密码管理器”或“通行密钥”文本，但 QQ 邮箱填充只暴露普通网页标题，
+不能把“无 passkey 关键词”直接等同于密码。最终方案使用两个互补信号，全程不检查 broker 内部控件：
 
-实现：`Server/src/lib.rs` 的 `classify_broker_scene()` + `CSampleProvider::SetUsageScenario`：
+1. `Unlock/src/webauthn_activity.rs` 使用 Windows Event Log API 订阅
+   `Microsoft-Windows-WebAuthN/Operational`。1000/1003/1006 表示顶层事务开始，
+   1001–1002/1004–1005/1007–1008 表示结束，以 TransactionId 维护活动集合。
+2. 监视器先订阅、再回放最近十分钟，并校验 channel、provider 和 1000–1008 元数据。
+   健康和活动状态通过只读命名事件 `FaceWinUnlockTauriWebAuthnReady/Active` 暴露。
+3. DLL 收集前台、owner、root-owner 的标题和进程名。`dwflags` 只记录诊断，不参与意图判定。
+4. 分类优先级固定为：Active WebAuthn → passkey/security-key/PIN/settings 明确信号 →
+   Settings/BioEnrollmentHost/Incognito/InPrivate → 明确 password/reveal/fill → Unknown browser fallback。
+5. Unknown 只有在 owner 是 `chrome.exe`/`msedge.exe`、监视器 Ready、非 Active、非隐私窗口，
+   且 `CREDUI_BROWSER_PASSWORD_FILL=1` 时才能走人脸；其它情况返回 `E_NOTIMPL`。
+6. `SetUsageScenario`、`Advise` 和发送 `prepare/run` 前都会复查 Active。若事务中途变为
+   WebAuthn，只停止通用 broker 识别，不取消官方 Passkey 插件自己的 `passkey_face_gate`。
 
-1. `GetForegroundWindow` → 读它 + `GW_OWNER` + `GA_ROOTOWNER` 三个窗口标题，拼接小写。
-2. 关键词分类（**passkey 优先**，因为"通行密钥"含"密钥"但绝不含"密码"，与"密码管理工具"无交集）：
-   - 含 `通行密钥`/`passkey`/`安全密钥`/`security key`/`证实是您本人`/`确保是你本人` → **Passkey**
-   - 含 `密码`/`password` → **Password**
-   - 否则 → **Unknown**
-3. `SetUsageScenario` 中只有 `Password` 启用人脸；`Passkey`/`Unknown` 一律 `return Err(E_NOTIMPL)`，
-   本 Provider **完全不参与**——不启动监听、不装输入 Hook、不创建动画、摄像头不亮，交还 Windows
-   原生 PIN/Hello。
+监视器缺失、channel 被禁用或未来 Windows 事件契约变化时，Unknown 浏览器场景安全降级为
+Windows PIN；明确的查看/显示/填充密码文本仍可走人脸。
 
-这样一次满足全部需求：查看密码走人脸、通行密钥选原生不触发、设置 PIN 不卡死、不需要时不乱触发。
+### 根因订正（2026-07-13 实测日志）——填充密码走不了人脸的真凶
+
+用 v0.5.9-webauthn-guard 测试包实测 `unlock.log` + `facewinunlock.log`，发现监视器**从未真正工作**，
+QQ 邮箱填密码全部落到 `MonitorUnavailable → 跳过人脸`。根因两点，都已修复：
+
+1. **`TransactionId` 是 GUID 变体（`EvtVarTypeGuid`=15），不是字符串**。`webauthn_activity.rs`
+   的 `variant_string` 只认 `EvtVarTypeString` → 每次收到真实 CTAP 事件就报
+   `unexpected string variant type 15` → 回调标记 `unhealthy` → `Ready` 事件被 Reset →
+   DLL 读到 `webauthn_ready=false` → 浏览器填密码一律回退 PIN。**这是"填密码没走人脸"的真凶**，
+   不是分类逻辑问题。修复：`variant_string` 增加 GUID 分支，手写格式化成规范 GUID 字符串作事务键
+   （started/completed 同一事务产生一致键）。已加回归单测
+   `transaction_id_guid_variant_parses_to_canonical_string`。
+
+2. **实测事件语义**（`Get-WinEvent 'Microsoft-Windows-WebAuthN/Operational'`）：
+   - `1000/1001/1002` = **Ctap MakeCredential**（创建/保存 passkey）开始/完成/失败
+   - `1003/1004/1005` = **Ctap GetAssertion**（passkey 登录）开始/完成/失败
+   - `1006/1007/1008` = **Ctap SendCommand** 开始/完成/失败
+   - 这些才是"需要用户验证（UV）的顶层 passkey 事务"，`active` 判定**只该看它们**。
+   - `2100/2102`（含 `Command=GetAllPlatformCredentials`）是底层 API 枚举，**填充密码也会触发**，
+     绝不能计入 `active`（否则填密码被误判 passkey）。监视器只订阅 1000–1008 是对的。
+   - 时间线验证：填密码 broker 弹窗时，最近的 GetAssertion 已 completed（`active=false`）→ 人脸；
+     真 passkey 的 broker UV 弹窗发生在 GetAssertion started 未 completed 期间（`active=true`）→ 跳过。
+
+### 不靠标题名单的重构（2026-07-13）
+
+监视器修好后 `webauthn_active` 成为**可靠的、非本地化文本**的 passkey 信号，`classify_broker_context`
+据此重构，**正常路径完全不看标题关键词**：
+
+- **监视器 Ready（常态）**：`active=true` → Passkey 跳过；`active=false` + owner 是浏览器 + 非私密
+  → `BrowserPasswordFill` 走人脸。**不检查任何标题关键词**——这才真正解决 QQ 邮箱/任意语言登录页。
+- owner 进程 `SystemSettings.exe`/`BioEnrollmentHost.exe` → PinOrSettings 跳过（结构信号，非标题）。
+- **标题关键词名单降级为兜底**：仅在监视器 **不可用**（Ready=false，启动窗口/通道禁用/异常）时才用
+  `PASSKEY/PIN/PASSWORD/PASSWORD_FILL_KEYWORDS` 保守判定，避免把进行中的 passkey 误引到人脸。
+- 回归单测 `ready_monitor_lets_browser_fill_use_face_without_title_keywords`（QQ 邮箱 Ready 场景）
+  与 `active_ctap_transaction_skips_face_even_on_plain_login_page`（同页 active 时跳过）固化该语义。
 
 ### 实证日志（2026-06-20 验证通过）
 
@@ -98,16 +136,27 @@
 
 ### 防回归清单（改 broker / CREDUI 代码前必读）
 
-- ❌ **不要**用 `cpus` / `dwflags` / 进程名 / 前台窗口本身区分这三个场景——实测全同构。
+- ❌ **不要**只用 `cpus` / `dwflags` / 单一进程名 / 前台窗口本身区分场景——实测不足。
 - ❌ **不要**在 broker 进程内用 UIA COM（`CoCreateInstance`）——被封，死路。
+- ❌ **不要**恢复任何 PIN 键盘注入、窗口控件定位或自动提交方案。
 - ❌ **不要**让 broker「无条件先人脸超时回退」——会拦 passkey/设置 PIN 的键盘输入、动画遮挡、摄像头乱亮。
 - ❌ **不要**用「按时间冷却拒绝 run」抑制重复触发——必然死亡螺旋，永久锁死查看密码人脸。
-- ✅ 区分**只能**靠 `classify_broker_scene()` 读触发应用的窗口标题。
+- ✅ WebAuthn Active 是强否决信号；Unknown fallback 必须要求监视器 Ready。
+- ✅ 网页内填充保存密码默认走 `CREDUI_BROWSER_PASSWORD_FILL=1`，且 owner 必须是 Chrome/Edge。
+- ✅ `webauthn` / `fido2` / `save passkey` 属于保存通行密钥注册流，必须在浏览器 Unknown fallback 前跳过。
 - ✅ 通行密钥选「使用插件」走的是 `passkey_face_gate`（Unlock 独立 HTTP/管道通道），与 face CP broker **无关**，不要混。
 - ✅ 改 `classify_broker_scene` 关键词后，**必须看日志**确认四个场景（查看密码/通行密钥/设置PIN/登录）分类正确。
 - ✅ **英文或其它语言 Chrome 标题不同**（如 "Password Manager" / "passkey"），需补关键词；
   日志会打印 `前台窗口标题: "..."`，照着补即可。
 - ✅ 改完务必验证「连续重试」+「四场景各一遍」，不要只验证首次成功。
+- ✅ **WebAuthn 事件的 `TransactionId` 渲染为 GUID 变体（`EvtVarTypeGuid`=15），不是字符串**——
+  `variant_string` **必须**支持 GUID 分支，否则监视器一收到真实 passkey 事件就崩溃、Ready 被清、
+  填密码永远回退 PIN（2026-07-13 实测根因）。改 `webauthn_activity.rs` 解析层后必须跑
+  `transaction_id_guid_variant_parses_to_canonical_string`。
+- ✅ **`active` 只看 1000–1008（CTAP MakeCredential/GetAssertion/SendCommand）**；`2100/2102`
+  的 `GetAllPlatformCredentials` 是枚举、填密码也会触发，**绝不能计入 active**（否则填密码被误判 passkey）。
+- ✅ **监视器 Ready 的正常路径不靠标题名单**：`active=false` + owner 浏览器 → 人脸。标题关键词
+  名单只在监视器 **不可用** 时兜底，不要把它挪回正常路径当主判据。
 
 ---
 
@@ -152,5 +201,5 @@
 
 ## 一句话总结
 
-- **broker 三场景区分**：唯一可靠信号是「触发弹窗的应用窗口标题」（`GetWindowTextW` 读 owner 窗口），不是 dwflags、不是 UIA、不是进程名。
+- **broker 三场景区分**：用 WebAuthn 活动守卫做强否决，再组合明确标题语义、owner 进程、隐私状态和健康开关；禁止 UIA 和 PIN 注入。
 - **自动锁屏闪烁**：人脸识别不重置 OS idle，授权后必须加冷却。

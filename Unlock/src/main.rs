@@ -14,7 +14,7 @@
 
 mod ngc;
 mod passkey;
-mod uia;
+mod webauthn_activity;
 
 use std::{
     ffi::OsStr,
@@ -24,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU32, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -93,6 +93,12 @@ struct State {
     run_requested:    AtomicBool,
     recognition_active: AtomicBool,
     release_requested: AtomicBool,
+    /// Stops only generic broker recognition. Official passkey-plugin face
+    /// authorization must remain available while this flag is set.
+    broker_guard_release_requested: AtomicBool,
+    /// Monotonic cancellation generation for already-connected generic broker
+    /// credential handlers. New connections capture the latest generation.
+    broker_guard_release_generation: AtomicU64,
     /// DLL 在 MansonWindowsUnlockRustUnlock 上等待凭据的连接句柄（raw isize）
     dll_creds_pipe:   AtomicIsize,
     /// 人脸匹配到的 (username, password, domain)。所有场景统一只交密码（Approach B）。
@@ -136,6 +142,8 @@ impl State {
             run_requested:   AtomicBool::new(false),
             recognition_active: AtomicBool::new(false),
             release_requested: AtomicBool::new(false),
+            broker_guard_release_requested: AtomicBool::new(false),
+            broker_guard_release_generation: AtomicU64::new(0),
             dll_creds_pipe:  AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize),
             matched_creds:   Mutex::new(None),
             last_user_active: AtomicI64::new(now),
@@ -317,7 +325,7 @@ fn acquire_single_instance_mutex(exe_dir: &Path) -> Option<HANDLE> {
     )
 }
 
-fn log_service(exe_dir: &Path, level: &str, message: &str) {
+pub(crate) fn log_service(exe_dir: &Path, level: &str, message: &str) {
     let logs_dir = exe_dir.join("logs");
     let _ = create_dir_all(&logs_dir);
     let log_path = logs_dir.join("unlock.log");
@@ -599,6 +607,22 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                     log_service(&state.exe_dir, "INFO", &format!(
                         "broker release cooldown set for {}ms", cooldown_ms));
                 }
+                "broker_guard_release" => {
+                    log_service(
+                        &state.exe_dir,
+                        "INFO",
+                        "received WebAuthn guard release; stopping generic broker recognition",
+                    );
+                    state.run_requested.store(false, Ordering::SeqCst);
+                    state.recognition_active.store(false, Ordering::SeqCst);
+                    state
+                        .broker_guard_release_requested
+                        .store(true, Ordering::SeqCst);
+                    state
+                        .broker_guard_release_generation
+                        .fetch_add(1, Ordering::SeqCst);
+                    *state.matched_creds.lock().unwrap() = None;
+                }
                 cmd if cmd.starts_with("pin:") => {
                     // Hello PIN NGC 解密请求：pin:<username>:<PIN>
                     let payload = &cmd[4..]; // 去掉 "pin:" 前缀
@@ -654,6 +678,9 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
         // 自己的 pipe（被替换者经下方 `dll_creds_pipe != pipe` 检测到后 break，并在
         // 函数末尾 close）。否则并发多客户端时同一句柄会被重复关闭，甚至在句柄值被
         // OS 重用后误关无关对象。
+        let guard_generation = state
+            .broker_guard_release_generation
+            .load(Ordering::SeqCst);
         state.dll_creds_pipe.store(pipe.0 as isize, Ordering::SeqCst);
         log_service(&state.exe_dir, "INFO", "credential client connected");
 
@@ -668,6 +695,26 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
             if state.should_exit.load(Ordering::SeqCst) { break; }
             if state.release_requested.load(Ordering::SeqCst) { break; }
             if state.dll_creds_pipe.load(Ordering::SeqCst) != pipe.0 as isize { break; }
+            if state
+                .broker_guard_release_generation
+                .load(Ordering::SeqCst)
+                != guard_generation
+            {
+                break;
+            }
+
+            // A DLL client can disconnect while no credentials are ready. Without
+            // probing the pipe, the session stays latched forever and suppresses
+            // auto-lock/prewarm state transitions.
+            let mut available = 0u32;
+            if unsafe {
+                PeekNamedPipe(pipe, None, 0, None, Some(&mut available), None)
+            }
+            .is_err()
+            {
+                log_service(&state.exe_dir, "INFO", "credential client disconnected");
+                break;
+            }
 
             let creds = state.matched_creds.lock().unwrap().take();
             if let Some((username, password, domain)) = creds {
@@ -1227,6 +1274,28 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     'main: loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
 
+        if state
+            .broker_guard_release_requested
+            .swap(false, Ordering::SeqCst)
+        {
+            state.run_requested.store(false, Ordering::SeqCst);
+            state.recognition_active.store(false, Ordering::SeqCst);
+            *state.matched_creds.lock().unwrap() = None;
+            cam = None;
+            prewarm_at = None;
+            // 关键：抑制预热（=true，而非 false）。WebAuthn 守卫释放意味着当前正在走
+            // 原生 passkey——此时若解除预热抑制，且 DLL 凭据连接尚未断开（has_credential_client
+            // 仍为 true）、broker_guard_release 又不设冷却，下方预热块会立刻重新打开摄像头、
+            // 在 passkey 进行中点亮指示灯（M1），与本特性「passkey 时不亮摄像头」的目标相悖。
+            // 抑制到下次真正的 release / 成功识别再解除。
+            prewarm_suppressed = true;
+            log_service(
+                &exe_dir,
+                "INFO",
+                "generic broker recognition cancelled by WebAuthn guard",
+            );
+        }
+
         if state.release_requested.swap(false, Ordering::SeqCst) {
             state.passkey_face_gate.reject_pending();
             cam = None;
@@ -1616,7 +1685,12 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
         while no_face_retries < MAX_NO_FACE_RETRIES {
             if state.should_exit.load(Ordering::SeqCst)
-                || state.release_requested.load(Ordering::SeqCst) { break; }
+                || state.release_requested.load(Ordering::SeqCst)
+                || (passkey_request_id.is_none()
+                    && state.broker_guard_release_requested.load(Ordering::SeqCst))
+            {
+                break;
+            }
 
             // 每轮重新获取 cam 引用（块结束后 borrow 自动释放，允许后续 cam = None）
             // 首轮使用已打开的 cam，重试轮从重新打开的 cam 获取
@@ -1634,7 +1708,12 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 let mut no_face_since: Option<Instant> = None;
                 while Instant::now() < hard_deadline {
                     if state.should_exit.load(Ordering::SeqCst)
-                        || state.release_requested.load(Ordering::SeqCst) { break; }
+                        || state.release_requested.load(Ordering::SeqCst)
+                        || (passkey_request_id.is_none()
+                            && state.broker_guard_release_requested.load(Ordering::SeqCst))
+                    {
+                        break;
+                    }
                     let mut frame = Mat::default();
                     if cap.read(&mut frame).is_err() || frame.empty() {
                         let since = no_face_since.get_or_insert_with(Instant::now);
@@ -1722,6 +1801,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             set_brightness(orig);
         }
 
+        let broker_guard_cancelled = passkey_request_id.is_none()
+            && state
+                .broker_guard_release_requested
+                .swap(false, Ordering::SeqCst);
+
         if let Some(request_id) = passkey_request_id {
             if matched {
                 if state.passkey_face_gate.authorize(request_id) {
@@ -1732,6 +1816,14 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             } else if state.passkey_face_gate.reject(request_id) {
                 log_service(&exe_dir, "WARN", "passkey face authorization rejected");
             }
+        } else if broker_guard_cancelled {
+            state.run_requested.store(false, Ordering::SeqCst);
+            *state.matched_creds.lock().unwrap() = None;
+            log_service(
+                &exe_dir,
+                "INFO",
+                "generic broker recognition stopped before credential submission",
+            );
         } else {
             if matched {
                 insert_unlock_log(&db_path, &exe_dir, matched_face_id, true, None);
@@ -1977,12 +2069,109 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         } else {
             // 无人或非授权人员 → 锁屏，清空授权冷却（锁屏后下次需重新识别）
             log_service(&exe_dir, "INFO", "auto-lock: no authorized face, locking workstation");
-            let _ = unsafe { LockWorkStation() };
             auth_cooldown_until = None;
-            // 锁屏后等 5 秒再继续检查
-            thread::sleep(Duration::from_secs(5));
+            // LockWorkStation 是异步"请求"且可能静默失败（返回错误、组策略
+            // DisableLockWorkstation 禁锁等）。旧实现忽略返回值也不验证结果（issue #27：
+            // 日志已写 "locking workstation" 但电脑没锁），失败后 5s 一轮的复查循环
+            // 每 7-8 秒开一次摄像头死循环。现在：检查返回值 + 轮询输入桌面确认真锁上，
+            // 最多重试 3 次；仍失败写 ERROR 日志并退避 60s。
+            let mut locked = false;
+            for attempt in 1..=3u32 {
+                if let Err(e) = unsafe { LockWorkStation() } {
+                    log_service(&exe_dir, "WARN", &format!(
+                        "auto-lock: LockWorkStation failed (attempt {attempt}): {e:?}"
+                    ));
+                }
+                // 锁定请求异步生效：轮询输入桌面最多 2s 确认已切到 secure desktop
+                for _ in 0..10 {
+                    thread::sleep(Duration::from_millis(200));
+                    if is_workstation_locked() { locked = true; break; }
+                }
+                if locked { break; }
+                log_service(&exe_dir, "WARN", &format!(
+                    "auto-lock: workstation still unlocked after attempt {attempt}"
+                ));
+            }
+            if locked {
+                log_service(&exe_dir, "INFO", "auto-lock: workstation locked");
+                // 锁屏后等 5 秒再继续检查
+                thread::sleep(Duration::from_secs(5));
+            } else {
+                let hint = if lock_workstation_disabled_by_policy() {
+                    "; DisableLockWorkstation policy is set — Windows forbids locking on this system"
+                } else {
+                    ""
+                };
+                log_service(&exe_dir, "ERROR", &format!(
+                    "auto-lock: failed to lock workstation after 3 attempts{hint}; next attempt in 60s"
+                ));
+                // 复用授权冷却做失败退避，避免每 7-8s 开摄像头复查的死循环
+                auth_cooldown_until = Some(Instant::now() + Duration::from_secs(60));
+            }
         }
     }
+}
+
+/// 当前输入桌面是否已切离 "Default"（锁定后为 Winlogon secure desktop）。
+/// 打不开输入桌面（锁定状态下常见 ACCESS_DENIED）也视为已锁定。
+fn is_workstation_locked() -> bool {
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, UOI_NAME,
+        DESKTOP_READOBJECTS, DESKTOP_CONTROL_FLAGS,
+    };
+    unsafe {
+        let desk = match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) {
+            Ok(d) => d,
+            Err(_) => return true,
+        };
+        let mut name = [0u16; 64];
+        let mut needed = 0u32;
+        let ok = GetUserObjectInformationW(
+            HANDLE(desk.0),
+            UOI_NAME,
+            Some(name.as_mut_ptr() as *mut _),
+            (name.len() * 2) as u32,
+            Some(&mut needed),
+        )
+        .is_ok();
+        let _ = CloseDesktop(desk);
+        if !ok {
+            return true;
+        }
+        let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+        !String::from_utf16_lossy(&name[..end]).eq_ignore_ascii_case("default")
+    }
+}
+
+/// 组策略是否禁用了工作站锁定（HKCU/HKLM ...\Policies\System\DisableLockWorkstation=1）。
+/// 优化工具/精简系统常设此策略，是 LockWorkStation 静默失败的常见原因（issue #27 诊断提示）。
+fn lock_workstation_disabled_by_policy() -> bool {
+    use windows::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD,
+    };
+    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\0"
+        .encode_utf16()
+        .collect();
+    let value: Vec<u16> = "DisableLockWorkstation\0".encode_utf16().collect();
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let mut data: u32 = 0;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                PCWSTR(subkey.as_ptr()),
+                PCWSTR(value.as_ptr()),
+                RRF_RT_REG_DWORD,
+                None,
+                Some(&mut data as *mut u32 as *mut std::ffi::c_void),
+                Some(&mut size),
+            )
+        };
+        if status.is_ok() && data == 1 {
+            return true;
+        }
+    }
+    false
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
@@ -2035,6 +2224,10 @@ fn run_service_worker(exe_dir: PathBuf) -> i32 {
 
     let s4 = state.clone();
     thread::spawn(move || run_passkey_face_server(s4));
+
+    let s5 = state.clone();
+    let dir3 = exe_dir.clone();
+    thread::spawn(move || webauthn_activity::run(s5, dir3));
 
     face_recognition_loop(state, exe_dir);
     0
@@ -2130,7 +2323,7 @@ fn main() {
 
     // ── NGC 解密链 Smoke Test（CLI 模式）────────────────────────────
     let args: Vec<String> = std::env::args().collect();
-    let is_cli_mode = args.iter().any(|a| a == "--ngc-smoke-test" || a == "--ngc-probe" || a == "--ngc-dump" || a == "--ngc-keys" || a == "--ngc-enum-cng" || a == "--ngc-sign-probe" || a == "--ngc-container-dump" || a == "--ngc-srk" || a == "--ngc-ncrypt" || a == "--ngc-ncrypt-vault" || a == "--ngc-ncrypt-export" || a == "--ngc-dump-enc" || a == "--ngc-cbor-deep-dump" || a == "--ngc-phase1" || a == "--ngc-phase1-path-a" || a == "--ngc-probe-derive" || a == "--uia-dump-credui" || a == "--uia-dump-all" || a == "--uia-autofill-pin" || a == "--uia-blind-inject" || a == "--pin-save");
+    let is_cli_mode = args.iter().any(|a| a == "--ngc-smoke-test" || a == "--ngc-probe" || a == "--ngc-dump" || a == "--ngc-keys" || a == "--ngc-enum-cng" || a == "--ngc-sign-probe" || a == "--ngc-container-dump" || a == "--ngc-srk" || a == "--ngc-ncrypt" || a == "--ngc-ncrypt-vault" || a == "--ngc-ncrypt-export" || a == "--ngc-dump-enc" || a == "--ngc-cbor-deep-dump" || a == "--ngc-phase1" || a == "--ngc-phase1-path-a" || a == "--ngc-probe-derive" || a == "--pin-save");
 
     // windows_subsystem="windows" → 无控制台。CLI 结果全量写入文件。
     let cli_out_path: Option<std::path::PathBuf> = if is_cli_mode {
@@ -2190,71 +2383,6 @@ fn main() {
                 Err(e) => cli_println!(&cli_out_path, "  枚举失败: {}", e),
             }
         }
-        cli_done(cli_out_path.as_ref().unwrap(), true);
-    }
-
-    if args.iter().any(|a| a == "--uia-dump-all") {
-        // 无差别 dump 所有顶层窗口的 UIA 信息（不筛选凭据框）。
-        // 用于诊断 Hello PIN 框的真实窗口结构。
-        cli_println!(&cli_out_path, "=== UIA 全窗口 Dump (EnumWindows + ElementFromHandle) ===");
-        for line in uia::dump_all_windows() {
-            cli_println!(&cli_out_path, "{}", line);
-        }
-        cli_done(cli_out_path.as_ref().unwrap(), true);
-    }
-
-    if args.iter().any(|a| a == "--uia-dump-credui") {
-        // 探测并 dump 凭据/Hello PIN 对话框的 UIA 树，拿准确选择器。
-        // 用法: --uia-dump-credui [超时秒，默认30]。请在此期间触发"查看密码"弹出 PIN 框。
-        let idx = args.iter().position(|a| a == "--uia-dump-credui").unwrap_or(0) + 1;
-        let timeout = args.get(idx).and_then(|s| s.parse::<u64>().ok()).unwrap_or(30);
-        cli_println!(&cli_out_path, "=== UIA 凭据对话框探测 (timeout={}s) ===", timeout);
-        for line in uia::dump_credential_dialogs(timeout) {
-            cli_println!(&cli_out_path, "{}", line);
-        }
-        cli_done(cli_out_path.as_ref().unwrap(), true);
-    }
-
-    if args.iter().any(|a| a == "--uia-autofill-pin") {
-        // 自动填充 PIN 到凭据对话框并提交（须提升/管理员 完整性运行）。
-        // 用法: --uia-autofill-pin <PIN> [超时秒，默认30]
-        let idx = args.iter().position(|a| a == "--uia-autofill-pin").unwrap_or(0) + 1;
-        let pin = args.get(idx).map(|s| s.as_str()).unwrap_or("");
-        let timeout = args.get(idx + 1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(30);
-        cli_println!(&cli_out_path, "=== UIA 自动填充 PIN (timeout={}s) ===", timeout);
-        if pin.is_empty() {
-            cli_println!(&cli_out_path, "用法: --uia-autofill-pin <PIN> [超时秒]");
-            cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-        match uia::autofill_pin(pin, timeout) {
-            Ok(msg) => { cli_println!(&cli_out_path, "✅ {}", msg); cli_done(cli_out_path.as_ref().unwrap(), true); }
-            Err(e) => { cli_println!(&cli_out_path, "❌ {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        }
-    }
-
-    if args.iter().any(|a| a == "--uia-blind-inject") {
-        // 盲打 SendInput：不依赖 UIA 定位窗口，延时后直接发送 PIN + Enter。
-        // 用法: --uia-blind-inject <PIN> [延时秒，默认3]
-        // 运行后立即切到 PIN 框（使其成为前台窗口），按键会自然进入。
-        let idx = args.iter().position(|a| a == "--uia-blind-inject").unwrap_or(0) + 1;
-        let pin = args.get(idx).map(|s| s.as_str()).unwrap_or("");
-        let delay = args.get(idx + 1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(3.0);
-        cli_println!(&cli_out_path, "=== 盲打 SendInput PIN 注入 (delay={delay}s) ===");
-        if pin.is_empty() {
-            cli_println!(&cli_out_path, "用法: --uia-blind-inject <PIN> [延时秒]");
-            cli_println!(&cli_out_path, "示例: --uia-blind-inject 123456 5");
-            cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-        cli_println!(&cli_out_path, "将在 {delay}s 后注入 PIN 并回车...");
-        cli_println!(&cli_out_path, "请在此期间切到 PIN 输入框（使其成为前台窗口）");
-        // 实际延时
-        let sleep_ms = (delay * 1000.0) as u64;
-        std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
-        // 盲打 PIN
-        uia::send_keys_digits(pin);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        uia::send_enter();
-        cli_println!(&cli_out_path, "已发送 PIN + Enter");
         cli_done(cli_out_path.as_ref().unwrap(), true);
     }
 

@@ -704,10 +704,68 @@ pub(crate) enum UninstallMode {
 
 const PASSKEY_CREDENTIALS_FILE: &str = "credentials.dat";
 
-/// 包外通行密钥元数据备份目录（per-user 持久，仅 Purge 时清除）。
+/// 当前用户的 per-user 子目录名（sanitized 用户名）。
+/// 备份内容是 DPAPI **per-user** 加密材料，机器级 ProgramData 目录被多个用户共享，
+/// 若不按用户分隔，用户 A、B 会写到同一路径互相覆盖 → A 重装后恢复到 B 的材料、
+/// 用自己的 DPAPI 密钥解不开 → 通行密钥丢失（M2）。用当前登录用户名分隔即可隔离
+///（Windows 本地/登录用户名在同机唯一），并 sanitize 掉路径分隔符等非法字符防穿越。
+fn passkey_backup_user_folder() -> String {
+    let raw = std::env::var("USERNAME").unwrap_or_default();
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // 避免空 / "." / ".." 这类退化名。
+    if cleaned.is_empty() || cleaned.chars().all(|c| c == '.') {
+        "default".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// 包外通行密钥元数据备份目录（per-user 数据、机器级路径 + per-user 子目录，仅 Purge 时清除）。
+/// 位置选 %ProgramData%\facewinunlock-tauri\PasskeyBackup\<user>：Geek Uninstaller 等第三方
+/// 卸载器按应用名清理 %APPDATA%/%LOCALAPPDATA% 下 FaceWinUnlock 残留目录时会把旧位置的备份
+/// 一起删掉（用户实测：Geek 卸载→重装后谷歌账号 passkey 报错，备份没了无从恢复），ProgramData
+/// 下与主程序数据同根的目录不在其常规命中范围。<user> 子目录隔离多用户，避免 DPAPI 材料互相覆盖。
 fn passkey_backup_dir() -> Option<PathBuf> {
+    std::env::var_os("ProgramData").map(|p| {
+        PathBuf::from(p)
+            .join("facewinunlock-tauri")
+            .join("PasskeyBackup")
+            .join(passkey_backup_user_folder())
+    })
+}
+
+/// 旧版（≤0.5.9-rc1）备份位置：%LOCALAPPDATA%\FaceWinUnlock\PasskeyBackup。
+/// 只读兼容 + 迁移；不再写入（Geek 卸载会连目录删掉）。
+fn legacy_passkey_backup_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA")
         .map(|p| PathBuf::from(p).join("FaceWinUnlock").join("PasskeyBackup"))
+}
+
+/// 旧位置备份迁移到新位置（仅新位置缺该文件时复制，best-effort）。
+fn migrate_legacy_passkey_backup() {
+    let (Some(old_dir), Some(new_dir)) = (legacy_passkey_backup_dir(), passkey_backup_dir())
+    else {
+        return;
+    };
+    if !old_dir.exists() {
+        return;
+    }
+    for file in [PASSKEY_CREDENTIALS_FILE, PASSKEY_VAULT_BACKUP_FILE] {
+        let src = old_dir.join(file);
+        let dst = new_dir.join(file);
+        if src.exists() && !dst.exists() && std::fs::create_dir_all(&new_dir).is_ok() {
+            let _ = std::fs::copy(&src, &dst);
+        }
+    }
 }
 
 /// 插件在 MSIX LocalState 下存元数据的目录（与 C++ 端 `PluginCredentialManager` 约定一致）：
@@ -727,6 +785,7 @@ fn passkey_localstate_db_dir(package_family_name: &str) -> Option<PathBuf> {
 
 /// 卸载前把凭据元数据备份到包外（best-effort），兜底 `-PreserveApplicationData` 失效或被清理。
 fn backup_passkey_credentials(package_family_name: &str) -> bool {
+    migrate_legacy_passkey_backup();
     let (Some(db_dir), Some(backup_dir)) = (
         passkey_localstate_db_dir(package_family_name),
         passkey_backup_dir(),
@@ -747,6 +806,7 @@ fn backup_passkey_credentials(package_family_name: &str) -> bool {
 /// 安装/重装后恢复元数据（best-effort）：仅当当前 LocalState 无元数据、而包外备份存在时
 /// 才恢复，避免覆盖 `-PreserveApplicationData` 已保留的数据。
 pub(crate) fn restore_passkey_credentials(package_family_name: &str) -> bool {
+    migrate_legacy_passkey_backup();
     // 「保险库注册表材料」独立恢复：即使 credentials.dat 被 -PreserveApplicationData 保住，注册表也可能
     // 被 Geek 等单独删（issue #3：删注册表后凭据显示但用私钥签名失败）。仅在键缺失时导入，不覆盖有效数据。
     let vault_restored = restore_passkey_vault_registry();
@@ -816,9 +876,9 @@ fn passkey_vault_registry_exists() -> bool {
         .is_ok()
 }
 
-/// 清除包外通行密钥备份（仅 Purge 调用）。
+/// 清除包外通行密钥备份（仅 Purge 调用）；新旧位置都删。
 fn delete_passkey_backup() {
-    if let Some(dir) = passkey_backup_dir() {
+    for dir in [passkey_backup_dir(), legacy_passkey_backup_dir()].into_iter().flatten() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
