@@ -86,12 +86,28 @@ pub fn request_broker_release(reason: &str) {
     }
 }
 
+fn request_broker_guard_release(reason: &str) {
+    info!("CPipeListener - 请求停止通用 broker 人脸识别: {}", reason);
+    use crate::Pipe::{pipe_connect_to_server, pipe_write_raw, PIPE_UNLOCK_NAME};
+    if let Ok(pipe) = pipe_connect_to_server(PIPE_UNLOCK_NAME, 1_000) {
+        let _ = pipe_write_raw(pipe, b"broker_guard_release");
+        unsafe { let _ = CloseHandle(pipe); }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BrokerReleaseMode {
+    TimeoutCooldown,
+    WebAuthnGuard,
+}
+
 fn trigger_broker_pin_fallback(
     shared_creds: &Arc<Mutex<SharedCredentials>>,
     stop_flag: &AtomicBool,
     creds_pipe_raw: &AtomicIsize,
     send_events: &SendableEvents,
     reason: &str,
+    release_mode: BrokerReleaseMode,
 ) {
     let already_fallback = {
         let mut creds = shared_creds.lock().unwrap();
@@ -116,7 +132,10 @@ fn trigger_broker_pin_fallback(
     // 全局标记 + disarm 钩子（路径 A：面容识别超时）
     mark_broker_pin_fallback();
 
-    request_broker_release(reason);
+    match release_mode {
+        BrokerReleaseMode::TimeoutCooldown => request_broker_release(reason),
+        BrokerReleaseMode::WebAuthnGuard => request_broker_guard_release(reason),
+    }
     stop_flag.store(true, Ordering::SeqCst);
 
     let raw = creds_pipe_raw.swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
@@ -373,11 +392,8 @@ impl CPipeListener {
                     return;
                 }
 
-                // Broker CredUI 场景（credentialuibroker.exe）：
-                // 先尝试面容识别，超时后回退 Windows PIN。
-                // 无法精准区分 passkey vs 密码（需 UIA COM 跨进程调用，在
-                // 凭据提供程序沙箱中极易死锁），统一走面容→超时→PIN 路径。
-                // Passkey 场景会因无人脸匹配超时自动回退 PIN。
+                // Broker 已由 WebAuthn 活动守卫和 owner 上下文分类。此处仍在
+                // prepare/run 前复查 Active，覆盖事件订阅与 Provider 生命周期的竞态。
                 if broker_fallback_to_pin {
                     info!("CPipeListener - broker CredUI 场景：先面容，超时回退 PIN");
                 }
@@ -390,6 +406,17 @@ impl CPipeListener {
                 // Client 线程持续运行直到 stop_flag，不依赖 is_unlocked 退出
                 loop {
                     if stop_flag.load(Ordering::SeqCst) { break; }
+                    if broker_fallback_to_pin && crate::is_webauthn_guard_active() {
+                        trigger_broker_pin_fallback(
+                            &shared_creds_for_client,
+                            &stop_flag,
+                            &creds_pipe_raw_for_client,
+                            &send_events_for_client,
+                            "WebAuthn transaction active before pipe connect",
+                            BrokerReleaseMode::WebAuthnGuard,
+                        );
+                        return;
+                    }
 
                     let is_first = first_connect;
                     let timeout: u64 = if is_first { 30_000 } else { 10_000 };
@@ -411,6 +438,19 @@ impl CPipeListener {
                         }
                     };
                     first_connect = false;
+
+                    if broker_fallback_to_pin && crate::is_webauthn_guard_active() {
+                        unsafe { let _ = CloseHandle(pipe); }
+                        trigger_broker_pin_fallback(
+                            &shared_creds_for_client,
+                            &stop_flag,
+                            &creds_pipe_raw_for_client,
+                            &send_events_for_client,
+                            "WebAuthn transaction active before prepare",
+                            BrokerReleaseMode::WebAuthnGuard,
+                        );
+                        return;
+                    }
 
                     if let Err(e) = pipe_write_raw(pipe, b"prepare") {
                         error!("写入 prepare 失败: {:?}", e);
@@ -438,6 +478,18 @@ impl CPipeListener {
                     }
 
                     loop {
+                        if broker_fallback_to_pin && crate::is_webauthn_guard_active() {
+                            unsafe { let _ = CloseHandle(pipe); }
+                            trigger_broker_pin_fallback(
+                                &shared_creds_for_client,
+                                &stop_flag,
+                                &creds_pipe_raw_for_client,
+                                &send_events_for_client,
+                                "WebAuthn transaction became active",
+                                BrokerReleaseMode::WebAuthnGuard,
+                            );
+                            return;
+                        }
                         let session_fallback = shared_creds_for_client
                             .lock()
                             .map(|creds| creds.broker_fallback_to_pin)
@@ -531,6 +583,7 @@ impl CPipeListener {
                                         &creds_pipe_raw_for_client,
                                         &send_events_for_client,
                                         "face timeout",
+                                        BrokerReleaseMode::TimeoutCooldown,
                                     );
                                     unsafe { let _ = CloseHandle(pipe); }
                                     return;
@@ -607,18 +660,17 @@ impl CPipeListener {
 
                     match read_result {
                         Ok(data) if !data.is_empty() => {
-                            // ── 检测 inject_pin 命令（KSP 增强版：DLL 端 SendInput）──
-                            let data_str = String::from_utf8_lossy(&data);
-                            if data_str.starts_with("inject_pin:") {
-                                let pin = data_str["inject_pin:".len()..].trim_end_matches('\0').to_string();
-                                if !pin.is_empty() {
-                                    info!("CPipeListener - 收到 PIN 注入命令，执行 SendInput...");
-                                    inject_pin_sendinput(&pin);
-                                    info!("CPipeListener - PIN 已注入到前台窗口");
-                                }
-                                continue;
+                            if broker_fallback_to_pin && crate::is_webauthn_guard_active() {
+                                trigger_broker_pin_fallback(
+                                    &shared_creds,
+                                    &stop_flag,
+                                    &creds_pipe_raw,
+                                    &send_events,
+                                    "WebAuthn transaction active before credential submission",
+                                    BrokerReleaseMode::WebAuthnGuard,
+                                );
+                                break;
                             }
-
                             match parse_credentials(&data) {
                                 Some((user, pwd, domain)) => {
                                     // 拒绝空用户名的凭据，防止"虚空登录" (#103)
@@ -685,127 +737,74 @@ impl CPipeListener {
         }))
     }
 
-    /// 停止两个后台线程：发 stop + 关句柄解阻塞，随后**分离**（绝不在宿主 UI 线程 join）。
+    /// 停止两个后台线程：发 stop + 取消同步 I/O，随后**分离**（绝不在宿主 UI 线程 join）。
     /// 两线程已用 dll_add_ref/dll_release 守护 DLL 生命周期，DllCanUnloadNow 会等它们
     /// 退出后才卸载——故可安全分离，UI 线程立即返回，CredentialUIBroker.exe 永不因
     /// teardown 的线程 join 而冻结（passkey / 查看密码取消卡死的根治）。
+    ///
+    /// 本函数在宿主（LogonUI/winlogon/broker）的 UI 线程上被调用，**绝不能执行任何
+    /// 可能阻塞的管道操作**——包括 CloseHandle：creds 线程用同步（非 OVERLAPPED）句柄
+    /// 阻塞在 ReadFile 时，内核对同步文件对象的操作串行化，另一线程的 CloseHandle 会
+    /// 排队等待 ReadFile 完成；Unlock EXE 识别中不读不写该连接时等待无限期 → LogonUI
+    /// 冻结（issue #26「休眠唤醒后无解锁界面、终止 Server.exe 才恢复」的根因）。
+    /// 因此：先 CancelSynchronousIo 打断两线程当前阻塞的同步 I/O（非阻塞调用），实际的
+    /// CloseHandle 与 release 通知全部移入分离的 teardown 线程执行。
     pub fn stop_and_join(&mut self) {
-        info!("CPipeListener::stop_and_join - 开始（信号 stop + 关句柄 + 分离）");
+        info!("CPipeListener::stop_and_join - 开始（信号 stop + 取消同步 I/O + 分离）");
         self.stop_flag.store(true, Ordering::SeqCst);
         if self.use_input_hooks {
             uninstall_input_hooks();
             self.use_input_hooks = false;
         }
 
-        // 单次 swap 足够：若 creds 线程尚未发布句柄，它会在 store 后立刻复查 stop
-        // 并自行关闭；若已发布，则由这里取得唯一关闭所有权并打断 ReadFile。
-        let raw = self
-            .creds_pipe_raw
-            .swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
-        if raw != INVALID_HANDLE_VALUE.0 as isize {
-            unsafe {
-                let _ = CloseHandle(HANDLE(raw as *mut _));
+        // 打断两个后台线程此刻阻塞中的同步管道 I/O（ReadFile/WaitNamedPipe/CreateFile）。
+        // CancelSynchronousIo 本身立即返回；线程不在 I/O 中时返回 ERROR_NOT_FOUND，无害。
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::System::IO::CancelSynchronousIo;
+            for t in [self.creds_thread.as_ref(), self.client_thread.as_ref()] {
+                if let Some(t) = t {
+                    unsafe {
+                        let _ = CancelSynchronousIo(HANDLE(t.as_raw_handle()));
+                    }
+                }
             }
         }
 
-        // 关键：绝不在宿主 UI 线程 join 后台线程——drop JoinHandle 即分离。
-        // DLL 引用计数保证 DLL 在两线程退出前不卸载，分离安全；UI 线程立即返回。
+        // 单次 swap 取得句柄唯一关闭所有权：若 creds 线程尚未发布句柄，它会在 store 后
+        // 立刻复查 stop 并自行关闭；若已发布，所有权转交下方 teardown 线程执行 CloseHandle。
+        let raw = self
+            .creds_pipe_raw
+            .swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
+
+        // 仅主场景（登录/解锁）且面容未成功（手动 PIN/密码解锁）时通知 Unlock EXE 释放
+        // 摄像头 (#117)。CREDUI/broker 不发（锁屏可能仍需 Unlock EXE）。
+        let need_release = self.is_primary_scenario && !self.is_unlocked.load(Ordering::SeqCst);
+
+        // teardown 线程：release 与 CloseHandle 都是潜在阻塞的管道操作，一律不在宿主
+        // UI 线程做。顺序刻意 release 在前：release 送达后 Unlock EXE 停止识别并断开
+        // 凭据连接 → creds 线程的 ReadFile 返回 → 后续 CloseHandle 不再有排队等待；
+        // 同时修复「PIN 解锁后摄像头持续亮到识别 3 轮跑完」——旧实现 release 排在可能
+        // 卡住的 CloseHandle 之后，常被拖延数十秒。
+        crate::dll_add_ref(); // teardown 线程生命周期内保持 DLL 加载
+        thread::spawn(move || {
+            let _dll_ref = DllRefGuard;
+            if need_release {
+                request_unlock_release("manual verification or dialog cancel");
+            }
+            if raw != INVALID_HANDLE_VALUE.0 as isize {
+                unsafe {
+                    let _ = CloseHandle(HANDLE(raw as *mut _));
+                }
+            }
+        });
+
+        // 绝不在宿主 UI 线程 join 后台线程——drop JoinHandle 即分离。
+        // DLL 引用计数保证 DLL 在线程退出前不卸载，分离安全；UI 线程立即返回。
         let _ = self.client_thread.take();
         let _ = self.creds_thread.take();
-        info!("CPipeListener::stop_and_join - 已分离后台线程（DLL 引用计数守护其生命周期）");
-
-        // 仅主场景（登录/解锁）在此向 Unlock EXE 发 release 释放摄像头。
-        // CREDUI/broker 不发：① 文档约定 CREDUI 不发 exit/release（锁屏可能仍需 Unlock EXE）；
-        // ② request_unlock_release 是阻塞管道连接，绝不能在 broker 的 UI 线程 teardown 上执行。
-        if self.is_primary_scenario && !self.is_unlocked.load(Ordering::SeqCst) {
-            request_unlock_release("manual verification or dialog cancel");
-        }
-        info!("CPipeListener::stop_and_join - 完成");
+        info!("CPipeListener::stop_and_join - 已分离后台线程与 teardown 线程，UI 线程零阻塞返回");
     }
-}
-
-/// KSP 增强版：DLL 端 SendInput PIN 注入。
-///
-/// 在全系统中精确定位 PIN 输入框，设焦点后用 SendInput 注入。
-/// 优先通过 EnumWindows 找 Chrome CredUI 对话框中的 Edit/PasswordBox，
-/// 设焦点后 SendInput 自然进入该控件（不依赖前台窗口）。
-/// 定位失败回退盲打。
-fn inject_pin_sendinput(pin: &str) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_RETURN, SetFocus,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, GetClassNameW,
-        GetWindow, GW_CHILD,
-    };
-    use windows::Win32::Foundation::{HWND, BOOL, LPARAM};
-
-    let our_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
-
-    // ── 枚举所有顶层窗口，找同进程 CredUI/PIN 对话框 + 其 Edit 子控件 ──
-    struct FindCtx { pid: u32, found_hwnd: HWND }
-    let mut ctx = FindCtx { pid: our_pid, found_hwnd: HWND(std::ptr::null_mut()) };
-
-    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let ctx = &mut *(lparam.0 as *mut FindCtx);
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid != ctx.pid { return BOOL(1); }
-        // 只看 CredUI/PIN 相关窗口类
-        let mut cls = [0u16; 64];
-        GetClassNameW(hwnd, &mut cls);
-        let cls_str = String::from_utf16_lossy(&cls);
-        // Chrome PIN 框可能是 Credential Dialog Xaml Host 或 Windows.UI.Core.CoreWindow
-        let is_credui = cls_str.contains("Credential") || cls_str.contains("CoreWindow")
-            || cls_str.contains("WindowsSecurity") || cls_str.contains("AADCredential");
-        if !is_credui { return BOOL(1); }
-        // 找子 Edit
-        let child = GetWindow(hwnd, GW_CHILD).unwrap_or(HWND(std::ptr::null_mut()));
-        ctx.found_hwnd = find_edit_recursive(child);
-        if ctx.found_hwnd.0.is_null() { BOOL(1) } else { BOOL(0) }
-    }
-    unsafe fn find_edit_recursive(hwnd: HWND) -> HWND {
-        if hwnd.0.is_null() { return hwnd; }
-        let mut cls = [0u16; 64];
-        GetClassNameW(hwnd, &mut cls);
-        let s = String::from_utf16_lossy(&cls);
-        if s.contains("Edit") || s.contains("PasswordBox") || s.contains("TextBox") { return hwnd; }
-        let mut child = GetWindow(hwnd, GW_CHILD).unwrap_or(HWND(std::ptr::null_mut()));
-        while !child.0.is_null() {
-            let r = find_edit_recursive(child);
-            if !r.0.is_null() { return r; }
-            child = GetWindow(child, windows::Win32::UI::WindowsAndMessaging::GW_HWNDNEXT).unwrap_or(HWND(std::ptr::null_mut()));
-        }
-        HWND(std::ptr::null_mut())
-    }
-
-    unsafe { let _ = EnumWindows(Some(callback), LPARAM(&mut ctx as *mut _ as isize)); }
-
-    if !ctx.found_hwnd.0.is_null() {
-        info!("inject_pin: 找到 PIN Edit HWND=0x{:X}", ctx.found_hwnd.0 as usize);
-        unsafe { let _ = SetFocus(Some(ctx.found_hwnd)); }
-        std::thread::sleep(std::time::Duration::from_millis(80));
-    } else {
-        warn!("inject_pin: 未找到 PIN Edit，回退盲打");
-    }
-
-    // ── SendInput 注入 PIN ──
-    for ch in pin.encode_utf16() {
-        unsafe {
-            let down = INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(0), wScan: ch, dwFlags: KEYEVENTF_UNICODE, time: 0, dwExtraInfo: 0 } } };
-            let up   = INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(0), wScan: ch, dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0), time: 0, dwExtraInfo: 0 } } };
-            SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(30));
-    }
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    unsafe {
-        let down = INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_RETURN, wScan: 0, dwFlags: KEYBD_EVENT_FLAGS(0), time: 0, dwExtraInfo: 0 } } };
-        let up   = INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_RETURN, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 } } };
-        SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
-    }
-    info!("inject_pin: PIN + Enter 已发送");
 }
 
 impl Drop for CPipeListener {

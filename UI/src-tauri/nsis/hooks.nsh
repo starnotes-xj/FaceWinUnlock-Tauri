@@ -85,10 +85,13 @@
   WriteRegStr HKLM "Software\facewinunlock-tauri" "UNLOCK_GRACE_PERIOD" "0.0"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "RETRY_DELAY" "1.0"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "CREDUI_ALLOW_BROKER" "1"
+  WriteRegStr HKLM "Software\facewinunlock-tauri" "CREDUI_BROWSER_PASSWORD_FILL" "1"
+  ; 删除旧实验开关，避免升级后出现双重语义。WebAuthn 守卫不可关闭。
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_UIA_DETECT"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_BROKER_TRY_FACE_UNKNOWN"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_BROWSER_TITLE_FALLBACK"
   ; broker(查看密码等)场景从开始人脸识别起，超过此秒数仍未刷脸成功才回退 Windows PIN。
-  ; 必须 ≥ 人脸识别耗时（开摄像头预热 ~2s + 检测匹配 ~1-2s ≈ 3-4s），否则查看密码会在
-  ; 刷脸完成前就超时回退 PIN（修复 Chrome 查看密码人脸的前提）。代价：选原生通行密钥时
-  ; 回退 PIN 会多等这几秒。取 6.0 兼顾两者。
+  ; Passkey/WebAuthn 已由事件守卫提前否决，不再进入此超时路径。
   WriteRegStr HKLM "Software\facewinunlock-tauri" "CREDUI_BROKER_FALLBACK_TIMEOUT" "6.0"
   WriteRegStr HKLM "Software\facewinunlock-tauri" "PASSKEY_TAKEOVER_ENABLED" "0"
 
@@ -155,6 +158,10 @@
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "RETRY_DELAY"
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_ALLOW_BROKER"
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_BROKER_FALLBACK_TIMEOUT"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_BROWSER_PASSWORD_FILL"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_UIA_DETECT"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_BROKER_TRY_FACE_UNKNOWN"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_BROWSER_TITLE_FALLBACK"
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "ANIMATION_FPS"
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "ANIMATION_UI_ENABLED"
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_ALLOW_GENERIC"

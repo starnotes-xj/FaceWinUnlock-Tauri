@@ -15,6 +15,7 @@ pub struct SampleProvider {
 /// 凭据提供程序的内部状态
 struct ProviderInner {
     usage_scenario: CREDENTIAL_PROVIDER_USAGE_SCENARIO,
+    dwflags: u32,
     is_scenario_supported: bool,
     events: Option<ICredentialProviderEvents>,
     advise_context: usize,
@@ -46,6 +47,7 @@ impl SampleProvider {
         Self {
             inner: Mutex::new(ProviderInner {
                 usage_scenario: CPUS_LOGON,
+                dwflags: 0,
                 is_scenario_supported: true,
                 events: None,
                 advise_context: 0,
@@ -88,6 +90,7 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
         );
         let mut inner = self.inner.lock().unwrap();
         inner.usage_scenario = cpus;
+        inner.dwflags = dwflags;
 
         // 读取 UNLOCK_SCENE 注册表（逗号分隔的场景 ID，如 "1,2"）
         // CPUS_LOGON=1, CPUS_UNLOCK_WORKSTATION=2, CPUS_CREDUI=4
@@ -120,26 +123,9 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
         }
 
         if cpus.0 == 4 && host == "credentialuibroker.exe" {
-            // credentialuibroker.exe 同时托管：浏览器查看密码、Chrome 通行密钥(passkey)验证、
-            // Windows 设置启用插件的 PIN 验证。三者 cpus/dwflags/CLSID 完全一致（实测 dwflags
-            // 均为 0x250），唯一可靠区分是「触发弹窗的应用窗口标题」：查看密码→含「密码」、
-            // 通行密钥→含「通行密钥」、设置 PIN→「设置」。用 GetWindowTextW 读应用窗口标题
-            //（应用进程非受限，不像 broker 进程内 UIA COM 被封）。
-            let scene = crate::classify_broker_scene();
-            // 实验开关：网页内「填充密码」和 passkey 登录的触发窗口都是登录页（无「密码/通行密钥」
-            // 关键词）→ 均归 Unknown，标题无法区分。CREDUI_BROKER_TRY_FACE_UNKNOWN=1 时对 Unknown
-            // 也尝试人脸，供实测「网页填密码能否走人脸」；默认 0（不改变发行行为，passkey 不受影响）。
-            // Passkey（标题含「通行密钥」）永远跳过，绝不因本开关误触发。
-            let try_face_unknown = crate::read_facewinunlock_registry("CREDUI_BROKER_TRY_FACE_UNKNOWN")
-                .map(|v| v.trim() == "1")
-                .unwrap_or(false);
-            let should_try_face = scene == crate::BrokerScene::Password
-                || (scene == crate::BrokerScene::Unknown && try_face_unknown);
-            info!(
-                "SampleProvider::SetUsageScenario - broker 场景分类: {:?}，try_face_unknown={}，试人脸={}",
-                scene, try_face_unknown, should_try_face
-            );
-            if !should_try_face {
+            let scene = crate::classify_broker_scene(dwflags);
+            info!("SampleProvider::SetUsageScenario - broker 场景分类: {:?}", scene);
+            if !scene.uses_face() {
                 // 通行密钥(选原生 Hello)/设置 PIN/未知 → 不介入，交还 Windows 原生（PIN/Hello）。
                 // 返回 E_NOTIMPL 后本 Provider 完全不参与：不启动人脸监听、不装输入 Hook、
                 // 不创建动画、摄像头不亮——根治「选原生 Hello 移动鼠标触发人脸」与「启用插件输 PIN 卡死」。
@@ -147,7 +133,15 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
                 inner.is_scenario_supported = false;
                 return Err(E_NOTIMPL.into());
             }
-            info!("SampleProvider::SetUsageScenario - 启用先人脸、失败后回退 Windows PIN");
+            match scene {
+                crate::BrokerScene::Password => {
+                    info!("SampleProvider::SetUsageScenario - 查看密码场景，启用人脸");
+                }
+                crate::BrokerScene::BrowserPasswordFill => {
+                    info!("SampleProvider::SetUsageScenario - 浏览器填充密码场景，启用人脸");
+                }
+                _ => {}
+            }
         }
 
         Ok(())
@@ -192,6 +186,15 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             // SetUsageScenario。每次 Advise 都视为新的 broker 会话边界，再清一次
             // 缓存状态，防止第二次查看密码沿用上次 fallback / credential 对象。
             SampleProvider::reset_broker_session_state(&mut inner);
+            let scene = crate::classify_broker_scene(inner.dwflags);
+            if !scene.uses_face() {
+                info!(
+                    "SampleProvider::Advise - broker 场景复查为 {:?}，停止参与",
+                    scene
+                );
+                inner.is_scenario_supported = false;
+                return Err(E_NOTIMPL.into());
+            }
         }
 
         inner.events = pcpe.clone(); // 保存事件接口
@@ -202,13 +205,8 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             if let Some(events) = &inner.events {
                 // 主场景（登录/解锁）：允许 stop_and_join 时通知 Unlock EXE 释放摄像头 (#117)
                 let is_primary = inner.usage_scenario.0 == 1 || inner.usage_scenario.0 == 2;
-                // broker(credentialuibroker.exe) 场景（如 Chrome「查看密码」「确保那是你」）
-                // 也直接尝试人脸，接入方式与通行密钥登录一致。
-                // 不再用 UIA 预检测区分「查看密码 / 通行密钥」：UIA 在受限 broker 进程内被彻底封禁
-                //（CoCreateInstance 与 DllGetClassObject 均 ClassNotReg / NotAvailable），是死路，
-                // 已移除整个 broker_detect 模块。人脸未匹配或提交凭据被拒时，由运行期
-                // broker_fallback_to_pin（CSampleCredential::ReportResult、CPipeListener）回退
-                // Windows PIN——用户可在通行密钥选择器里改用原生，原生 passkey 仍可走 PIN。
+                // Broker 仅在分类器明确允许密码验证时启动；WebAuthn 状态还会在
+                // CPipeListener 发送 prepare/run 前继续复查，关闭订阅延迟竞态。
                 inner.listener = Some(CPipeListener::start(
                     events.clone(),
                     upadvisecontext,
