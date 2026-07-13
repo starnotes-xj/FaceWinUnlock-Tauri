@@ -120,7 +120,7 @@
     ${EndIf}
     Goto passkey_uninstall_done
   passkey_uninstall_inline:
-    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-Process -Name PasskeyManager -ErrorAction SilentlyContinue | Stop-Process -Force; $cmd = Get-Command Remove-AppxPackage -ErrorAction Stop; $removeArgs = @{ ErrorAction = \"SilentlyContinue\" }; if ($cmd.Parameters.ContainsKey(\"PreserveApplicationData\")) { $removeArgs[\"PreserveApplicationData\"] = $true; Get-AppxPackage -Name FaceWinUnlock.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage @removeArgs; Get-AppxPackage -Name Contoso.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage @removeArgs } else { Write-Warning \"Remove-AppxPackage has no PreserveApplicationData; keeping Passkey package installed.\" }"'
+    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = \"SilentlyContinue\"; try { Get-Process -Name PasskeyManager -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; $cmd = Get-Command Remove-AppxPackage -ErrorAction SilentlyContinue; if ($cmd) { $removeArgs = @{ ErrorAction = \"SilentlyContinue\" }; if ($cmd.Parameters.ContainsKey(\"PreserveApplicationData\")) { $removeArgs[\"PreserveApplicationData\"] = $true; Get-AppxPackage -Name FaceWinUnlock.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage @removeArgs; Get-AppxPackage -Name Contoso.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage @removeArgs } } } catch {}; exit 0"'
     Pop $0
     ${If} $0 == 0
       DetailPrint "FaceWinUnlock Passkey 插件已卸载。"
