@@ -344,11 +344,17 @@ fn acquire_single_instance_mutex(exe_dir: &Path) -> Option<HANDLE> {
     )
 }
 
+/// 日志文件最大大小 (5 MB)，超出后截断为后半（保留最近 ~2.5 MB 的日志）。
+const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+/// 截断时保留的比例：超过 MAX_LOG_BYTES 时将文件截断为末尾 MAX_LOG_BYTES / 2。
+/// 每次写入后检查，频率 1-30 Hz，开销可忽略。
+const LOG_TRUNCATION_RATIO: u64 = 2;
+
 pub(crate) fn log_service(exe_dir: &Path, level: &str, message: &str) {
     let logs_dir = exe_dir.join("logs");
     let _ = create_dir_all(&logs_dir);
     let log_path = logs_dir.join("unlock.log");
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
         let elapsed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -362,6 +368,33 @@ pub(crate) fn log_service(exe_dir: &Path, level: &str, message: &str) {
             "{:02}:{:02}:{:02} [{}] {}",
             hour, minute, second, level, message
         );
+        // 检查文件大小：超出上限后截断保留后半部分，保留最近的日志。
+        // 不每次写都 stat —— 用 writeln 返回后仅检查，频率上限 ~10-30 Hz，无感。
+        if let Ok(meta) = file.metadata() {
+            if meta.len() > MAX_LOG_BYTES {
+                drop(file);
+                if let Ok(content) = std::fs::read_to_string(&log_path) {
+                    let keep = MAX_LOG_BYTES as usize / LOG_TRUNCATION_RATIO as usize;
+                    let truncated: String = content
+                        .chars()
+                        .rev()
+                        .take(keep)
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    // 截断后开头加上标记，便于诊断日志丢失。
+                    let _ = std::fs::write(
+                        &log_path,
+                        format!(
+                            "…[log truncated at {} bytes, keeping last ~{} bytes]…\n{truncated}",
+                            meta.len(),
+                            keep,
+                        ),
+                    );
+                }
+            }
+        }
     }
 }
 

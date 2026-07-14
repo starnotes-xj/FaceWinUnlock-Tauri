@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { ArrowRight } from '@element-plus/icons-vue';
 import { useOptionsStore } from '../stores/options';
 import { useFacesStore } from '../stores/faces';
@@ -12,7 +12,7 @@ const optionsStore = useOptionsStore();
 const facesStore = useFacesStore();
 const { queryTodayLogs } = useUnlockLog();
 
-const faceCount = ref(facesStore.faceList.length);
+const faceCount = computed(() => facesStore.faceList.length);
 const successCount = ref(0);
 const failCount = ref(0);
 
@@ -25,7 +25,44 @@ const systemStatus = ref([
 
 const recentLogs = ref<any[]>([]);
 
+async function refreshDashboardData() {
+  try {
+    const result = await queryTodayLogs();
+    let s = 0, f = 0;
+    recentLogs.value = [];
+    result.forEach((item: any) => {
+      if (item.is_unlock == 1) { s++; }
+      else { f++; }
+      recentLogs.value.push({
+        time: item.lastTime,
+        user: facesStore.getFaceAliasById(item.face_id),
+        action: item.is_unlock == 1 ? '面容验证通过' : '未知面容',
+        status: item.is_unlock == 1 ? 'success' : 'error'
+      });
+    });
+    successCount.value = s;
+    failCount.value = f;
+  } catch (error) {
+    // 数据库表可能尚未创建，静默降级
+    console.warn('[Dashboard] 加载今日识别记录失败:', error);
+  }
+}
+
+function onVisibilityChange() {
+  if (!document.hidden) {
+    refreshDashboardData();
+  }
+}
+
 onMounted(async () => {
+  // 确保面容 store 已加载
+  if (facesStore.faceList.length === 0) {
+    try { await facesStore.init(); } catch (_) {}
+  }
+
+  // 页面可见时刷新今日统计（解锁后回到仪表盘）
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
   // v7 火眼金睛眼周粒子
   const eyeParticlesContainer = document.getElementById('v7EyeParticles');
   if (eyeParticlesContainer) {
@@ -43,23 +80,8 @@ onMounted(async () => {
   }
 
   try {
-    const result = await queryTodayLogs();
-    let s = 0, f = 0;
-    result.forEach((item: any) => {
-      if (item.is_unlock == 1) { s++; }
-      else { f++; }
-      recentLogs.value.push({
-        time: item.lastTime,
-        user: facesStore.getFaceAliasById(item.face_id),
-        action: item.is_unlock == 1 ? '面容验证通过' : '未知面容',
-        status: item.is_unlock == 1 ? 'success' : 'error'
-      });
-    });
-    successCount.value = s;
-    failCount.value = f;
-  } catch (error) {
-    ElMessage.warning(String(error));
-  }
+    refreshDashboardData();
+  } catch (_) {}
 
   let tempCameraList = optionsStore.getOptionValueByKey('cameraList');
   let tempCameraIndex = optionsStore.getOptionValueByKey('camera');
@@ -80,6 +102,10 @@ onMounted(async () => {
     systemStatus.value[1].desc = '服务未启动';
     systemStatus.value[1].active = false;
   });
+});
+
+onUnmounted(() => {
+  document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 </script>
 
