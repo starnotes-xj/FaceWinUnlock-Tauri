@@ -325,34 +325,12 @@ Models are loaded into `APP_STATE` by `load_opencv_model(backend, target)`. All 
 
 ---
 
-## 动画 UI 开发（进行中）
+## 解锁动画（已移除）
 
-正在为 Credential Provider DLL 添加 Windows Hello 风格的解锁动画，详细计划与进度跟踪见 [docs/animation-development.md](docs/animation-development.md)。
+Windows Hello 风格的 DComp/Direct2D 解锁动画已在 v0.5.5 整体移除。Credential Provider
+DLL 不得重新引入 D3D11、DComp、Direct2D、DirectWrite、WebView 或其它图形运行时依赖；这些
+依赖曾导致旧版 Windows 的 LogonUI 无法加载 Provider。锁屏状态只使用 Credential Provider
+原生文本字段显示。
 
-### 核心约束
-
-- **技术方案**：路径 C — DComp Topmost Layer 绑定 LogonUI 父 HWND + Direct2D 原生绘制（60 FPS GPU）
-- **绝不使用**：WebView2（已实证在 winlogon 不工作）、Sciter/Ultralight（未验证 + 体积大）、Hook 内部 API（不稳定）
-- **当前阶段**：C — 状态机动画（Idle/Scanning/Success/Failure）+ 管道驱动已实现，VM 测试修复两个 Bug 后待回归验证
-- **测试要求**：所有阶段必须在 VM（Hyper-V/VMware）内连续 100 次锁屏/解锁验证后才能合并主分支
-- **灰度开关**：注册表 `ANIMATION_UI_ENABLED`（默认 `"0"`），用于安全启用/禁用
-
-### AI 协作规则
-
-| 任务类型 | 模型 |
-|---|---|
-| 架构设计、技术选型、深度调研 | **Opus** (`Codex-opus-4-7`) |
-| 代码编写、Bug 修复、Git 操作 | **Sonnet** (`Codex-sonnet-4-6`) |
-| 调试逻辑 Bug（Sonnet 卡住时） | Opus 兜底 |
-
-每次开始新阶段前先用 Opus 设计方案，再切到 Sonnet 实施。详细切换规则见 [docs/animation-development.md](docs/animation-development.md) 第 5 节。
-
-### 关键改动文件
-
-| 文件 | 变更 |
-|---|---|
-| `Server/src/animation.rs`（~595 行） | DComp topmost 管线、D2D 旋转环渲染、4 状态机（Idle/Scanning/Success/Failure）、磁贴定位（尺寸启发式 + 1/4 兜底）、弧几何体预创建、帧率控制 |
-| `Server/src/CSampleCredential.rs` | `Advise()` → `OnCreatingWindow` 获取父 HWND → 创建 `AnimationContext`；接受外部 `AnimationSlot` |
-| `Server/src/CPipeListener.rs` | 接受 `AnimationSlot` 参数；Client 线程发 "run" → Scanning，3 次未匹配 → Failure；Creds 线程收凭据 → Success |
-| `Server/src/CSampleProvider.rs` | 创建 `AnimationSlot`（`Arc<Mutex<Option<AnimationContext>>>`），传递给 CPipeListener 和 SampleCredential |
-| `Server/Cargo.toml` | 添加 `Win32_Graphics_*` + `Foundation_Numerics` features |
+`docs/animation-development.md` 与 `docs/tile-positioning.md` 仅保留为历史调研记录，不代表当前
+实现或待办。安装/卸载脚本可以继续删除旧动画注册表键，作为升级迁移清理项。

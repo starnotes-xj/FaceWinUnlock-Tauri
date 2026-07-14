@@ -1240,6 +1240,83 @@ fn instant_secs_ago(secs: u64) -> Instant {
         .unwrap_or_else(Instant::now)
 }
 
+/// Prevents the just-finished credential session from reopening the camera
+/// after a manual PIN/password unlock. The gate is cleared only after the old
+/// credential client disconnects and a new one connects, or after an explicit
+/// run request proves that a new unlock attempt is active.
+#[derive(Default)]
+struct PrewarmSessionGate {
+    blocked_after_release: bool,
+    saw_client_disconnect: bool,
+}
+
+impl PrewarmSessionGate {
+    fn on_manual_release(&mut self) {
+        self.blocked_after_release = true;
+        self.saw_client_disconnect = false;
+    }
+
+    fn observe_credential_client(&mut self, connected: bool) -> bool {
+        if !self.blocked_after_release {
+            return false;
+        }
+        if !connected {
+            self.saw_client_disconnect = true;
+            return false;
+        }
+        if self.saw_client_disconnect {
+            self.blocked_after_release = false;
+            self.saw_client_disconnect = false;
+            return true;
+        }
+        false
+    }
+
+    fn on_run(&mut self) {
+        self.blocked_after_release = false;
+        self.saw_client_disconnect = false;
+    }
+
+    fn blocks_prewarm(&self) -> bool {
+        self.blocked_after_release
+    }
+}
+
+#[cfg(test)]
+mod prewarm_session_gate_tests {
+    use super::PrewarmSessionGate;
+
+    #[test]
+    fn manual_release_stays_blocked_while_old_client_is_connected() {
+        let mut gate = PrewarmSessionGate::default();
+        gate.on_manual_release();
+
+        assert!(gate.blocks_prewarm());
+        assert!(!gate.observe_credential_client(true));
+        assert!(gate.blocks_prewarm());
+    }
+
+    #[test]
+    fn prewarm_resumes_only_after_disconnect_and_new_client() {
+        let mut gate = PrewarmSessionGate::default();
+        gate.on_manual_release();
+
+        assert!(!gate.observe_credential_client(false));
+        assert!(gate.blocks_prewarm());
+        assert!(gate.observe_credential_client(true));
+        assert!(!gate.blocks_prewarm());
+    }
+
+    #[test]
+    fn explicit_run_unblocks_when_client_transition_was_not_observed() {
+        let mut gate = PrewarmSessionGate::default();
+        gate.on_manual_release();
+        gate.on_run();
+
+        assert!(!gate.blocks_prewarm());
+    }
+}
+
 fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     const COLD_BOOT_GRACE_SECS: u64 = 60;
     /// 重锁宽限期：成功面容解锁后若重新锁屏（Win+L 或自动锁屏），
@@ -1267,9 +1344,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let mut last_failed_at: Option<Instant> = None;
     let mut last_model_attempt = instant_secs_ago(5); // 首次尽快尝试（开机早期回退为 now）
     // 摄像头预热（秒解锁）：prewarm_at = 锁屏预开摄像头的时刻；
-    // prewarm_suppressed = 空闲超时后抑制预热，直到下次 run（用户到场）或 release（锁屏消失）。
+    // prewarm_suppressed = 空闲超时或释放后抑制预热，直到下次 run，或旧凭据客户端断开后
+    // 新客户端连接（下一次凭据会话）。
     let mut prewarm_at: Option<Instant> = None;
     let mut prewarm_suppressed = false;
+    let mut prewarm_session_gate = PrewarmSessionGate::default();
 
     'main: loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -1300,7 +1379,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             state.passkey_face_gate.reject_pending();
             cam = None;
             prewarm_at = None;
-            prewarm_suppressed = false;
+            // 手动 PIN/密码解锁后，旧凭据客户端可能还会存活数百毫秒。若这里解除抑制，
+            // 下方预热块会在同一秒重新打开摄像头。保持抑制，直到观察到旧客户端断开并有
+            // 新客户端连接；显式 run 也可解除，确保极端竞态下下一次解锁仍可正常识别。
+            prewarm_suppressed = true;
+            prewarm_session_gate.on_manual_release();
             delayed_run_at = None;
             delay_session_armed = false;
             last_failed_at = None;
@@ -1327,6 +1410,14 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
         let has_credential_client =
             state.dll_creds_pipe.load(Ordering::SeqCst) != INVALID_HANDLE_VALUE.0 as isize;
+        if prewarm_session_gate.observe_credential_client(has_credential_client) {
+            prewarm_suppressed = false;
+            log_service(
+                &exe_dir,
+                "INFO",
+                "new credential session detected; camera prewarm re-enabled",
+            );
+        }
         if !has_credential_client && !state.recognition_active.load(Ordering::SeqCst) {
             delayed_run_at = None;
             delay_session_armed = false;
@@ -1524,7 +1615,10 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             let broker_cooldown = now_ms < state.after_release_cooldown_until.load(Ordering::SeqCst);
             if prewarm_at.is_none()
                 && !prewarm_suppressed
+                && !prewarm_session_gate.blocks_prewarm()
                 && has_credential_client
+                // 没有任何启用面容时不存在可匹配目标，不应仅因锁屏界面出现就点亮摄像头。
+                && !records.is_empty()
                 && cam.is_none()
                 && !pending
                 && !recognizing
@@ -1593,6 +1687,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         // "if cam.is_none()" 处 cam 已 Some → 跳过 2-3s 打开 → 秒识别）；下一轮锁屏仍可预热。
         prewarm_at = None;
         prewarm_suppressed = false;
+        prewarm_session_gate.on_run();
 
         // 定期重新加载人脸记录和配置
         if records.is_empty() || last_reload.elapsed() > Duration::from_secs(30) {

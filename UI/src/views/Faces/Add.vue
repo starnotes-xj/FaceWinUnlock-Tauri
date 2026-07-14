@@ -58,7 +58,7 @@
         'intel_npu':   { backend: 2, target: 9 },
     };
 
-    async function ensureModelLoaded() {
+    async function ensureModelLoaded(showLoading = true) {
         // 不能用 modelReady 早退（issue #12）：本组件被路由 <keep-alive> 缓存，modelReady 会跨导航
         // 保留为 true；而「首选项」页切换推理后端的可用性探测会 unload 后端模型，使 UI 缓存的
         // modelReady 与后端真实状态不同步——此时早退会跳过真正的重新加载，随后 verify_face 读到空
@@ -66,7 +66,9 @@
         // 已加载则秒级短路），让后端成为模型加载状态的唯一事实来源。
         if (modelLoadingPromise) return modelLoadingPromise;
 
-        const loadingInstance = ElLoading.service({ fullscreen: true, text: '正在加载人脸识别模型...' });
+        const loadingInstance = showLoading
+            ? ElLoading.service({ fullscreen: true, text: '正在加载人脸识别模型...' })
+            : null;
         modelLoadingPromise = (async () => {
             try {
                 const backendKey = optionsStore.getOptionValueByKey('inferenceBackend') || 'cpu';
@@ -80,10 +82,12 @@
                     ElMessage.warning('所选推理后端不可用（Intel NPU 需安装 OpenVINO 运行时），已自动回退到 CPU。');
                 }
             } catch (error) {
-                ElMessage.error(formatObjectString("加载OpenCV模型失败：", error));
+                if (showLoading) {
+                    ElMessage.error(formatObjectString("加载OpenCV模型失败：", error));
+                }
                 throw error;
             } finally {
-                loadingInstance.close();
+                loadingInstance?.close();
                 modelLoadingPromise = null;
             }
         })();
@@ -112,11 +116,23 @@
         authForm.domain = '';
     }
 
+    // 页面出现时就做不涉及隐私采集的准备：后台加载模型，并让 Unlock 服务释放锁屏预热
+    // 摄像头。真正打开硬件仍只发生在用户点击“从摄像头抓拍”之后。
+    function prepareEnrollmentResources() {
+        invoke('prepare_camera_for_ui').catch((error) => {
+            warn(`提前让出摄像头失败，将在点击抓拍时重试：${formatObjectString(error)}`);
+        });
+        void ensureModelLoaded(false).catch((error) => {
+            warn(`后台预加载人脸模型失败，将在点击抓拍时重试：${formatObjectString(error)}`);
+        });
+    }
+
     // 按当前路由初始化本页：先清空残留，再按 编辑/新增 分别载入。onMounted 与 onActivated（再次进入）
     // 共用，确保 <keep-alive> 缓存下每次进入都是干净且与当前路由一致的状态（issue #20）。用 route.query
     // 现取（不缓存 id），使编辑不同面容 / 新增 之间切换也能正确刷新。
     async function initForRoute() {
         resetEnrollForm();
+        prepareEnrollmentResources();
         if (route.query.mode === 'edit') {
             editFaceData = facesStore.getFaceById(route.query.id);
             if (editFaceData) {
@@ -180,11 +196,10 @@
     // 一致性验证循环：页面被 <keep-alive> 缓存、onUnmounted 在导航时不触发，返回按钮又在
     // MainLayout 里不经过本组件，故用路由守卫兜底——否则点返回后摄像头灯常亮、验证继续跑（用户反馈）。
     onBeforeRouteLeave(async () => {
-        if (isLoopRunning || isCameraStreaming.value || verificationMode.value) {
-            try { await stopCamera(); } catch (_) {}
-            isCameraStreaming.value = false;
-            verifyingStreamImage.value = '';
-        }
+        // 即使用户没有点击抓拍，也要用 ui_done 解除进入页面时申请的摄像头让位。
+        try { await stopCamera(); } catch (_) {}
+        isCameraStreaming.value = false;
+        verifyingStreamImage.value = '';
     })
 
     const handleSelectFile = async () => {
