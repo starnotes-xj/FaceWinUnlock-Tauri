@@ -138,65 +138,302 @@ pub fn current_process_exe_name() -> String {
         .unwrap_or_default()
 }
 
-/// broker CredUI 场景分类。credentialuibroker.exe 同时托管「浏览器查看密码」「Chrome 通行
-/// 密钥(passkey)验证」「Windows 设置启用插件的 PIN 验证」，三者 cpus/dwflags/CLSID 完全
-/// 一致（实测 dwflags 均为 0x250），无法用这些区分。唯一可靠信号是「触发弹窗的应用窗口标题」。
+const WEBAUTHN_READY_EVENT: &str = "Global\\FaceWinUnlockTauriWebAuthnReady";
+const WEBAUTHN_ACTIVE_EVENT: &str = "Global\\FaceWinUnlockTauriWebAuthnActive";
+
+/// Conservative classification of broker-hosted CredUI. `dwFlags` is retained
+/// for diagnostics, but password fill and WebAuthn have been observed with the
+/// same value and therefore cannot be classified from flags alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrokerScene {
-    /// 查看已保存密码 — 走人脸识别
     Password,
-    /// 通行密钥(passkey)验证 — 跳过人脸，交还 Windows 原生（选原生 Hello 正常输 PIN）
+    BrowserPasswordFill,
     Passkey,
-    /// 设置 PIN / 登录 / 无法判断 — 保守跳过人脸，避免误触发与卡死
+    PinOrSettings,
+    PrivateBrowser,
+    MonitorUnavailable,
     Unknown,
 }
 
-/// 收集前台窗口及其所有者/根所有者窗口的标题（拼接小写）。
-///
-/// broker 弹窗(GetForegroundWindow)的标题是「Windows 安全中心」（无区分信息），但它的
-/// 所有者窗口就是触发它的应用（Chrome / 设置），标题直接反映用户意图。仅用 GetWindowTextW
-/// 读这些应用窗口标题——应用进程非受限，能稳定读到（不像 broker 进程内 UIA COM 被封）。
-fn foreground_window_titles() -> String {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindow, GW_OWNER, GetWindowTextW, GetAncestor, GET_ANCESTOR_FLAGS,
-    };
-    fn title_of(hwnd: HWND) -> String {
-        if hwnd.0.is_null() { return String::new(); }
-        let mut buf = [0u16; 512];
-        let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
-        if n <= 0 { return String::new(); }
-        String::from_utf16_lossy(&buf[..n as usize])
+impl BrokerScene {
+    pub fn uses_face(self) -> bool {
+        matches!(self, Self::Password | Self::BrowserPasswordFill)
     }
-    let fg = unsafe { GetForegroundWindow() };
-    let mut parts = vec![title_of(fg)];
-    if let Ok(owner) = unsafe { GetWindow(fg, GW_OWNER) } {
-        parts.push(title_of(owner));
-    }
-    // GA_ROOTOWNER = 3：根所有者窗口（兜底，确保拿到触发应用的主窗口标题）
-    let root = unsafe { GetAncestor(fg, GET_ANCESTOR_FLAGS(3)) };
-    parts.push(title_of(root));
-    parts.join(" ").to_lowercase()
 }
 
-/// 按前台窗口链标题区分 broker 场景。passkey 关键词优先（"通行密钥"含"密钥"但绝不含"密码"，
-/// "密码管理工具"含"密码"，二者无交集，安全）。读不到任何关键词 → Unknown（保守跳过）。
-pub fn classify_broker_scene() -> BrokerScene {
-    let titles = foreground_window_titles();
-    info!("classify_broker_scene - 前台窗口标题: {:?}", titles);
-    const PASSKEY_KW: &[&str] = &[
-        "通行密钥", "passkey", "安全密钥", "security key", "证实是您本人", "确保是你本人",
-    ];
-    const PASSWORD_KW: &[&str] = &[
-        "密码", "password",
-    ];
-    if PASSKEY_KW.iter().any(|k| titles.contains(&k.to_lowercase())) {
-        BrokerScene::Passkey
-    } else if PASSWORD_KW.iter().any(|k| titles.contains(&k.to_lowercase())) {
-        BrokerScene::Password
-    } else {
-        BrokerScene::Unknown
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerContext {
+    pub titles: String,
+    pub owner_processes: Vec<String>,
+    pub dwflags: u32,
+    pub webauthn_ready: bool,
+    pub webauthn_active: bool,
+    pub private_browser: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebAuthnMonitorState {
+    pub ready: bool,
+    pub active: bool,
+}
+
+fn registry_bool(key_name: &str, default: bool) -> bool {
+    read_facewinunlock_registry(key_name)
+        .map(|value| value.trim() == "1")
+        .unwrap_or(default)
+}
+
+fn broker_context(dwflags: u32) -> BrokerContext {
+    use std::path::Path;
+    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetForegroundWindow, GetWindow, GetWindowTextW,
+        GetWindowThreadProcessId, GET_ANCESTOR_FLAGS, GW_OWNER,
+    };
+
+    fn title_of(hwnd: HWND) -> String {
+        if hwnd.0.is_null() {
+            return String::new();
+        }
+        let mut buffer = [0u16; 512];
+        let length = unsafe { GetWindowTextW(hwnd, &mut buffer) };
+        if length <= 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(&buffer[..length as usize])
     }
+
+    fn process_name_of(hwnd: HWND) -> String {
+        if hwnd.0.is_null() {
+            return String::new();
+        }
+        let mut process_id = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)); }
+        if process_id == 0 {
+            return String::new();
+        }
+        let process = match unsafe {
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id)
+        } {
+            Ok(process) => process,
+            Err(_) => return String::new(),
+        };
+        let mut path = [0u16; 1024];
+        let mut size = path.len() as u32;
+        let result = unsafe {
+            QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                windows_core::PWSTR(path.as_mut_ptr()),
+                &mut size,
+            )
+        };
+        unsafe { let _ = CloseHandle(process); }
+        if result.is_err() {
+            return String::new();
+        }
+        let full_path = String::from_utf16_lossy(&path[..size as usize]);
+        Path::new(&full_path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default()
+    }
+
+    let foreground = unsafe { GetForegroundWindow() };
+    let owner = unsafe { GetWindow(foreground, GW_OWNER) }.unwrap_or_default();
+    let root_owner = unsafe { GetAncestor(foreground, GET_ANCESTOR_FLAGS(3)) };
+    let windows = [foreground, owner, root_owner];
+    let titles = windows
+        .iter()
+        .map(|hwnd| title_of(*hwnd))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    let mut owner_processes = Vec::new();
+    for hwnd in windows {
+        let process = process_name_of(hwnd);
+        if !process.is_empty() && !owner_processes.contains(&process) {
+            owner_processes.push(process);
+        }
+    }
+
+    const PRIVATE_KEYWORDS: &[&str] = &["incognito", "inprivate", "无痕", "隐身", "隐私浏览"];
+    let monitor = webauthn_monitor_state();
+    BrokerContext {
+        private_browser: PRIVATE_KEYWORDS
+            .iter()
+            .any(|keyword| titles.contains(keyword)),
+        titles,
+        owner_processes,
+        dwflags,
+        webauthn_ready: monitor.ready,
+        webauthn_active: monitor.active,
+    }
+}
+
+fn named_event_signaled(name: &str) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        OpenEventW, WaitForSingleObject, SYNCHRONIZATION_ACCESS_RIGHTS,
+    };
+
+    let name = OsStr::new(name)
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let event = match unsafe {
+        OpenEventW(
+            SYNCHRONIZATION_ACCESS_RIGHTS(0x0010_0000),
+            false,
+            PCWSTR::from_raw(name.as_ptr()),
+        )
+    } {
+        Ok(event) => event,
+        Err(_) => return false,
+    };
+    let signaled = unsafe { WaitForSingleObject(event, 0) } == WAIT_OBJECT_0;
+    unsafe { let _ = CloseHandle(event); }
+    signaled
+}
+
+pub fn webauthn_monitor_state() -> WebAuthnMonitorState {
+    let ready = named_event_signaled(WEBAUTHN_READY_EVENT);
+    WebAuthnMonitorState {
+        ready,
+        active: ready && named_event_signaled(WEBAUTHN_ACTIVE_EVENT),
+    }
+}
+
+pub fn is_webauthn_guard_active() -> bool {
+    let state = webauthn_monitor_state();
+    state.ready && state.active
+}
+
+pub fn classify_broker_scene(dwflags: u32) -> BrokerScene {
+    let context = broker_context(dwflags);
+    let scene = classify_broker_context(
+        &context,
+        registry_bool("CREDUI_BROWSER_PASSWORD_FILL", true),
+    );
+    info!(
+        "classify_broker_scene - scene={:?}, flags=0x{:X}, titles={:?}, owners={:?}, webauthn_ready={}, webauthn_active={}, private={}",
+        scene,
+        context.dwflags,
+        context.titles,
+        context.owner_processes,
+        context.webauthn_ready,
+        context.webauthn_active,
+        context.private_browser,
+    );
+    scene
+}
+
+pub fn classify_broker_context(
+    context: &BrokerContext,
+    browser_password_fill_enabled: bool,
+) -> BrokerScene {
+    let titles = context.titles.to_lowercase();
+    let has_process = |names: &[&str]| {
+        context.owner_processes.iter().any(|process| {
+            names
+                .iter()
+                .any(|name| process.eq_ignore_ascii_case(name))
+        })
+    };
+    let title_has = |kws: &[&str]| kws.iter().any(|k| titles.contains(k));
+
+    // 触发弹窗的应用进程（结构信号，非本地化文本）。
+    const BROWSER_PROCESSES: &[&str] = &[
+        "chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe",
+        "opera.exe", "opera_gx.exe", "chromium.exe", "360se.exe", "360chrome.exe",
+    ];
+    const SETTINGS_PROCESSES: &[&str] = &["systemsettings.exe", "bioenrollmenthost.exe"];
+
+    // 标题关键词仅在「WebAuthn 监视器不可用」的兜底路径使用；监视器 Ready 的正常路径
+    // 完全不依赖它们，改由 webauthn_active（进行中的 CTAP 事务）+ owner 进程判定。
+    const PASSKEY_KEYWORDS: &[&str] = &[
+        "通行密钥", "passkey", "安全密钥", "security key", "保存通行密钥",
+        "创建通行密钥", "save passkey", "save a passkey", "create passkey",
+        "create a passkey", "webauthn", "fido2",
+    ];
+    const PIN_KEYWORDS: &[&str] = &[
+        "windows hello pin", "pin (windows hello)", "设置 pin", "设置pin",
+        "更改 pin", "更改pin", "set up a pin", "setup pin", "change your pin",
+        "security key pin", "安全密钥 pin",
+    ];
+    const PASSWORD_KEYWORDS: &[&str] = &[
+        "密码管理工具", "password manager", "保存的密码", "已保存密码",
+        "saved password", "saved passwords", "查看密码", "显示密码",
+        "view password", "show password", "reveal password",
+    ];
+    const PASSWORD_FILL_KEYWORDS: &[&str] = &[
+        "填充密码", "填充您的密码", "填充你的密码", "fill password",
+        "fill your password", "filling passwords", "autofill password",
+    ];
+
+    // ① 设置 / PIN / 指纹录入：靠触发进程识别（结构信号）。任何情况都不在此走人脸。
+    if has_process(SETTINGS_PROCESSES) {
+        return BrokerScene::PinOrSettings;
+    }
+
+    // ② 核心非名单信号：WebAuthn 监视器报告有「进行中的 CTAP 事务」
+    //    （MakeCredential/GetAssertion/SendCommand started 未 completed）——这正是
+    //    真 passkey/security-key 的 UV 操作。broker 弹窗发生在事务进行中 → 跳过人脸，
+    //    交还 Windows 原生。填充密码不会产生进行中的 CTAP 事务（枚举类
+    //    GetAllPlatformCredentials 不计入 active），故此处只拦真 passkey。
+    if context.webauthn_ready && context.webauthn_active {
+        return BrokerScene::Passkey;
+    }
+
+    // ③ 标题明确是 passkey/安全密钥 UI：即使此刻 active 尚未置起（事件投递有毫秒级
+    //    延迟），也保守跳过；始终压过下面的 password 关键词。CPipeListener 还会在
+    //    prepare/run 前多点复查 active 兜底订阅时序竞态。
+    if title_has(PASSKEY_KEYWORDS) {
+        return BrokerScene::Passkey;
+    }
+
+    // ④ 无痕 / 隐私窗口：保守 fail-closed，绝不自动填。
+    if context.private_browser {
+        return BrokerScene::PrivateBrowser;
+    }
+
+    // ⑤ 非浏览器进程但标题是 PIN 设置：兜底跳过。
+    if title_has(PIN_KEYWORDS) {
+        return BrokerScene::PinOrSettings;
+    }
+
+    // ⑥ 触发进程是浏览器：到此 active=false（passkey 已在 ②③ 排除）。
+    if has_process(BROWSER_PROCESSES) {
+        // 查看已保存密码 / 密码管理器重新验证：明确的凭据查看，始终走人脸。
+        if title_has(PASSWORD_KEYWORDS) {
+            return BrokerScene::Password;
+        }
+        // 其余浏览器 CredUI = 密码填充。受 CREDUI_BROWSER_PASSWORD_FILL 开关控制。
+        if !browser_password_fill_enabled {
+            return BrokerScene::Unknown;
+        }
+        // ★ 监视器 Ready（常态）：active 已排除进行中 passkey → 此处必为浏览器密码
+        //   填充，直接走人脸——完全不看标题关键词，彻底摆脱名单依赖。
+        if context.webauthn_ready {
+            return BrokerScene::BrowserPasswordFill;
+        }
+        // 监视器不可用（启动窗口 / 通道禁用 / 异常）：无法用 active 判断当前是否
+        // passkey，退回标题名单兜底——显式「填充密码」提示仍走人脸，否则保守跳过。
+        if title_has(PASSWORD_FILL_KEYWORDS) {
+            return BrokerScene::BrowserPasswordFill;
+        }
+        return BrokerScene::MonitorUnavailable;
+    }
+
+    // ⑦ 非浏览器 App 的查看密码兜底。
+    if title_has(PASSWORD_KEYWORDS) {
+        return BrokerScene::Password;
+    }
+    BrokerScene::Unknown
 }
 
 // 定义凭据提供程序的GUID，用于系统识别
@@ -396,8 +633,7 @@ pub unsafe extern "system" fn DllMain(
             }
         }
         // DLL_THREAD_ATTACH/DETACH 等高频事件不做任何处理：DllMain 持有 loader lock，
-        // 在锁内写文件日志（尤其配合动画 UI 的 D3D/DComp 多线程频繁 attach/detach）有死锁
-        // 风险，还会把日志刷爆（曾达 3368/5304 行噪音）。这里保持空处理、立即返回。
+        // 在锁内写文件日志有死锁风险，也会产生大量噪音。这里保持空处理、立即返回。
         _ => {}
     }
     BOOL::from(true)
@@ -405,7 +641,27 @@ pub unsafe extern "system" fn DllMain(
 
 #[cfg(test)]
 mod shared_credentials_tests {
-    use super::SharedCredentials;
+    use super::{classify_broker_context, BrokerContext, BrokerScene, SharedCredentials};
+
+    fn context(
+        titles: &str,
+        owner_processes: &[&str],
+        webauthn_ready: bool,
+        webauthn_active: bool,
+        private_browser: bool,
+    ) -> BrokerContext {
+        BrokerContext {
+            titles: titles.to_string(),
+            owner_processes: owner_processes
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            dwflags: 0x250,
+            webauthn_ready,
+            webauthn_active,
+            private_browser,
+        }
+    }
 
     #[test]
     fn reset_for_new_usage_clears_previous_broker_session() {
@@ -426,5 +682,153 @@ mod shared_credentials_tests {
         assert!(!credentials.is_ready);
         assert!(!credentials.is_unlocked);
         assert!(!credentials.broker_fallback_to_pin);
+    }
+
+    #[test]
+    fn broker_scene_detects_password_manager_titles() {
+        let chinese = context(
+            "windows 安全中心 google 密码管理工具",
+            &["chrome.exe"],
+            false,
+            false,
+            false,
+        );
+        assert_eq!(classify_broker_context(&chinese, true), BrokerScene::Password);
+
+        let english = context(
+            "windows security google password manager",
+            &["msedge.exe"],
+            false,
+            false,
+            false,
+        );
+        assert_eq!(classify_broker_context(&english, true), BrokerScene::Password);
+    }
+
+    #[test]
+    fn broker_scene_keeps_passkey_ahead_of_password_words() {
+        let context = context(
+            "windows 安全中心 通行密钥和安全密钥 password manager",
+            &["chrome.exe"],
+            true,
+            false,
+            false,
+        );
+        assert_eq!(classify_broker_context(&context, true), BrokerScene::Passkey);
+    }
+
+    #[test]
+    fn active_webauthn_overrides_explicit_password_text() {
+        let context = context(
+            "windows security password manager",
+            &["chrome.exe"],
+            true,
+            true,
+            false,
+        );
+        assert_eq!(classify_broker_context(&context, true), BrokerScene::Passkey);
+    }
+
+    #[test]
+    fn unknown_browser_requires_ready_monitor_and_enabled_fallback() {
+        let ready = context(
+            "windows 安全中心 登录qq邮箱",
+            &["credentialuibroker.exe", "chrome.exe"],
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            classify_broker_context(&ready, true),
+            BrokerScene::BrowserPasswordFill
+        );
+        assert_eq!(classify_broker_context(&ready, false), BrokerScene::Unknown);
+
+        let unavailable = context(
+            "windows 安全中心 登录qq邮箱",
+            &["chrome.exe"],
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            classify_broker_context(&unavailable, true),
+            BrokerScene::MonitorUnavailable
+        );
+    }
+
+    #[test]
+    fn broker_scene_detects_password_fill_prompt_text() {
+        let context = context(
+            "windows 安全中心 chrome 正尝试在 wx.mail.qq.com 上填充您的密码",
+            &["chrome.exe"],
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            classify_broker_context(&context, true),
+            BrokerScene::BrowserPasswordFill
+        );
+    }
+
+    #[test]
+    fn settings_pin_and_private_windows_fail_closed() {
+        let settings = context(
+            "windows 安全中心 password",
+            &["systemsettings.exe"],
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            classify_broker_context(&settings, true),
+            BrokerScene::PinOrSettings
+        );
+
+        let private = context(
+            "windows security login example",
+            &["msedge.exe"],
+            true,
+            false,
+            true,
+        );
+        assert_eq!(
+            classify_broker_context(&private, true),
+            BrokerScene::PrivateBrowser
+        );
+    }
+
+    #[test]
+    fn ready_monitor_lets_browser_fill_use_face_without_title_keywords() {
+        // 用户实测场景：QQ 邮箱 / Google 登录页填密码，标题不含任何密码/passkey 关键词。
+        // 监视器修好（GUID 解析）后 Ready 且无进行中 CTAP 事务 → 走人脸，完全不靠名单。
+        let qq = context(
+            "windows 安全中心 登录qq邮箱 - google chrome 登录qq邮箱 - google chrome",
+            &["credentialuibroker.exe", "chrome.exe"],
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            classify_broker_context(&qq, true),
+            BrokerScene::BrowserPasswordFill
+        );
+    }
+
+    #[test]
+    fn active_ctap_transaction_skips_face_even_on_plain_login_page() {
+        // 同一登录页，但此刻有进行中的 CTAP 事务（用户在走 passkey）→ 跳过人脸。
+        let passkey_in_flight = context(
+            "windows 安全中心 登录qq邮箱 - google chrome 登录qq邮箱 - google chrome",
+            &["credentialuibroker.exe", "chrome.exe"],
+            true,
+            true,
+            false,
+        );
+        assert_eq!(
+            classify_broker_context(&passkey_in_flight, true),
+            BrokerScene::Passkey
+        );
     }
 }

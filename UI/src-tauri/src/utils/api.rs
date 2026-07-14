@@ -1,4 +1,10 @@
-use std::{os::windows::process::CommandExt, process::Command, thread, time::{Duration, Instant}};
+use std::{
+    os::windows::process::CommandExt,
+    process::Command,
+    sync::{LazyLock, Mutex},
+    thread,
+    time::{Duration, Instant},
+};
 
 use crate::{utils::custom_result::CustomResult, OpenCVResource, APP_STATE, GLOBAL_TRAY, ROOT_DIR};
 use opencv::{
@@ -22,6 +28,10 @@ use windows::{
 };
 
 use super::pipe::Client;
+
+/// Serializes expensive ONNX model construction without holding `APP_STATE`.
+/// Camera open/close can proceed while models load in the background.
+static MODEL_LOAD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[tauri::command]
 pub fn is_silent_launch() -> bool {
@@ -171,7 +181,10 @@ pub fn get_camera() -> Result<CustomResult, CustomResult> {
     // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
     // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
 
-    match get_windows_video_devices() {
+    // 列举摄像头前先请求后台让出摄像头，使 is_camera_index_valid 探测准确（否则被后台预热占用的
+    // 真实摄像头会被误标为不可用）；探测完发 ui_done 立即解除让位，避免长时间抑制秒解锁预热。
+    notify_unlock_camera("ui_release");
+    let result = match get_windows_video_devices() {
         Ok(devices) => {
             let valid_cameras: Vec<ValidCameraInfo> = devices
                 .into_iter()
@@ -190,7 +203,28 @@ pub fn get_camera() -> Result<CustomResult, CustomResult> {
             Some(format!("获取摄像头列表失败: {e}")),
             None,
         )),
+    };
+    notify_unlock_camera("ui_done");
+    result
+}
+
+// 向 Unlock 后台服务发送摄像头协调命令：
+//   "ui_release" — UI 要用摄像头，请后台立即释放并在兜底窗口内不再预热（让位给 UI）；
+//   "ui_done"    — UI 用完摄像头（stop_camera），后台可恢复锁屏预热（秒解锁）。
+// 非致命：服务未运行 / 管道连接失败均忽略。
+fn notify_unlock_camera(cmd: &str) {
+    if let Ok(client) = Client::new(r"\\.\pipe\MansonWindowsUnlockRustUnlock") {
+        let _ = crate::utils::pipe::write(client.handle, String::from(cmd));
     }
+}
+
+/// Prepare the enrollment page without opening camera hardware. This asks the
+/// background service to release any lock-screen prewarm camera before the
+/// user clicks capture, removing that handoff from the click latency.
+#[tauri::command]
+pub fn prepare_camera_for_ui() -> Result<CustomResult, CustomResult> {
+    notify_unlock_camera("ui_release");
+    Ok(CustomResult::success(None, None))
 }
 
 // 打开摄像头
@@ -199,6 +233,11 @@ pub fn open_camera(
     backend: Option<CameraBackend>,
     camear_index: i32,
 ) -> Result<CustomResult, CustomResult> {
+    // 先请求 Unlock 后台服务让出摄像头：锁屏预热(prewarm) / 自动锁屏在场检测可能正占着摄像头，
+    // 不让位会导致 UI open_camera 抢不到、录入采集只出黑帧（用户反馈：无脸时锁屏走开→鼠标触发
+    // 识别→PIN 解锁后摄像头常亮期间录入黑屏）。ui_release 让后台立即释放并在兜底窗口内不再预热。
+    notify_unlock_camera("ui_release");
+
     // 按指定后端或依次尝试 MSMF → DShow → Any
     let backends_to_try: Vec<CameraBackend> = match backend {
         Some(b) => vec![b],
@@ -209,20 +248,29 @@ pub fn open_camera(
         ],
     };
 
+    // 后台释放摄像头可能需 ~几百 ms 到 ~3s（若它正卡在 open_configured_camera 的 2-3s 打开中），
+    // 故在此重试打开直到成功或超时：单访问摄像头被占用时 try_open 会失败，后台释放后即成功。
     let mut last_err = String::from("无可用摄像头后端");
-    for b in backends_to_try {
-        match try_open_camera_with_backend(b, camear_index) {
-            Ok(cam) => {
-                let mut state = APP_STATE.lock().map_err(|e| {
-                    CustomResult::error(Some(format!("获取 app 状态失败: {}", e)), None)
-                })?;
-                state.camera = Some(OpenCVResource { inner: cam });
-                return Ok(CustomResult::success(None, None));
-            }
-            Err(e) => {
-                last_err = e.to_string();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        for b in backends_to_try.iter().copied() {
+            match try_open_camera_with_backend(b, camear_index) {
+                Ok(cam) => {
+                    let mut state = APP_STATE.lock().map_err(|e| {
+                        CustomResult::error(Some(format!("获取 app 状态失败: {}", e)), None)
+                    })?;
+                    state.camera = Some(OpenCVResource { inner: cam });
+                    return Ok(CustomResult::success(None, None));
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                }
             }
         }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
     }
 
     Err(CustomResult::error(Some(last_err), None))
@@ -231,10 +279,14 @@ pub fn open_camera(
 // 关闭摄像头
 #[tauri::command]
 pub fn stop_camera() -> Result<CustomResult, CustomResult> {
-    let mut app_state = APP_STATE
-        .lock()
-        .map_err(|e| CustomResult::error(Some(format!("获取app状态失败 {}", e)), None))?;
-    app_state.camera = None;
+    {
+        let mut app_state = APP_STATE
+            .lock()
+            .map_err(|e| CustomResult::error(Some(format!("获取app状态失败 {}", e)), None))?;
+        app_state.camera = None;
+    }
+    // 通知 Unlock 后台服务：UI 已用完摄像头，可解除让位、恢复锁屏预热（秒解锁）。
+    notify_unlock_camera("ui_done");
     Ok(CustomResult::success(None, None))
 }
 
@@ -859,28 +911,33 @@ pub fn load_opencv_model(
 ) -> Result<ModelLoadResult, String> {
     let backend_id = backend.unwrap_or(0);
     let target_id = target.unwrap_or(0);
-
-    let mut app_state = APP_STATE
+    let _load_guard = MODEL_LOAD_LOCK
         .lock()
-        .map_err(|e| format!("获取app状态失败 {}", e))?;
+        .map_err(|e| format!("获取模型加载锁失败 {}", e))?;
 
     // 三个模型已全部加载则直接返回（保持幂等）。无法得知此前是否回退，
     // 按未回退处理，回退提示已在首次加载时给出。
-    if app_state.detector.is_some()
-        && app_state.recognizer.is_some()
-        && app_state.liveness.is_some()
     {
-        return Ok(ModelLoadResult {
-            requested_backend: backend_id,
-            requested_target: target_id,
-            active_backend: backend_id,
-            active_target: target_id,
-            fell_back: false,
-            fallback_reason: None,
-        });
+        let app_state = APP_STATE
+            .lock()
+            .map_err(|e| format!("获取app状态失败 {}", e))?;
+        if app_state.detector.is_some()
+            && app_state.recognizer.is_some()
+            && app_state.liveness.is_some()
+        {
+            return Ok(ModelLoadResult {
+                requested_backend: backend_id,
+                requested_target: target_id,
+                active_backend: backend_id,
+                active_target: target_id,
+                fell_back: false,
+                fallback_reason: None,
+            });
+        }
     }
 
-    // 先尝试用户选择的后端；失败且并非 CPU 时回退到 CPU(0,0)。
+    // Model construction is intentionally outside APP_STATE's critical section.
+    // It can take seconds on a cold start, while camera ownership must remain responsive.
     let (detector, recognizer, liveness, active_backend, active_target, fell_back, fallback_reason) =
         match build_opencv_models(backend_id, target_id) {
             Ok((d, r, l)) => (d, r, l, backend_id, target_id, false, None),
@@ -898,6 +955,9 @@ pub fn load_opencv_model(
             Err(e) => return Err(e),
         };
 
+    let mut app_state = APP_STATE
+        .lock()
+        .map_err(|e| format!("获取app状态失败 {}", e))?;
     app_state.detector = Some(OpenCVResource { inner: detector });
     app_state.recognizer = Some(OpenCVResource { inner: recognizer });
     app_state.liveness = Some(OpenCVResource { inner: liveness });
@@ -915,6 +975,11 @@ pub fn load_opencv_model(
 #[tauri::command]
 // 卸载模型
 pub fn unload_model() -> Result<(), String> {
+    // Wait for an in-flight background preload so it cannot write models back
+    // after this command has returned.
+    let _load_guard = MODEL_LOAD_LOCK
+        .lock()
+        .map_err(|e| format!("获取模型加载锁失败 {}", e))?;
     let mut app_state = APP_STATE
         .lock()
         .map_err(|e| format!("获取app状态失败 {}", e))?;
@@ -1037,30 +1102,44 @@ fn try_open_camera_with_backend(
     let _ = cam.set(opencv::videoio::CAP_PROP_FRAME_WIDTH, 640.0);
     let _ = cam.set(opencv::videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
 
-    // 预热：丢弃前几帧，让虚拟摄像头初始化完成（#94）
-    let mut frame = Mat::default();
-    for _ in 0..10 {
-        let _ = cam.read(&mut frame);
-    }
-
-    // 验证最终帧是否有效
-    let read_result = cam.read(&mut frame);
-
-    match read_result {
-        Ok(_) => {
-            if frame.empty() {
-                return Err(format!("后端 {:?} 读取到空帧", backend).into());
+    // 虚拟摄像头可能需要多帧才稳定（#94），但实体摄像头通常前几帧已可用。连续 3 个
+    // 有效帧即提前结束，最多仍尝试 10 帧，避免每次抓拍固定阻塞 11 次 read。
+    const MAX_WARMUP_FRAMES: usize = 10;
+    const READY_FRAMES: usize = 3;
+    let mut consecutive_valid = 0usize;
+    let mut valid_frame = Mat::default();
+    let mut last_error: Option<String> = None;
+    let mut frames_read = 0usize;
+    for _ in 0..MAX_WARMUP_FRAMES {
+        frames_read += 1;
+        let mut frame = Mat::default();
+        match cam.read(&mut frame) {
+            Ok(true) if !frame.empty() => {
+                consecutive_valid += 1;
+                valid_frame = frame;
+                if consecutive_valid >= READY_FRAMES {
+                    break;
+                }
+            }
+            Ok(_) => consecutive_valid = 0,
+            Err(e) => {
+                consecutive_valid = 0;
+                last_error = Some(e.to_string());
             }
         }
-        Err(e) => {
-            return Err(format!("后端 {:?} 读取帧失败: {}", backend, e).into());
-        }
+    }
+    if valid_frame.empty() {
+        return Err(match last_error {
+            Some(e) => format!("后端 {:?} 读取帧失败: {}", backend, e).into(),
+            None => format!("后端 {:?} 读取到空帧", backend).into(),
+        });
     }
 
     info!(
-        "摄像头后端 {:?} 打开+预热耗时 {}ms",
+        "摄像头后端 {:?} 打开+预热耗时 {}ms（读取 {} 帧）",
         backend,
-        t0.elapsed().as_millis()
+        t0.elapsed().as_millis(),
+        frames_read,
     );
     Ok(cam)
 }

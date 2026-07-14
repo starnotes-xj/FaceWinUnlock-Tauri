@@ -206,26 +206,9 @@ fn handle_assertion(
         }
         Err(e) => {
             if e.starts_with("NATIVE_FALLBACK:") {
-                match signer::start_native_pin_autofill(exe_dir) {
-                    Ok(()) => {
-                        log_service(
-                            exe_dir,
-                            "INFO",
-                            "Passkey assertion 切换到人脸授权后的原生 WebAuthn",
-                        );
-                        let resp = json_error("NATIVE_FALLBACK");
-                        let _ = stream.write_all(&http_response(409, &resp));
-                    }
-                    Err(autofill_error) => {
-                        log_service(
-                            exe_dir,
-                            "WARN",
-                            &format!("原生 WebAuthn PIN 自动填充不可用: {autofill_error}"),
-                        );
-                        let resp = json_error(&autofill_error);
-                        let _ = stream.write_all(&http_response(500, &resp));
-                    }
-                }
+                log_service(exe_dir, "INFO", "Passkey assertion 回退到原生 WebAuthn");
+                let resp = json_error("NATIVE_FALLBACK");
+                let _ = stream.write_all(&http_response(409, &resp));
                 return;
             }
             log_service(exe_dir, "WARN", &format!("Passkey assertion 失败: {}", e));

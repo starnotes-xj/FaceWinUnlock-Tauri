@@ -143,6 +143,38 @@ void App::CloseOrHideWindow()
 void App::OnLaunched(LaunchActivatedEventArgs const&)
 {
     std::wstring argsString{ m_args };
+
+    // 卸载模式：以插件自身身份（MSIX 包身份 + 当前用户/中等完整性上下文）反注册 WebAuthn
+    // 认证器后立即退出、不显示界面。认证器注册（WebAuthNPluginAddAuthenticator）独立于 MSIX
+    // 包，仅 Remove-AppxPackage 删不掉，会残留在「保存通行密钥的位置」里、点了报错——必须
+    // 显式调 WebAuthNPluginRemoveAuthenticator。两种触发：
+    //   1. 命令行 -UnregisterPlugin（应用内卸载，UI 进程中等完整性可直接 ActivateApplication）；
+    //   2. HKCU 标志 PendingUnregister=1（NSIS/Geek 卸载器提权运行、无法激活 MSIX，改为写标志 +
+    //      explorer 中等完整性拉起本插件，无参启动时读到标志即反注册）。
+    bool pendingUnregisterFlag = false;
+    {
+        DWORD flagVal = 0;
+        DWORD flagCb = sizeof(flagVal);
+        if (::RegGetValueW(HKEY_CURRENT_USER, L"Software\\FaceWinUnlock\\PasskeyManager",
+                L"PendingUnregister", RRF_RT_REG_DWORD, nullptr, &flagVal, &flagCb) == ERROR_SUCCESS
+            && flagVal == 1)
+        {
+            pendingUnregisterFlag = true;
+        }
+    }
+    if (argsString.find(L"-UnregisterPlugin") != std::wstring::npos || pendingUnregisterFlag)
+    {
+        ::RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\FaceWinUnlock\\PasskeyManager", L"PendingUnregister");
+        try
+        {
+            PluginRegistrationManager::getInstance().UnregisterPlugin();
+        }
+        catch (...)
+        {
+        }
+        Exit();
+        return;
+    }
     if (argsString.find(L"-PluginActivated") != std::wstring::npos)
     {
         // Background Mode: The app is being activated by the OS to handle a passkey operation. It runs in the background.

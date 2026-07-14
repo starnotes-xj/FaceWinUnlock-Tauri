@@ -193,7 +193,7 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         ("CREDUI_ALLOW_GENERIC", "0"),
         ("CREDUI_ALLOW_BROKER", "1"),
         ("CREDUI_BROKER_FALLBACK_TIMEOUT", "5.0"),
-        ("CREDUI_UIA_DETECT", "0"),
+        ("CREDUI_BROWSER_PASSWORD_FILL", "1"),
         ("DLL_LOG_PATH", log_dir_value),
     ];
 
@@ -242,6 +242,16 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
                     CustomResult::error(Some(format!("迁移 CREDUI_ALLOW_BROKER 失败: {e}")), None)
                 })?;
         }
+    }
+
+    // Remove obsolete experiment switches so upgrades cannot retain conflicting
+    // semantics. WebAuthn activity guarding is mandatory and has no off switch.
+    for obsolete in [
+        "CREDUI_UIA_DETECT",
+        "CREDUI_BROKER_TRY_FACE_UNKNOWN",
+        "CREDUI_BROWSER_TITLE_FALLBACK",
+    ] {
+        let _ = app_key.delete_value(obsolete);
     }
 
     app_key

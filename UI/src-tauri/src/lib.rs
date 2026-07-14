@@ -38,7 +38,8 @@ use utils::api::{
     add_scheduled_task, check_process_running, check_scheduled_task, check_trigger_via_xml,
     close_app, delete_process_running, disable_scheduled_task, get_cache_dir, get_camera,
     get_install_dir, get_now_username, get_uuid_v4, init_model, is_silent_launch,
-    load_opencv_model, open_camera, open_directory, repair_ui_auto_start_task,
+    load_opencv_model, open_camera, open_directory, prepare_camera_for_ui,
+    repair_ui_auto_start_task,
     repair_unlock_scheduled_task, restart_unlock_service, run_scheduled_task, stop_camera,
     test_win_logon, unload_model,
 };
@@ -232,6 +233,7 @@ pub fn run() {
                 test_win_logon,
                 init_model,
                 open_camera,
+                prepare_camera_for_ui,
                 stop_camera,
                 get_camera,
                 open_directory,

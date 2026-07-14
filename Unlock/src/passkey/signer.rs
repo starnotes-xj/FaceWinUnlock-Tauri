@@ -122,28 +122,6 @@ fn native_fallback_error(passport_error: Option<&str>, legacy_error: &str) -> St
     }
 }
 
-pub(super) fn start_native_pin_autofill(exe_dir: &Path) -> Result<(), String> {
-    let pin = try_load_pin_from_db(exe_dir)
-        .ok_or_else(|| "stored Windows Hello PIN is unavailable".to_string())?;
-    let log_dir = exe_dir.to_path_buf();
-    std::thread::spawn(move || {
-        log_passkey(&log_dir, "INFO", "waiting for native passkey PIN dialog");
-        match crate::uia::autofill_pin(&pin, 20) {
-            Ok(message) => {
-                log_passkey(&log_dir, "INFO", &format!("native PIN autofill: {message}"));
-            }
-            Err(error) => {
-                log_passkey(
-                    &log_dir,
-                    "WARN",
-                    &format!("native PIN autofill failed: {error}"),
-                );
-            }
-        }
-    });
-    Ok(())
-}
-
 fn build_response(
     credential_id: &str,
     auth_data: &[u8],
