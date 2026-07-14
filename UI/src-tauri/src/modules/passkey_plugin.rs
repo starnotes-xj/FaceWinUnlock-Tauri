@@ -1091,7 +1091,11 @@ pub fn cleanup_passkey_residual_keys() -> Result<CustomResult, CustomResult> {
     //    来清理 Windows 平台数据库条目（WebAuthNPluginAuthenticatorRemoveAllCredentials 只能
     //    在插件进程内调用，外部无法直接访问）。
     let mut metadata_cleaned = 0u32;
-    let formal = query_package(FORMAL_PACKAGE_NAME).unwrap_or(None);
+    let formal = query_package(FORMAL_PACKAGE_NAME)
+        .map_err(|e| CustomResult::error(
+            Some(format!("无法查询插件包状态，跳过元数据清理: {e}")),
+            Some(json!({ "deleted": deleted_keys, "metadata_cleaned": false })),
+        ))?;
     if let Some(pkg) = formal {
         if let Some(pfn) = pkg["package_family_name"].as_str() {
             if let Some(db_dir) = passkey_localstate_db_dir(pfn) {

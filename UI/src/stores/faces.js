@@ -8,9 +8,19 @@ export const useFacesStore = defineStore('faces', {
         init(){
             return new Promise((resolve, reject) => {
                 select('faces', ['*']).then((result)=>{
+                    // 先清空再填充，确保重复调用 init() 不会重复添加同一面容。
+                    this.faceList = [];
                     for(let i = 0; i < result.rows.length; i++){
                         const item = result.rows[i];
-                        this.addFaceToList(item);
+                        this.faceList.push({
+                            id: item.id,
+                            user_name: item.user_name,
+                            user_pwd: item.user_pwd,
+                            account_type: item.account_type,
+                            face_token: item.face_token,
+                            json_data: JSON.parse(item.json_data),
+                            createTime: item.createTime
+                        });
                     }
                     resolve();
                 }).catch((error)=>{

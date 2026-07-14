@@ -79,9 +79,7 @@ onMounted(async () => {
     }
   }
 
-  try {
-    refreshDashboardData();
-  } catch (_) {}
+  await refreshDashboardData();
 
   let tempCameraList = optionsStore.getOptionValueByKey('cameraList');
   let tempCameraIndex = optionsStore.getOptionValueByKey('camera');
