@@ -416,9 +416,12 @@ pub fn classify_broker_context(
         if !browser_password_fill_enabled {
             return BrokerScene::Unknown;
         }
-        // ★ 监视器 Ready（常态）：active 已排除进行中 passkey → 此处必为浏览器密码
-        //   填充，直接走人脸——完全不看标题关键词，彻底摆脱名单依赖。
-        if context.webauthn_ready {
+        // ★ 浏览器 + 无 active CTAP 事务时，不能仅凭 ready-monitor 就开人脸（v0.5.10 修）。
+        //   Google/其他 passkey 弹窗会在 CTAP 事务开始前出现，标题如"登录 - google 账号"
+        //   （不含 passkey 关键词），webauthn_ready=true 但 active=false。旧逻辑在此分支直
+        //   接归类 BrowserPasswordFill，导致选密钥登录时移动鼠标触发人脸。
+        //   现在：ready-monitor 仅配合显式「填充密码」关键词时启用；无关键词则保守回退。
+        if context.webauthn_ready && title_has(PASSWORD_FILL_KEYWORDS) {
             return BrokerScene::BrowserPasswordFill;
         }
         // 监视器不可用（启动窗口 / 通道禁用 / 异常）：无法用 active 判断当前是否
@@ -731,7 +734,10 @@ mod shared_credentials_tests {
 
     #[test]
     fn unknown_browser_requires_ready_monitor_and_enabled_fallback() {
-        let ready = context(
+        // v0.5.10: ready-monitor 单独不足以启用人脸——Google passkey 弹窗在 CTAP
+        // 事务开始前出现，标题不含 passkey 关键词，webauthn_ready=true 但 active=false。
+        // 仅当标题同时匹配「填充密码」关键词时才走人脸。
+        let ready_no_keywords = context(
             "windows 安全中心 登录qq邮箱",
             &["credentialuibroker.exe", "chrome.exe"],
             true,
@@ -739,10 +745,10 @@ mod shared_credentials_tests {
             false,
         );
         assert_eq!(
-            classify_broker_context(&ready, true),
-            BrokerScene::BrowserPasswordFill
+            classify_broker_context(&ready_no_keywords, true),
+            BrokerScene::MonitorUnavailable
         );
-        assert_eq!(classify_broker_context(&ready, false), BrokerScene::Unknown);
+        assert_eq!(classify_broker_context(&ready_no_keywords, false), BrokerScene::Unknown);
 
         let unavailable = context(
             "windows 安全中心 登录qq邮箱",
@@ -800,9 +806,10 @@ mod shared_credentials_tests {
     }
 
     #[test]
-    fn ready_monitor_lets_browser_fill_use_face_without_title_keywords() {
-        // 用户实测场景：QQ 邮箱 / Google 登录页填密码，标题不含任何密码/passkey 关键词。
-        // 监视器修好（GUID 解析）后 Ready 且无进行中 CTAP 事务 → 走人脸，完全不靠名单。
+    fn ready_monitor_without_keywords_requires_password_fill_title() {
+        // v0.5.10: QQ邮箱/Google登录页填密码时，标题必须含「填充密码」关键词才走人脸。
+        // ready-monitor 单独不足以启用人脸——Google passkey 弹窗（"登录 - google 账号"）
+        // 同样满足 ready=true、active=false、browser owner，但应被拒绝。
         let qq = context(
             "windows 安全中心 登录qq邮箱 - google chrome 登录qq邮箱 - google chrome",
             &["credentialuibroker.exe", "chrome.exe"],
@@ -812,7 +819,7 @@ mod shared_credentials_tests {
         );
         assert_eq!(
             classify_broker_context(&qq, true),
-            BrokerScene::BrowserPasswordFill
+            BrokerScene::MonitorUnavailable
         );
     }
 

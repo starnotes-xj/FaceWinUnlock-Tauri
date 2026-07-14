@@ -48,11 +48,8 @@ async function refreshDashboardData() {
   }
 }
 
-function onVisibilityChange() {
-  if (!document.hidden) {
-    refreshDashboardData();
-  }
-}
+// 每 3 秒轮询刷新今日识别统计——Tauri webview 的 visibilitychange 事件不可靠。
+let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 onMounted(async () => {
   // 确保面容 store 已加载
@@ -60,8 +57,8 @@ onMounted(async () => {
     try { await facesStore.init(); } catch (_) {}
   }
 
-  // 页面可见时刷新今日统计（解锁后回到仪表盘）
-  document.addEventListener('visibilitychange', onVisibilityChange);
+  // 启动定时刷新（解锁后仪表盘恢复可见时数据自动更新）
+  refreshTimer = setInterval(refreshDashboardData, 3000);
 
   // v7 火眼金睛眼周粒子
   const eyeParticlesContainer = document.getElementById('v7EyeParticles');
@@ -103,7 +100,10 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  document.removeEventListener('visibilitychange', onVisibilityChange);
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
 });
 </script>
 

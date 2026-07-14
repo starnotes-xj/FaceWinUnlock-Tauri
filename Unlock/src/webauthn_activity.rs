@@ -50,9 +50,14 @@ pub(crate) const ACTIVE_EVENT_NAME: &str = "Global\\FaceWinUnlockTauriWebAuthnAc
 const CHANNEL: &str = "Microsoft-Windows-WebAuthN/Operational";
 const PROVIDER: &str = "Microsoft-Windows-WebAuthN";
 const TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
-const EVENT_QUERY: &str = "*[System[(EventID=1000 or EventID=1001 or EventID=1002 or EventID=1003 or EventID=1004 or EventID=1005 or EventID=1006 or EventID=1007 or EventID=1008)]]";
-const RECENT_EVENT_QUERY: &str = "*[System[(EventID=1000 or EventID=1001 or EventID=1002 or EventID=1003 or EventID=1004 or EventID=1005 or EventID=1006 or EventID=1007 or EventID=1008) and TimeCreated[timediff(@SystemTime) <= 600000]]]";
-const REQUIRED_EVENT_IDS: [u32; 9] = [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008];
+/// 凭据枚举事件（2250/2251）是 CTAP 事务前最早的 WebAuthn 信号。
+/// 枚举在弹窗出现前即发生；用它做"近期 WebAuthn 活动"标记，即使枚举已完成也保留。
+const ENUM_TTL: Duration = Duration::from_secs(10);
+const CTAP_EVENT_IDS: &str = "1000 or 1001 or 1002 or 1003 or 1004 or 1005 or 1006 or 1007 or 1008";
+const EVENT_QUERY: &str =
+    "*[System[(EventID=2250 or EventID=2251 or EventID=1000 or EventID=1001 or EventID=1002 or EventID=1003 or EventID=1004 or EventID=1005 or EventID=1006 or EventID=1007 or EventID=1008)]]";
+const REQUIRED_EVENT_IDS: [u32; 11] =
+    [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 2250, 2251];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EventPhase {
@@ -62,10 +67,14 @@ enum EventPhase {
 
 fn event_phase(event_id: u32) -> Option<EventPhase> {
     match event_id {
-        1000 | 1003 | 1006 => Some(EventPhase::Started),
-        1001 | 1002 | 1004 | 1005 | 1007 | 1008 => Some(EventPhase::Completed),
+        1000 | 1003 | 1006 | 2250 => Some(EventPhase::Started),
+        1001 | 1002 | 1004 | 1005 | 1007 | 1008 | 2251 => Some(EventPhase::Completed),
         _ => None,
     }
+}
+/// 返回 true 表示该事件 ID 属于凭据枚举阶段（弹窗出现之前即发生）。
+fn is_enumeration_event(event_id: u32) -> bool {
+    event_id == 2250 || event_id == 2251
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +93,8 @@ struct TransactionState {
 #[derive(Debug, Default)]
 struct ActivityTracker {
     transactions: HashMap<String, TransactionState>,
+    /// 最近一次凭据枚举开始的时刻。None 表示未观察到或无近期枚举。
+    last_enumeration_started: Option<SystemTime>,
 }
 
 impl ActivityTracker {
@@ -91,6 +102,13 @@ impl ActivityTracker {
         let Some(phase) = event_phase(event.event_id) else {
             return;
         };
+        if is_enumeration_event(event.event_id) {
+            // 枚举事件不需要完整的事务配对；记录最近一次枚举开始时刻即可。
+            if phase == EventPhase::Started {
+                self.last_enumeration_started = Some(event.observed_at);
+            }
+            return;
+        }
         if self
             .transactions
             .get(&event.transaction_id)
@@ -111,10 +129,16 @@ impl ActivityTracker {
         self.transactions.retain(|_, state| {
             now.duration_since(state.observed_at).unwrap_or_default() <= TRANSACTION_TTL
         });
-        self.transactions
+        let ctap_active = self
+            .transactions
             .values()
             .filter(|state| state.active)
-            .count()
+            .count();
+        // 近期有凭据枚举（弹窗出现前的早期信号）时也视同 active。
+        let enum_recent = self
+            .last_enumeration_started
+            .is_some_and(|t| now.duration_since(t).unwrap_or_default() <= ENUM_TTL);
+        if enum_recent { ctap_active.max(1) } else { ctap_active }
     }
 }
 
@@ -250,7 +274,11 @@ fn replay_recent(
     active_event: HANDLE,
 ) -> Result<(), String> {
     let channel = wide(CHANNEL);
-    let query = wide(RECENT_EVENT_QUERY);
+    // 回放时也要查询枚举事件，启动后立即恢复近期 WebAuthn 活动状态。
+    let query_str = format!(
+        "*[System[(EventID=2250 or EventID=2251 or {CTAP_EVENT_IDS}) and TimeCreated[timediff(@SystemTime) <= 600000]]]"
+    );
+    let query = wide(&query_str);
     let result_set = unsafe {
         EvtQuery(
             None,
