@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted, reactive } from 'vue';
+import { ref, onMounted, reactive, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useOptionsStore } from "../stores/options";
 import AccountAuthForm from '../components/AccountAuthForm.vue';
 import { handleLocalAccount, formatObjectString } from '../utils/function';
@@ -179,21 +181,80 @@ const confirmDeployment = () => {
   }).catch((error: any) => { isDeploying.value = false; deployStatus.value = 'exception'; errorLog(formatObjectString("部署失败：", error)); ElMessageBox.alert(error, '部署失败', { type: 'error' }); });
 };
 
+async function waitForSessionUnlock() {
+  let resolveUnlock!: () => void;
+  let settled = false;
+  let focusFallbackArmed = false;
+  let unlistenSession: UnlistenFn = () => {};
+  let unlistenFocus: UnlistenFn = () => {};
+  const promise = new Promise<void>((resolve) => { resolveUnlock = resolve; });
+
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    unlistenSession();
+    unlistenFocus();
+    resolveUnlock();
+  };
+
+  unlistenSession = await listen('session-unlocked', settle);
+  if (settled) unlistenSession();
+  unlistenFocus = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+    if (focused && focusFallbackArmed) settle();
+  });
+  if (settled) unlistenFocus();
+
+  return {
+    promise,
+    armFocusFallback: () => { focusFallbackArmed = true; },
+    cancel: () => {
+      if (settled) return;
+      settled = true;
+      unlistenSession();
+      unlistenFocus();
+    },
+  };
+}
+
+async function completeInitialization() {
+  const errorList: any = await optionsStore.saveOptions({ is_initialized: 'true' });
+  if (errorList.length > 0) {
+    await ElMessageBox.alert(formatObjectString(errorList), '保存设置失败', { confirmButtonText: '确定' });
+    return;
+  }
+
+  const appWindow = getCurrentWindow();
+  await appWindow.show();
+  await appWindow.setFocus();
+  document.documentElement.classList.remove('anim-idle');
+  await router.replace('/');
+  await nextTick();
+  ElMessage.success('初始化成功');
+}
+
 const finishInit = () => {
   if (!authForm.username || !authForm.password) { return ElMessage.warning('请填写完整的账号密码信息'); }
   ElMessageBox.alert('电脑将进入锁屏界面，5秒后自动解锁。<br>请不要手动解锁!!<br>如果5 秒内未解锁，代表测试失败，请手动解锁。', '通知', {
     confirmButtonText: '确定', dangerouslyUseHTMLString: true,
-    callback: (action: any) => {
+    callback: async (action: any) => {
       if (action === 'confirm') {
         handleLocalAccount(authForm, true);
         isFinalizing.value = true;
-        invoke('test_win_logon', { userName: authForm.username, password: authForm.password }).then(() => {
-          optionsStore.saveOptions({ is_initialized: 'true' }).then((errorList: any) => {
-            if (errorList.length > 0) { ElMessageBox.alert(formatObjectString(errorList), '保存设置失败', { confirmButtonText: '确定' }); }
-            else { ElMessage.success('初始化成功'); router.push('/'); }
-          });
-        }).catch((error: any) => { errorLog(formatObjectString("测试失败：", error)); ElMessageBox.alert(formatObjectString(error), '测试失败', { confirmButtonText: '确定' }); })
-        .finally(() => { handleLocalAccount(authForm, false); isFinalizing.value = false; });
+        let unlockWaiter: Awaited<ReturnType<typeof waitForSessionUnlock>> | null = null;
+        try {
+          unlockWaiter = await waitForSessionUnlock();
+          await invoke('test_win_logon', { userName: authForm.username, password: authForm.password });
+          unlockWaiter.armFocusFallback();
+          await unlockWaiter.promise;
+          await completeInitialization();
+        } catch (error) {
+          unlockWaiter?.cancel();
+          errorLog(formatObjectString("测试失败：", error));
+          await ElMessageBox.alert(formatObjectString(error), '测试失败', { confirmButtonText: '确定' });
+        } finally {
+          handleLocalAccount(authForm, false);
+          isFinalizing.value = false;
+        }
       }
     }
   });

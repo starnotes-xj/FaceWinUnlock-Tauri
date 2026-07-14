@@ -1,3 +1,6 @@
+use std::sync::OnceLock;
+
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_log::log::error;
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
@@ -8,6 +11,13 @@ use windows::Win32::{
 };
 
 use crate::utils::api::stop_camera;
+
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+pub fn register_app_handle(app_handle: AppHandle) {
+    let _ = APP_HANDLE.set(app_handle);
+}
+
 // windows回调
 pub unsafe extern "system" fn wnd_proc_subclass(
     hwnd: HWND,
@@ -28,7 +38,13 @@ pub unsafe extern "system" fn wnd_proc_subclass(
                     error!("关闭摄像头失败: {}", e.to_string());
                 }
             }
-            WTS_SESSION_UNLOCK => {}
+            WTS_SESSION_UNLOCK => {
+                if let Some(app_handle) = APP_HANDLE.get() {
+                    if let Err(e) = app_handle.emit("session-unlocked", ()) {
+                        error!("发送会话解锁事件失败: {}", e);
+                    }
+                }
+            }
             _ => {}
         }
     }

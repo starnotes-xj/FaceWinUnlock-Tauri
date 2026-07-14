@@ -24,14 +24,15 @@ Default log paths:
 Run these first. Stop the release if any item fails.
 
 1. Add or edit a face; camera preview appears without a long black screen.
-2. `Win+L`, move the mouse, and unlock by face.
-3. `Win+L`, keep the face away, enter Windows PIN manually, and confirm the camera LED turns off within 5 seconds.
-4. Reveal a saved browser password; face verification succeeds.
-5. Fill a website password such as QQ Mail; face verification succeeds.
-6. Perform a Google or webauthn.io passkey action and choose Windows Hello or a security key; the generic Credential Provider must not start its camera.
-7. Separately choose a passkey saved with FaceWinUnlock; the plugin's dedicated face authorization starts the camera and succeeds.
-8. Enable automatic lock with a 30-second timeout and confirm it locks through the interactive-session helper.
-9. Sleep/resume and repeat face unlock plus manual PIN unlock.
+2. On a clean setup, finish the initialization lock-screen test. After automatic unlock, the dashboard must be visible immediately without clicking the app window.
+3. `Win+L`, move the mouse, and unlock by face.
+4. `Win+L`, keep the face away, enter Windows PIN manually, and confirm the camera LED turns off within 5 seconds.
+5. Reveal a saved browser password; face verification succeeds.
+6. Fill a website password such as QQ Mail; face verification succeeds.
+7. Perform a Google or webauthn.io passkey action and choose Windows Hello or a security key; the generic Credential Provider must not start its camera.
+8. Separately choose a passkey saved with FaceWinUnlock; the plugin's dedicated face authorization starts the camera and succeeds.
+9. Enable automatic lock with a 30-second timeout and confirm it locks through the interactive-session helper.
+10. Sleep/resume and repeat face unlock plus manual PIN unlock.
 
 ## Enrollment And Camera Ownership
 
@@ -67,7 +68,34 @@ Run each case at least six consecutive times:
 | Sleep then resume, manual PIN | No frozen LogonUI; PIN works; camera releases |
 | Rapid lock/unlock | No stale credentials, duplicate autologon, or same-session camera reopen |
 
-Issue #26 is ready to close only after sleep/resume and manual PIN release pass repeatedly on an installed build. Unit tests alone are insufficient.
+### Sleep And Hibernate Reproduction
+
+First check which power states the machine supports:
+
+```powershell
+powercfg /a
+```
+
+Run these cases on an installed build, six consecutive times each:
+
+1. From the desktop, choose **Sleep**, wait at least 20 seconds, wake the computer, and unlock by face.
+2. Press `Win+L`, move the mouse so face scanning and the camera LED are active, keep your face out of view, then use the lock-screen power menu to choose **Sleep**. Wake the computer and unlock with Windows PIN.
+3. Repeat case 2 but unlock by face after resume.
+4. Hibernate from the desktop, wake the computer, then repeat both face and manual PIN unlock.
+
+The Hibernate item can be absent when hibernation is disabled. In an administrator terminal, enable the full hibernation file and test directly even if the menu item remains hidden:
+
+```powershell
+powercfg /hibernate on
+powercfg /h /type full
+shutdown /h
+```
+
+Save open work before `shutdown /h`. If `powercfg /a` reports that S4 hibernation is unavailable, record that result and run the hibernate cases on another supported machine instead of treating Sleep as equivalent.
+
+After every wake, confirm that the account tile, PIN/password field, and lower-left account controls are present; the spinner does not remain indefinitely; the desktop opens normally; and the camera LED turns off within 5 seconds after manual PIN unlock. Record the exact failure time and preserve `unlock.log`, `facewinunlock.log`, and `app.log` before reinstalling or clearing logs.
+
+Issue #26 is ready to close only after the active-camera Sleep case, hibernate/resume, face unlock, and manual PIN release all pass repeatedly on an installed build. Unit tests alone are insufficient.
 
 ## Automatic Lock And Issue #27
 
