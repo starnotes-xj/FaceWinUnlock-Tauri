@@ -213,8 +213,42 @@ pub fn get_camera() -> Result<CustomResult, CustomResult> {
 //   "ui_done"    — UI 用完摄像头（stop_camera），后台可恢复锁屏预热（秒解锁）。
 // 非致命：服务未运行 / 管道连接失败均忽略。
 fn notify_unlock_camera(cmd: &str) {
-    if let Ok(client) = Client::new(r"\\.\pipe\MansonWindowsUnlockRustUnlock") {
-        let _ = crate::utils::pipe::write(client.handle, String::from(cmd));
+    use std::sync::{mpsc, OnceLock};
+
+    static CAMERA_NOTIFY_TX: OnceLock<mpsc::Sender<String>> = OnceLock::new();
+    let sender = CAMERA_NOTIFY_TX.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<String>();
+        thread::spawn(move || {
+            while let Ok(command) = rx.recv() {
+                if let Ok(client) = Client::new(r"\\.\pipe\MansonWindowsUnlockRustUnlock") {
+                    let _ = crate::utils::pipe::write(client.handle, command);
+                }
+            }
+        });
+        tx
+    });
+    let _ = sender.send(cmd.to_string());
+}
+
+struct CameraYieldGuard {
+    release_on_drop: bool,
+}
+
+impl CameraYieldGuard {
+    fn new() -> Self {
+        Self { release_on_drop: true }
+    }
+
+    fn keep_yielding(&mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl Drop for CameraYieldGuard {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            notify_unlock_camera("ui_done");
+        }
     }
 }
 
@@ -237,6 +271,7 @@ pub fn open_camera(
     // 不让位会导致 UI open_camera 抢不到、录入采集只出黑帧（用户反馈：无脸时锁屏走开→鼠标触发
     // 识别→PIN 解锁后摄像头常亮期间录入黑屏）。ui_release 让后台立即释放并在兜底窗口内不再预热。
     notify_unlock_camera("ui_release");
+    let mut yield_guard = CameraYieldGuard::new();
 
     // 按指定后端或依次尝试 MSMF → DShow → Any
     let backends_to_try: Vec<CameraBackend> = match backend {
@@ -260,6 +295,8 @@ pub fn open_camera(
                         CustomResult::error(Some(format!("获取 app 状态失败: {}", e)), None)
                     })?;
                     state.camera = Some(OpenCVResource { inner: cam });
+                    // 成功后由 stop_camera 发送 ui_done；失败或提前返回则由 guard 立即归还。
+                    yield_guard.keep_yielding();
                     return Ok(CustomResult::success(None, None));
                 }
                 Err(e) => {

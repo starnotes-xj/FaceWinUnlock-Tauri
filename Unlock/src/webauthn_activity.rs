@@ -7,21 +7,21 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    ffi::{c_void, OsStr},
+    ffi::OsStr,
     mem::size_of,
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     slice,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{atomic::Ordering, Arc},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use windows::Win32::{
-    Foundation::{CloseHandle, GetLastError, LocalFree, BOOL, ERROR_NO_MORE_ITEMS, HANDLE, HLOCAL},
+    Foundation::{
+        CloseHandle, GetLastError, LocalFree, BOOL, ERROR_NO_MORE_ITEMS, HANDLE, HLOCAL,
+        WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    },
     Security::{
         Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
         PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
@@ -33,12 +33,11 @@ use windows::Win32::{
             EvtNextEventMetadata, EvtOpenChannelConfig, EvtOpenEventMetadataEnum,
             EvtOpenPublisherMetadata, EvtQuery, EvtQueryChannelPath, EvtQueryForwardDirection,
             EvtRender, EvtRenderContextValues, EvtRenderEventValues, EvtSubscribe,
-            EvtSubscribeActionDeliver, EvtSubscribeActionError, EvtSubscribeToFutureEvents,
-            EvtVarTypeBoolean, EvtVarTypeFileTime, EvtVarTypeGuid, EvtVarTypeString,
-            EvtVarTypeSysTime, EvtVarTypeUInt16, EvtVarTypeUInt32, EVT_HANDLE,
-            EVT_SUBSCRIBE_NOTIFY_ACTION, EVT_VARIANT, EVT_VARIANT_TYPE_MASK,
+            EvtSubscribeToFutureEvents, EvtVarTypeBoolean, EvtVarTypeFileTime, EvtVarTypeGuid,
+            EvtVarTypeString, EvtVarTypeSysTime, EvtVarTypeUInt16, EvtVarTypeUInt32,
+            EVT_HANDLE, EVT_VARIANT, EVT_VARIANT_TYPE_MASK,
         },
-        Threading::{CreateEventW, ResetEvent, SetEvent},
+        Threading::{CreateEventW, ResetEvent, SetEvent, WaitForSingleObject},
     },
 };
 use windows_core::{w, PCWSTR};
@@ -139,16 +138,6 @@ impl Drop for EvtHandle {
     }
 }
 
-struct CallbackContext {
-    tracker: Mutex<ActivityTracker>,
-    render_context: EVT_HANDLE,
-    render_lock: Mutex<()>,
-    ready_event: HANDLE,
-    active_event: HANDLE,
-    unhealthy: AtomicBool,
-    exe_dir: PathBuf,
-}
-
 pub(crate) fn run(state: Arc<State>, exe_dir: PathBuf) {
     let (ready_event, active_event) = match create_status_events() {
         Ok(events) => events,
@@ -164,12 +153,11 @@ pub(crate) fn run(state: Arc<State>, exe_dir: PathBuf) {
 
     let mut retry_delay = Duration::from_secs(1);
     while !state.should_exit.load(Ordering::SeqCst) {
-        unsafe {
-            let _ = ResetEvent(ready_event.0);
-        }
+        reset_status_events(ready_event.0, active_event.0);
         match monitor_once(&state, &exe_dir, ready_event.0, active_event.0) {
             Ok(()) => break,
             Err(error) => {
+                reset_status_events(ready_event.0, active_event.0);
                 log_service(
                     &exe_dir,
                     "WARN",
@@ -181,10 +169,7 @@ pub(crate) fn run(state: Arc<State>, exe_dir: PathBuf) {
         retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
     }
 
-    unsafe {
-        let _ = ResetEvent(ready_event.0);
-        let _ = ResetEvent(active_event.0);
-    }
+    reset_status_events(ready_event.0, active_event.0);
 }
 
 fn monitor_once(
@@ -196,127 +181,74 @@ fn monitor_once(
     validate_provider_contract()?;
 
     let render_context = EvtHandle(create_render_context()?);
-    let context = Box::new(CallbackContext {
-        tracker: Mutex::new(ActivityTracker::default()),
-        render_context: render_context.0,
-        render_lock: Mutex::new(()),
-        ready_event,
-        active_event,
-        unhealthy: AtomicBool::new(false),
-        exe_dir: exe_dir.to_path_buf(),
-    });
-    let context_ptr = (&*context as *const CallbackContext).cast::<c_void>();
+    let signal = unsafe { CreateEventW(None, true, false, None) }
+        .map(KernelHandle)
+        .map_err(|error| format!("create subscription signal failed: {error:?}"))?;
+    let mut tracker = ActivityTracker::default();
 
     // Subscribe first, then replay. Timestamp ordering in ActivityTracker makes
-    // duplicate or out-of-order callback/replay delivery harmless.
+    // duplicate or out-of-order subscription/replay delivery harmless. Pull mode
+    // keeps all event processing on this thread and needs no callback raw pointer.
     let channel = wide(CHANNEL);
     let query = wide(EVENT_QUERY);
     let subscription = unsafe {
         EvtSubscribe(
             None,
-            None,
+            Some(signal.0),
             PCWSTR::from_raw(channel.as_ptr()),
             PCWSTR::from_raw(query.as_ptr()),
             None,
-            Some(context_ptr),
-            Some(Some(subscription_callback)),
+            None,
+            None,
             EvtSubscribeToFutureEvents.0,
         )
     }
     .map(EvtHandle)
     .map_err(|error| format!("EvtSubscribe failed: {error:?}"))?;
 
-    replay_recent(&context)?;
-    sync_active_event(&context);
+    replay_recent(&mut tracker, render_context.0, active_event)?;
+    sync_active_event(&mut tracker, active_event);
     unsafe {
         SetEvent(ready_event).map_err(|error| format!("SetEvent(Ready) failed: {error:?}"))?;
     }
     log_service(exe_dir, "INFO", "WebAuthn monitor ready");
 
-    while !state.should_exit.load(Ordering::SeqCst) && !context.unhealthy.load(Ordering::SeqCst) {
-        sync_active_event(&context);
-        thread::sleep(Duration::from_millis(500));
-    }
-
-    unsafe {
-        let _ = ResetEvent(ready_event);
-    }
-    drop(subscription);
-
-    let unhealthy = context.unhealthy.load(Ordering::SeqCst);
-    // EvtClose(subscription) 不保证等待在飞回调返回；回调持有 context 裸指针，
-    // 若此处随作用域释放 Box 而某个回调仍在执行 → use-after-free。故意泄漏 context
-    // 换取「回调期间 context 内存始终有效」——每次 monitor_once 返回至多泄漏一个小
-    // 结构（Mutex<HashMap> + PathBuf，数百字节），修好 GUID 解析后监视器几乎不再
-    // unhealthy 重连，泄漏可忽略。render_context 句柄仍随栈正常 EvtClose：在飞回调
-    // 若用到已关闭句柄只会得到 API 错误（返回 Err、标记 unhealthy），不构成内存不安全。
-    std::mem::forget(context);
-
-    if unhealthy {
-        Err("event subscription reported an error".to_string())
-    } else {
-        Ok(())
-    }
-}
-
-unsafe extern "system" fn subscription_callback(
-    action: EVT_SUBSCRIBE_NOTIFY_ACTION,
-    user_context: *const c_void,
-    event: EVT_HANDLE,
-) -> u32 {
-    if user_context.is_null() {
-        return 1;
-    }
-    let context = &*(user_context.cast::<CallbackContext>());
-
-    if action == EvtSubscribeActionError {
-        context.unhealthy.store(true, Ordering::SeqCst);
-        let _ = ResetEvent(context.ready_event);
-        log_service(
-            &context.exe_dir,
-            "WARN",
-            &format!("WebAuthn subscription callback error: {}", event.0 as u32),
-        );
-        return 0;
-    }
-    if action != EvtSubscribeActionDeliver {
-        return 0;
-    }
-
-    let parsed = {
-        let _render_guard = context.render_lock.lock().unwrap();
-        render_activity_event(context.render_context, event)
-    };
-    let _ = EvtClose(event);
-    match parsed {
-        Ok(activity) => {
-            let event_id = activity.event_id;
-            let active_count = {
-                let mut tracker = context.tracker.lock().unwrap();
-                tracker.apply(activity);
-                tracker.active_count(SystemTime::now())
-            };
-            update_active_event(context.active_event, active_count > 0);
-            log_service(
-                &context.exe_dir,
-                "INFO",
-                &format!("WebAuthn monitor event {event_id}: active_transactions={active_count}"),
-            );
-        }
-        Err(error) => {
-            context.unhealthy.store(true, Ordering::SeqCst);
-            let _ = ResetEvent(context.ready_event);
-            log_service(
-                &context.exe_dir,
-                "WARN",
-                &format!("WebAuthn event parse failed: {error}"),
-            );
+    while !state.should_exit.load(Ordering::SeqCst) {
+        match unsafe { WaitForSingleObject(signal.0, 500) } {
+            WAIT_OBJECT_0 => {
+                drain_events(
+                    subscription.0,
+                    render_context.0,
+                    &mut tracker,
+                    active_event,
+                    Some(exe_dir),
+                    "subscription",
+                )?;
+                unsafe {
+                    ResetEvent(signal.0)
+                        .map_err(|error| format!("ResetEvent(subscription) failed: {error:?}"))?;
+                }
+            }
+            WAIT_TIMEOUT => sync_active_event(&mut tracker, active_event),
+            WAIT_FAILED => {
+                return Err(format!(
+                    "waiting for WebAuthn subscription failed: {:?}",
+                    unsafe { GetLastError() }
+                ));
+            }
+            other => return Err(format!("unexpected WebAuthn subscription wait result: {other:?}")),
         }
     }
-    0
+
+    reset_status_events(ready_event, active_event);
+    Ok(())
 }
 
-fn replay_recent(context: &CallbackContext) -> Result<(), String> {
+fn replay_recent(
+    tracker: &mut ActivityTracker,
+    render_context: EVT_HANDLE,
+    active_event: HANDLE,
+) -> Result<(), String> {
     let channel = wide(CHANNEL);
     let query = wide(RECENT_EVENT_QUERY);
     let result_set = unsafe {
@@ -330,30 +262,50 @@ fn replay_recent(context: &CallbackContext) -> Result<(), String> {
     .map(EvtHandle)
     .map_err(|error| format!("recent event query failed: {error:?}"))?;
 
+    drain_events(result_set.0, render_context, tracker, active_event, None, "replay")
+}
+
+fn drain_events(
+    result_set: EVT_HANDLE,
+    render_context: EVT_HANDLE,
+    tracker: &mut ActivityTracker,
+    active_event: HANDLE,
+    log_dir: Option<&Path>,
+    operation: &str,
+) -> Result<(), String> {
     loop {
         let mut raw_events = [0isize; 16];
         let mut returned = 0u32;
-        let result = unsafe { EvtNext(result_set.0, &mut raw_events, 0, 0, &mut returned) };
+        let result = unsafe { EvtNext(result_set, &mut raw_events, 0, 0, &mut returned) };
         if let Err(error) = result {
             if unsafe { GetLastError() } == ERROR_NO_MORE_ITEMS {
                 break;
             }
-            return Err(format!("EvtNext replay failed: {error:?}"));
+            return Err(format!("EvtNext {operation} failed: {error:?}"));
         }
         if returned == 0 {
             break;
         }
-        for raw in raw_events.into_iter().take(returned as usize) {
-            let event = EVT_HANDLE(raw);
-            let parsed = {
-                let _render_guard = context.render_lock.lock().unwrap();
-                unsafe { render_activity_event(context.render_context, event) }
-            };
-            unsafe {
-                let _ = EvtClose(event);
+        // Wrap the full batch before parsing so every event handle is closed even
+        // when one malformed event aborts this subscription attempt.
+        let events: Vec<EvtHandle> = raw_events
+            .into_iter()
+            .take(returned as usize)
+            .map(|raw| EvtHandle(EVT_HANDLE(raw)))
+            .collect();
+        for event in &events {
+            let activity = unsafe { render_activity_event(render_context, event.0) }?;
+            let event_id = activity.event_id;
+            tracker.apply(activity);
+            let active_count = tracker.active_count(SystemTime::now());
+            update_active_event(active_event, active_count > 0);
+            if let Some(exe_dir) = log_dir {
+                log_service(
+                    exe_dir,
+                    "INFO",
+                    &format!("WebAuthn monitor event {event_id}: active_transactions={active_count}"),
+                );
             }
-            let activity = parsed?;
-            context.tracker.lock().unwrap().apply(activity);
         }
     }
     Ok(())
@@ -649,13 +601,9 @@ fn create_status_events() -> Result<(KernelHandle, KernelHandle), String> {
     ))
 }
 
-fn sync_active_event(context: &CallbackContext) {
-    let active_count = context
-        .tracker
-        .lock()
-        .unwrap()
-        .active_count(SystemTime::now());
-    update_active_event(context.active_event, active_count > 0);
+fn sync_active_event(tracker: &mut ActivityTracker, active_event: HANDLE) {
+    let active_count = tracker.active_count(SystemTime::now());
+    update_active_event(active_event, active_count > 0);
 }
 
 fn update_active_event(event: HANDLE, active: bool) {
@@ -665,6 +613,13 @@ fn update_active_event(event: HANDLE, active: bool) {
         } else {
             let _ = ResetEvent(event);
         }
+    }
+}
+
+fn reset_status_events(ready_event: HANDLE, active_event: HANDLE) {
+    unsafe {
+        let _ = ResetEvent(ready_event);
+        let _ = ResetEvent(active_event);
     }
 }
 
@@ -682,23 +637,12 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        subscription_callback, ActivityEvent, ActivityTracker, CallbackContext, KernelHandle,
-        TRANSACTION_TTL,
+        reset_status_events, ActivityEvent, ActivityTracker, KernelHandle, TRANSACTION_TTL,
     };
-    use std::{
-        fs,
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            Mutex,
-        },
-        time::{Duration, SystemTime},
-    };
+    use std::time::{Duration, SystemTime};
     use windows::Win32::{
         Foundation::WAIT_TIMEOUT,
-        System::{
-            EventLog::{EvtSubscribeActionError, EVT_HANDLE},
-            Threading::{CreateEventW, WaitForSingleObject},
-        },
+        System::Threading::{CreateEventW, WaitForSingleObject},
     };
 
     fn event(event_id: u32, transaction_id: &str, observed_at: SystemTime) -> ActivityEvent {
@@ -782,35 +726,14 @@ mod tests {
     }
 
     #[test]
-    fn subscription_failure_clears_ready_state() {
+    fn monitor_reset_clears_ready_and_active_state() {
         let ready = KernelHandle(unsafe { CreateEventW(None, true, true, None) }.unwrap());
-        let active = KernelHandle(unsafe { CreateEventW(None, true, false, None) }.unwrap());
-        let log_dir = std::env::temp_dir().join(format!(
-            "facewinunlock-webauthn-test-{}",
-            std::process::id()
-        ));
-        let context = CallbackContext {
-            tracker: Mutex::new(ActivityTracker::default()),
-            render_context: EVT_HANDLE(0),
-            render_lock: Mutex::new(()),
-            ready_event: ready.0,
-            active_event: active.0,
-            unhealthy: AtomicBool::new(false),
-            exe_dir: log_dir.clone(),
-        };
+        let active = KernelHandle(unsafe { CreateEventW(None, true, true, None) }.unwrap());
 
-        let result = unsafe {
-            subscription_callback(
-                EvtSubscribeActionError,
-                (&context as *const CallbackContext).cast(),
-                EVT_HANDLE(1234),
-            )
-        };
+        reset_status_events(ready.0, active.0);
 
-        assert_eq!(result, 0);
-        assert!(context.unhealthy.load(Ordering::SeqCst));
         assert_eq!(unsafe { WaitForSingleObject(ready.0, 0) }, WAIT_TIMEOUT);
-        let _ = fs::remove_dir_all(log_dir);
+        assert_eq!(unsafe { WaitForSingleObject(active.0, 0) }, WAIT_TIMEOUT);
     }
 
     // 根因回归：真实 WebAuthn CTAP 事件（1000-1008）的 TransactionId 是 GUID 变体

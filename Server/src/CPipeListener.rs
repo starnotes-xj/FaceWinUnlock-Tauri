@@ -138,13 +138,19 @@ fn trigger_broker_pin_fallback(
     }
     stop_flag.store(true, Ordering::SeqCst);
 
-    let raw = creds_pipe_raw.swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
-    if raw != INVALID_HANDLE_VALUE.0 as isize {
-        unsafe { let _ = CloseHandle(HANDLE(raw as *mut _)); }
-    }
-
+    // 先让 Windows 重枚举并显示 PIN。同步管道的跨线程 CloseHandle 可能等待正在
+    // 进行的 ReadFile，不能让它延迟 broker 回退通知。
     if let Err(e) = send_events.notify_changed() {
         error!("CPipeListener - 触发 PIN 回退重枚举失败: {:?}", e);
+    }
+
+    let raw = creds_pipe_raw.swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
+    if raw != INVALID_HANDLE_VALUE.0 as isize {
+        crate::dll_add_ref();
+        thread::spawn(move || {
+            let _dll_ref = DllRefGuard;
+            unsafe { let _ = CloseHandle(HANDLE(raw as *mut _)); }
+        });
     }
 }
 
