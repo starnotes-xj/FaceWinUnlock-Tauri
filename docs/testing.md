@@ -111,8 +111,10 @@ Issue #26 is ready to close only after the active-camera Sleep case, hibernate/r
 6. Unlock and remain in view; repeat idle wait.
 7. Expected: an authorized face prevents locking and the next check follows `max(60 seconds, configured timeout)`.
 8. Test once on the physical console and, when available, once in an active RDP session.
+9. Connect with a console-sharing remote-control tool such as vivo Office Suite, Sunlogin, or ToDesk. Keep moving/clicking/typing for longer than the configured timeout.
+10. Expected: remote input keeps the active Windows session non-idle, so the camera does not open and automatic lock does not run. Stop all remote input and move out of camera view; automatic lock should work again after the timeout.
 
-Useful success log lines include a lock request sent to an interactive session and workstation lock confirmation. API errors, helper nonzero exit, or missing WTS confirmation are failures. Issue #27 is ready to close only after real SYSTEM scheduled-task testing passes.
+Useful success log lines include a lock request sent to an interactive session and workstation lock confirmation. `cannot read active-session idle time` must skip locking rather than treat the session as idle. API errors, helper nonzero exit, or missing WTS confirmation are failures. Issue #27 is ready to close only after real SYSTEM scheduled-task testing passes.
 
 ## Browser Password Matrix
 

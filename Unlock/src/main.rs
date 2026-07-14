@@ -58,14 +58,15 @@ use windows::Win32::{
             PIPE_UNLIMITED_INSTANCES,
         },
         RemoteDesktop::{
-            WTSEnumerateSessionsW, WTSFreeMemory, WTSGetActiveConsoleSessionId,
+            ProcessIdToSessionId, WTSEnumerateSessionsW, WTSFreeMemory, WTSGetActiveConsoleSessionId,
             WTSQuerySessionInformationW, WTSQueryUserToken, WTSActive, WTSINFOEXW,
             WTSSessionInfoEx, WTS_SESSIONSTATE_LOCK, WTS_SESSIONSTATE_UNLOCK,
         },
         Shutdown::LockWorkStation,
         Threading::{
-            CreateMutexW, CreateProcessAsUserW, GetExitCodeProcess, WaitForSingleObject,
-            CREATE_NO_WINDOW, PROCESS_INFORMATION, STARTUPINFOW,
+            CreateMutexW, CreateProcessAsUserW, ExitProcess, GetCurrentProcessId,
+            GetExitCodeProcess, WaitForSingleObject, CREATE_NO_WINDOW, PROCESS_INFORMATION,
+            STARTUPINFOW,
         },
     },
     UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
@@ -87,6 +88,8 @@ const CAMERA_WARMUP_READY_FRAMES: usize = 10;
 const PREWARM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const WORKER_ARG: &str = "--facewinunlock-worker";
 const LOCK_WORKSTATION_ARG: &str = "--lock-workstation-once";
+const QUERY_IDLE_ARG: &str = "--query-interactive-idle-once";
+const IDLE_QUERY_ERROR_EXIT_CODE: u32 = u32::MAX;
 /// UI（录入 / 一致性校验 / 预览）请求让位摄像头后，抑制预热 + 自动开摄像头的兜底时长（毫秒）。
 /// UI 发 "ui_release" 时把 `camera_yield_until` 设为 now+此值，发 "ui_done"(stop_camera) 时清零。
 /// 修复「录入采集黑屏」——后台预热(prewarm)占着摄像头时 UI open_camera 抢不到、只出黑帧；
@@ -2034,17 +2037,6 @@ fn load_auto_lock_settings(db_path: &Path) -> (bool, u64) {
     (enabled, timeout)
 }
 
-/// 获取系统空闲时间（毫秒）
-fn get_idle_millis() -> u32 {
-    let mut lii = LASTINPUTINFO {
-        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
-        dwTime: 0,
-    };
-    unsafe { let _ = GetLastInputInfo(&mut lii); }
-    let tick = unsafe { windows::Win32::System::SystemInformation::GetTickCount() };
-    tick.wrapping_sub(lii.dwTime)
-}
-
 /// 自动锁屏监控线程
 fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
     let db_path = exe_dir.join("database.db");
@@ -2061,12 +2053,14 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
     let mut camera_rotation = load_camera_rotation(&db_path);
     let mut requested_inference = load_inference_backend(&db_path);
     // 授权冷却：人脸授权成功后这段时间内不再开摄像头。
-    // 根因：授权只更新 state.last_user_active，但不会重置 OS 的 GetLastInputInfo；
+    // 根因：授权只更新 state.last_user_active，但不会重置交互会话的输入空闲时间；
     // 用户长时间不碰键鼠（看屏幕、读网页、盯终端）时，下一轮 OS idle 仍超时 → 又开摄像头。
     // 冷却时长取 max(60s, autoLockTimeout)：用户在场时按其设定的检测间隔周期性复查，
     // 而非固定每 60s 一次，把空闲期间摄像头亮起频率降到与 autoLockTimeout 一致（通常 5 分钟）。
     const AUTH_COOLDOWN_MIN: Duration = Duration::from_secs(60);
     let mut auth_cooldown_until: Option<Instant> = None;
+    let mut last_idle_query_error_log = instant_secs_ago(60);
+    let mut next_idle_probe_at = Instant::now();
     let mut observed_power_generation = state.power.generation();
 
     loop {
@@ -2076,8 +2070,13 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         // 每 30 秒重新读取设置
         if last_config_check.elapsed() > Duration::from_secs(30) {
             let (enabled, timeout) = load_auto_lock_settings(&db_path);
+            let settings_changed = enabled != auto_lock_enabled || timeout != auto_lock_timeout;
             auto_lock_enabled = enabled;
             auto_lock_timeout = timeout;
+            if settings_changed {
+                next_idle_probe_at = Instant::now();
+                auth_cooldown_until = None;
+            }
             camera_rotation = load_camera_rotation(&db_path);
             if let Some(model_set) = models.as_mut() {
                 reload_models_if_inference_changed(
@@ -2098,6 +2097,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         let power_generation = state.power.generation();
         if power_generation != observed_power_generation {
             observed_power_generation = power_generation;
+            next_idle_probe_at = Instant::now();
             if state.power.is_suspended() {
                 auth_cooldown_until = None;
                 log_service(&exe_dir, "INFO", "auto-lock: paused for system suspend");
@@ -2124,14 +2124,45 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             continue;
         }
 
-        let idle_ms = get_idle_millis();
-        if idle_ms < (auto_lock_timeout * 1000) as u32 {
-            // 用户有真实键鼠输入，更新活跃时间并清空授权冷却（OS idle 已被真正重置）
+        // 人脸确认用户仍在场后的冷却期内不需要再次查询交互会话，也不开摄像头。
+        if let Some(until) = auth_cooldown_until {
+            if Instant::now() < until { continue; }
+            auth_cooldown_until = None;
+        }
+
+        if Instant::now() < next_idle_probe_at {
+            continue;
+        }
+
+        let idle_ms = match active_interactive_idle_millis() {
+            Ok(idle_ms) => idle_ms,
+            Err(error) => {
+                if last_idle_query_error_log.elapsed() >= Duration::from_secs(60) {
+                    log_service(
+                        &exe_dir,
+                        "WARN",
+                        &format!(
+                            "auto-lock: cannot read active-session idle time; skipping lock: {error}"
+                        ),
+                    );
+                    last_idle_query_error_log = Instant::now();
+                }
+                next_idle_probe_at = Instant::now() + Duration::from_secs(5);
+                continue;
+            }
+        };
+        let timeout_ms = auto_lock_timeout.saturating_mul(1000);
+        if idle_ms < timeout_ms {
+            next_idle_probe_at = Instant::now()
+                + Duration::from_millis(timeout_ms.saturating_sub(idle_ms).max(1_000));
+            // 用户有真实键鼠输入，更新活跃时间并清空授权冷却（会话空闲时间已被真正重置）
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
             state.last_user_active.store(now, Ordering::SeqCst);
             auth_cooldown_until = None;
             continue;
         }
+        // 已到空闲阈值；后续准备失败时短暂退避，避免每秒启动交互会话 helper。
+        next_idle_probe_at = Instant::now() + Duration::from_secs(5);
 
         // 空闲超时，且没有正在进行的解锁请求（避免冲突）
         if state.run_requested.load(Ordering::SeqCst) { continue; }
@@ -2158,13 +2189,6 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             last_record_reload = Instant::now();
         }
         if records.is_empty() { continue; } // 无人脸记录，不锁屏
-
-        // 授权冷却期内不开摄像头（修闪烁）：人脸授权成功后冷却期内，即使 OS idle 仍超时
-        // 也跳过——人脸识别不会重置 GetLastInputInfo，否则会反复开摄像头闪烁。
-        if let Some(until) = auth_cooldown_until {
-            if Instant::now() < until { continue; }
-            auth_cooldown_until = None;
-        }
 
         // broker 冷却期内不打开摄像头
         let now_ms = SystemTime::now()
@@ -2220,9 +2244,6 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
                 power_interrupted = true;
                 break;
             }
-            // 中途用户回来操作了
-            if get_idle_millis() < 500 { authorized = true; break; }
-
             let mut frame = Mat::default();
             if cap.read(&mut frame).is_err() || frame.empty() {
                 thread::sleep(Duration::from_millis(100));
@@ -2252,7 +2273,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
 
         if authorized {
             // 授权用户在场，更新活跃时间并进入授权冷却：下一轮 OS idle 仍会超时
-            // （人脸识别不重置 GetLastInputInfo），冷却避免反复开摄像头闪烁。
+            // （人脸识别不重置交互会话输入计时），冷却避免反复开摄像头闪烁。
             // 冷却时长 = max(60s, autoLockTimeout)：在场时按用户设定的检测间隔周期复查，
             // 而非固定每 60s，把空闲期间摄像头亮起频率降到与检测间隔一致。
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
@@ -2265,6 +2286,34 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
                 &format!("auto-lock: authorized user present, next presence check in {}s", cooldown.as_secs()),
             );
         } else {
+            // 摄像头检查期间可能刚好收到本地或远程输入。锁屏前必须重新读取一次，
+            // 查询失败也要保守取消，不能把未知状态当作用户离开。
+            match active_interactive_idle_millis() {
+                Ok(latest_idle_ms) if latest_idle_ms < timeout_ms => {
+                    next_idle_probe_at = Instant::now()
+                        + Duration::from_millis(
+                            timeout_ms.saturating_sub(latest_idle_ms).max(1_000),
+                        );
+                    log_service(
+                        &exe_dir,
+                        "INFO",
+                        "auto-lock: interactive input resumed during presence check; lock cancelled",
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log_service(
+                        &exe_dir,
+                        "WARN",
+                        &format!(
+                            "auto-lock: final active-session idle query failed; lock cancelled: {error}"
+                        ),
+                    );
+                    next_idle_probe_at = Instant::now() + Duration::from_secs(5);
+                    continue;
+                }
+            }
             // 无人或非授权人员 → 锁屏，清空授权冷却（锁屏后下次需重新识别）
             log_service(&exe_dir, "INFO", "auto-lock: no authorized face, locking workstation");
             auth_cooldown_until = None;
@@ -2345,6 +2394,25 @@ enum SessionLockState {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionSnapshot {
+    lock_state: SessionLockState,
+    idle_millis: Option<u64>,
+}
+
+const WTS_TIME_UNITS_PER_MILLISECOND: i64 = 10_000;
+
+fn wts_idle_millis(current_time: i64, last_input_time: i64) -> Option<u64> {
+    if current_time <= 0 || last_input_time <= 0 {
+        return None;
+    }
+    let elapsed = current_time.checked_sub(last_input_time)?;
+    if elapsed < 0 {
+        return None;
+    }
+    u64::try_from(elapsed / WTS_TIME_UNITS_PER_MILLISECOND).ok()
+}
+
 fn session_lock_state_from_flags(flags: i32) -> SessionLockState {
     match flags as u32 {
         WTS_SESSIONSTATE_LOCK => SessionLockState::Locked,
@@ -2396,6 +2464,41 @@ fn active_session_ids() -> Result<Vec<u32>, String> {
     }
 }
 
+fn active_interactive_idle_millis() -> Result<u64, String> {
+    let session_ids = active_session_ids()?;
+    let mut minimum = None;
+    let mut failures = Vec::new();
+    for &session_id in &session_ids {
+        match query_session_snapshot(session_id) {
+            Ok(SessionSnapshot {
+                idle_millis: Some(idle_millis),
+                ..
+            }) => {
+                minimum = Some(minimum.map_or(idle_millis, |idle: u64| idle.min(idle_millis)));
+            }
+            Ok(_) => failures.push(format!("session {session_id}: invalid WTS timestamps")),
+            Err(error) => failures.push(format!("session {session_id}: {error}")),
+        }
+    }
+
+    if let Some(idle_millis) = minimum {
+        return Ok(idle_millis);
+    }
+
+    if current_process_session_id().is_some_and(|session_id| session_ids.contains(&session_id)) {
+        return current_session_idle_millis()
+            .map(u64::from)
+            .ok_or_else(|| "GetLastInputInfo failed in the active interactive session".to_string());
+    }
+
+    query_idle_via_interactive_helper().map_err(|helper_error| {
+        format!(
+            "WTS LastInputTime unavailable ({}); {helper_error}",
+            failures.join(", ")
+        )
+    })
+}
+
 fn query_active_user_token() -> Result<(u32, OwnedHandle), String> {
     let mut failures = Vec::new();
     for session_id in active_session_ids()? {
@@ -2413,19 +2516,22 @@ fn query_active_user_token() -> Result<(u32, OwnedHandle), String> {
     Err(format!("WTSQueryUserToken failed ({})", failures.join(", ")))
 }
 
-fn launch_lock_helper_in_active_session() -> Result<u32, String> {
+fn launch_helper_in_active_session(
+    argument: &str,
+    timeout_ms: u32,
+) -> Result<(u32, u32), String> {
     let (session_id, user_token) = query_active_user_token()?;
     let executable = std::env::current_exe()
-        .map_err(|error| format!("cannot resolve lock helper executable: {error}"))?;
+        .map_err(|error| format!("cannot resolve helper executable: {error}"))?;
     let executable_text = executable
         .to_str()
-        .ok_or_else(|| "lock helper executable path is not valid UTF-8".to_string())?;
+        .ok_or_else(|| "helper executable path is not valid UTF-8".to_string())?;
     let current_dir = executable
         .parent()
-        .ok_or_else(|| "lock helper executable has no parent directory".to_string())?;
+        .ok_or_else(|| "helper executable has no parent directory".to_string())?;
 
     let application = to_wide(executable_text);
-    let mut command_line = to_wide(&format!("\"{executable_text}\" {LOCK_WORKSTATION_ARG}"));
+    let mut command_line = to_wide(&format!("\"{executable_text}\" {argument}"));
     let mut desktop = to_wide("winsta0\\default");
     let current_dir = to_wide(current_dir
         .to_str()
@@ -2457,25 +2563,40 @@ fn launch_lock_helper_in_active_session() -> Result<u32, String> {
     let _thread_handle = OwnedHandle(process.hThread);
     launch_result
         .map_err(|error| format!("CreateProcessAsUserW failed for session {session_id}: {error:?}"))?;
-    match unsafe { WaitForSingleObject(process_handle.0, 3_000) } {
+    match unsafe { WaitForSingleObject(process_handle.0, timeout_ms) } {
         WAIT_OBJECT_0 => {
             let mut exit_code = 1u32;
             unsafe { GetExitCodeProcess(process_handle.0, &mut exit_code) }
-                .map_err(|error| format!("GetExitCodeProcess(lock helper) failed: {error:?}"))?;
-            if exit_code != 0 {
-                return Err(format!("lock helper exited with code {exit_code}"));
-            }
+                .map_err(|error| format!("GetExitCodeProcess(helper) failed: {error:?}"))?;
+            Ok((session_id, exit_code))
         }
-        WAIT_TIMEOUT => return Err("lock helper timed out".to_string()),
-        WAIT_FAILED => return Err(format!(
+        WAIT_TIMEOUT => Err(format!("helper {argument} timed out")),
+        WAIT_FAILED => Err(format!(
             "waiting for lock helper failed: {:?}", unsafe { GetLastError() }
         )),
-        other => return Err(format!("unexpected lock helper wait result: {other:?}")),
+        other => Err(format!("unexpected helper wait result: {other:?}")),
+    }
+}
+
+fn launch_lock_helper_in_active_session() -> Result<u32, String> {
+    let (session_id, exit_code) =
+        launch_helper_in_active_session(LOCK_WORKSTATION_ARG, 3_000)?;
+    if exit_code != 0 {
+        return Err(format!("lock helper exited with code {exit_code}"));
     }
     Ok(session_id)
 }
 
-fn query_session_lock_state(session_id: u32) -> Result<SessionLockState, String> {
+fn query_idle_via_interactive_helper() -> Result<u64, String> {
+    let (session_id, exit_code) = launch_helper_in_active_session(QUERY_IDLE_ARG, 3_000)?;
+    if exit_code == IDLE_QUERY_ERROR_EXIT_CODE {
+        Err(format!("interactive idle helper failed in session {session_id}"))
+    } else {
+        Ok(u64::from(exit_code))
+    }
+}
+
+fn query_session_snapshot(session_id: u32) -> Result<SessionSnapshot, String> {
     let mut buffer = PWSTR::null();
     let mut bytes_returned = 0u32;
     let query_result = unsafe {
@@ -2505,11 +2626,18 @@ fn query_session_lock_state(session_id: u32) -> Result<SessionLockState, String>
             Err(format!("unsupported WTSSessionInfoEx level {}", info.Level))
         } else {
             let level = unsafe { info.Data.WTSInfoExLevel1 };
-            Ok(session_lock_state_from_flags(level.SessionFlags))
+            Ok(SessionSnapshot {
+                lock_state: session_lock_state_from_flags(level.SessionFlags),
+                idle_millis: wts_idle_millis(level.CurrentTime, level.LastInputTime),
+            })
         }
     };
     unsafe { WTSFreeMemory(buffer.0.cast()); }
     result
+}
+
+fn query_session_lock_state(session_id: u32) -> Result<SessionLockState, String> {
+    query_session_snapshot(session_id).map(|snapshot| snapshot.lock_state)
 }
 
 fn run_lock_workstation_helper() -> i32 {
@@ -2519,9 +2647,43 @@ fn run_lock_workstation_helper() -> i32 {
     }
 }
 
+fn elapsed_input_millis(now: u32, last_input: u32) -> u32 {
+    let elapsed = now.wrapping_sub(last_input);
+    // A remotely injected INPUT can carry a timestamp slightly ahead of GetTickCount.
+    // Treat the resulting half-range wrap as recent activity instead of a multi-day idle.
+    if elapsed > i32::MAX as u32 { 0 } else { elapsed }
+}
+
+fn current_session_idle_millis() -> Option<u32> {
+    let mut input = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    if !unsafe { GetLastInputInfo(&mut input) }.as_bool() {
+        return None;
+    }
+    let now = unsafe { windows::Win32::System::SystemInformation::GetTickCount() };
+    Some(elapsed_input_millis(now, input.dwTime))
+}
+
+fn current_process_session_id() -> Option<u32> {
+    let mut session_id = u32::MAX;
+    unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session_id) }
+        .ok()
+        .map(|_| session_id)
+}
+
+fn exit_with_current_session_idle() -> ! {
+    let exit_code = current_session_idle_millis().unwrap_or(IDLE_QUERY_ERROR_EXIT_CODE);
+    unsafe { ExitProcess(exit_code) }
+}
+
 #[cfg(test)]
 mod auto_lock_session_tests {
-    use super::{prioritize_active_sessions, session_lock_state_from_flags, SessionLockState};
+    use super::{
+        active_interactive_idle_millis, elapsed_input_millis, prioritize_active_sessions,
+        session_lock_state_from_flags, wts_idle_millis, SessionLockState,
+    };
 
     #[test]
     fn session_flags_distinguish_locked_unlocked_and_unknown() {
@@ -2536,6 +2698,30 @@ mod auto_lock_session_tests {
         assert_eq!(prioritize_active_sessions(vec![2], Some(1)), vec![2]);
         assert_eq!(prioritize_active_sessions(vec![2, 1], Some(1)), vec![1, 2]);
         assert_eq!(prioritize_active_sessions(Vec::new(), Some(1)), vec![1]);
+    }
+
+    #[test]
+    fn wts_timestamps_produce_session_idle_milliseconds() {
+        let current = 50_000_000i64;
+        assert_eq!(wts_idle_millis(current, 20_000_000), Some(3_000));
+        assert_eq!(wts_idle_millis(current, current), Some(0));
+        assert_eq!(wts_idle_millis(current, current + 1), None);
+        assert_eq!(wts_idle_millis(0, 0), None);
+    }
+
+    #[test]
+    fn future_input_timestamp_is_treated_as_recent_activity() {
+        assert_eq!(elapsed_input_millis(1_000, 900), 100);
+        assert_eq!(elapsed_input_millis(1_000, 1_001), 0);
+        assert_eq!(elapsed_input_millis(5, u32::MAX - 4), 10);
+    }
+
+    #[test]
+    #[ignore = "requires an active interactive Windows session"]
+    fn active_session_idle_query_succeeds_in_interactive_session() {
+        let idle = active_interactive_idle_millis()
+            .expect("active interactive session should expose an idle time");
+        println!("active session idle: {idle}ms");
     }
 }
 
@@ -2713,6 +2899,9 @@ fn main() {
 
     if std::env::args().any(|arg| arg == LOCK_WORKSTATION_ARG) {
         std::process::exit(run_lock_workstation_helper());
+    }
+    if std::env::args().any(|arg| arg == QUERY_IDLE_ARG) {
+        exit_with_current_session_idle();
     }
 
     // OpenCL kernel tuning 缓存目录（issue #3）：不设此目录，OpenCV 的 ocl4dnn 每次 forward
