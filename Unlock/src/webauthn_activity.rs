@@ -51,8 +51,10 @@ const CHANNEL: &str = "Microsoft-Windows-WebAuthN/Operational";
 const PROVIDER: &str = "Microsoft-Windows-WebAuthN";
 const TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
 /// 凭据枚举事件（2250/2251）是 CTAP 事务前最早的 WebAuthn 信号。
-/// 枚举在弹窗出现前即发生；用它做"近期 WebAuthn 活动"标记，即使枚举已完成也保留。
-const ENUM_TTL: Duration = Duration::from_secs(10);
+/// 枚举在弹窗出现前约 1-2s 发生。保留 5s 足够覆盖正常弹窗延迟，同时避免
+/// passkey 取消后立刻触发密码填充被误判（Chrome 条件 UI 枚举到后续密码填充
+/// 通常间隔 >30s，不会被 5s TTL 影响）。
+const ENUM_TTL: Duration = Duration::from_secs(5);
 const CTAP_EVENT_IDS: &str = "1000 or 1001 or 1002 or 1003 or 1004 or 1005 or 1006 or 1007 or 1008";
 const EVENT_QUERY: &str =
     "*[System[(EventID=2250 or EventID=2251 or EventID=1000 or EventID=1001 or EventID=1002 or EventID=1003 or EventID=1004 or EventID=1005 or EventID=1006 or EventID=1007 or EventID=1008)]]";
