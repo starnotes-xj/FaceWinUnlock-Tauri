@@ -238,9 +238,8 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
 
     /// 获取字段描述符的数量
     fn GetFieldDescriptorCount(&self) -> windows_core::Result<u32> {
-        let count = if is_pin_enabled() { 4 } else { 2 };
-        info!("SampleProvider::GetFieldDescriptorCount - 字段数量: {}", count);
-        Ok(count)
+        info!("SampleProvider::GetFieldDescriptorCount - 字段数量: 2");
+        Ok(2)
     }
 
     /// 获取指定索引的字段描述符
@@ -258,12 +257,9 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
     
             // 根据索引设置字段类型和标签
             // 使用 SMALL_TEXT 让磁贴更小巧，类似状态指示器 (#91)
-            // PIN 启用时新增字段 2 (密码输入框) 和 3 (提交按钮)
             let (ft, label) = match dwindex {
                 0 => (CPFT_TILE_IMAGE, "面容图标"),
                 1 => (CPFT_SMALL_TEXT, "面容解锁"),
-                2 if is_pin_enabled() => (CPFT_PASSWORD_TEXT, "Hello PIN"),
-                3 if is_pin_enabled() => (CPFT_SUBMIT_BUTTON, "PIN 解锁"),
                 _ => {
                     error!("SampleProvider::GetFieldDescriptorAt - 无效的字段索引: {}", dwindex);
                     return Err(windows::Win32::Foundation::E_INVALIDARG.into());
@@ -427,12 +423,4 @@ pub fn retrieve_negotiate_auth_package() -> windows_core::Result<u32> {
         error!("获取 AuthPackage ID 失败: {:?}", status);
         Err(status.into())
     }
-}
-
-/// 检查注册表 PIN_ENABLED 是否启用 Hello PIN 解锁功能
-/// 默认 "0"（关闭），设为 "1" 后凭据磁贴显示 PIN 输入框
-pub fn is_pin_enabled() -> bool {
-    crate::read_facewinunlock_registry("PIN_ENABLED")
-        .map(|v| v.trim() == "1")
-        .unwrap_or(false)
 }

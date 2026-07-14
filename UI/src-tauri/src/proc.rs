@@ -6,11 +6,14 @@ use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     UI::{
         Shell::DefSubclassProc,
-        WindowsAndMessaging::{WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK},
+        WindowsAndMessaging::{
+            PBT_APMSUSPEND, WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK,
+            WTS_SESSION_UNLOCK,
+        },
     },
 };
 
-use crate::utils::api::stop_camera;
+use crate::utils::api::{stop_camera, suspend_camera};
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
@@ -19,6 +22,10 @@ pub fn register_app_handle(app_handle: AppHandle) {
 }
 
 // windows回调
+/// # Safety
+///
+/// Windows invokes this callback with the HWND and message parameters owned by the
+/// registered window subclass. The callback forwards every message to `DefSubclassProc`.
 pub unsafe extern "system" fn wnd_proc_subclass(
     hwnd: HWND,
     msg: u32,
@@ -46,6 +53,11 @@ pub unsafe extern "system" fn wnd_proc_subclass(
                 }
             }
             _ => {}
+        }
+    }
+    if msg == WM_POWERBROADCAST && wparam.0 as u32 == PBT_APMSUSPEND {
+        if let Err(e) = suspend_camera() {
+            error!("系统挂起前关闭 UI 摄像头失败: {}", e.msg);
         }
     }
     DefSubclassProc(hwnd, msg, wparam, lparam)

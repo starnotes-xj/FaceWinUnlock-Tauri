@@ -440,7 +440,7 @@ unsafe fn variant_system_time(value: &EVT_VARIANT) -> Option<SystemTime> {
         let st = *st_ptr;
         // Howard Hinnant days_from_civil：把公历日期换算成 Unix 纪元天数（无第三方依赖）。
         let (y, m, d) = (st.wYear as i64, st.wMonth as i64, st.wDay as i64);
-        if m < 1 || m > 12 {
+        if !(1..=12).contains(&m) {
             return None;
         }
         let y = if m <= 2 { y - 1 } else { y };
