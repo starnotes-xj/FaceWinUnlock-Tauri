@@ -550,6 +550,21 @@ impl CPipeListener {
                             && (input_requested || auto_requested);
 
                         if should_send_run {
+                            // ★ WebAuthn 守卫复查：send "run" 前最后一道防线。
+                            // 循环顶部的检查与 mouse/keyboard hook 之间间隔最长 ~20ms，
+                            // CTAP 事务恰好在此窗口内开始时 hook 已经捕获输入但 guard 尚未生效。
+                            if broker_fallback_to_pin && crate::is_webauthn_guard_active() {
+                                trigger_broker_pin_fallback(
+                                    &shared_creds_for_client,
+                                    &stop_flag,
+                                    &creds_pipe_raw_for_client,
+                                    &send_events_for_client,
+                                    "WebAuthn transaction active before run",
+                                    BrokerReleaseMode::WebAuthnGuard,
+                                );
+                                unsafe { let _ = CloseHandle(pipe); }
+                                return;
+                            }
                             if let Err(e) = pipe_write_raw(pipe, b"run") {
                                 warn!("发送 run 失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
                                 unsafe { let _ = CloseHandle(pipe); }
