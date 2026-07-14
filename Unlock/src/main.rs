@@ -344,11 +344,12 @@ fn acquire_single_instance_mutex(exe_dir: &Path) -> Option<HANDLE> {
     )
 }
 
-/// 日志文件最大大小 (5 MB)，超出后截断为后半（保留最近 ~2.5 MB 的日志）。
+/// 日志文件最大大小 (5 MB)，超出后截断保留最近 ~2.5 MB。
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
-/// 截断时保留的比例：超过 MAX_LOG_BYTES 时将文件截断为末尾 MAX_LOG_BYTES / 2。
-/// 每次写入后检查，频率 1-30 Hz，开销可忽略。
-const LOG_TRUNCATION_RATIO: u64 = 2;
+/// 截断保留比例。
+const LOG_KEEP_DIVISOR: u64 = 2;
+/// 截断防重入：多线程并发写日志时只允许一个线程执行截断，其余线程跳过。
+static LOG_TRUNCATING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn log_service(exe_dir: &Path, level: &str, message: &str) {
     let logs_dir = exe_dir.join("logs");
@@ -368,33 +369,49 @@ pub(crate) fn log_service(exe_dir: &Path, level: &str, message: &str) {
             "{:02}:{:02}:{:02} [{}] {}",
             hour, minute, second, level, message
         );
-        // 检查文件大小：超出上限后截断保留后半部分，保留最近的日志。
-        // 不每次写都 stat —— 用 writeln 返回后仅检查，频率上限 ~10-30 Hz，无感。
+        // 截断检查：多线程安全——用原子 CAS 确保只有一个线程执行截断。
+        // 不检查 metadata 的线程直接跳过，零开销。
         if let Ok(meta) = file.metadata() {
-            if meta.len() > MAX_LOG_BYTES {
+            if meta.len() > MAX_LOG_BYTES
+                && LOG_TRUNCATING
+                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+            {
                 drop(file);
-                if let Ok(content) = std::fs::read_to_string(&log_path) {
-                    let keep = MAX_LOG_BYTES as usize / LOG_TRUNCATION_RATIO as usize;
-                    let truncated: String = content
-                        .chars()
-                        .rev()
-                        .take(keep)
-                        .collect::<String>()
-                        .chars()
-                        .rev()
-                        .collect();
-                    // 截断后开头加上标记，便于诊断日志丢失。
-                    let _ = std::fs::write(
-                        &log_path,
-                        format!(
-                            "…[log truncated at {} bytes, keeping last ~{} bytes]…\n{truncated}",
-                            meta.len(),
-                            keep,
-                        ),
-                    );
-                }
+                // 后台线程执行截断，不阻塞当前调用者。
+                let path = log_path.clone();
+                let old_size = meta.len();
+                thread::spawn(move || {
+                    let _guard = TruncationGuard;
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let keep_bytes = MAX_LOG_BYTES as usize / LOG_KEEP_DIVISOR as usize;
+                        let start = content.len().saturating_sub(keep_bytes);
+                        // 对齐到 UTF-8 字符边界，避免截断产生乱码。
+                        let mut boundary = start;
+                        while boundary < content.len()
+                            && !content.is_char_boundary(boundary)
+                        {
+                            boundary += 1;
+                        }
+                        let truncated = &content[boundary..];
+                        let _ = std::fs::write(
+                            &path,
+                            format!(
+                                "…[log truncated at {old_size} bytes, keeping last ~{keep_bytes} bytes]…\n{truncated}",
+                            ),
+                        );
+                    }
+                });
             }
         }
+    }
+}
+
+/// 确保截断完成后重置原子标志——即使后台线程 panic 也不会永久阻塞后续截断。
+struct TruncationGuard;
+impl Drop for TruncationGuard {
+    fn drop(&mut self) {
+        LOG_TRUNCATING.store(false, Ordering::Release);
     }
 }
 
@@ -2508,7 +2525,10 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         // 到自动曝光稳定有时需 3-5 秒；单次检测可能在传感器尚未就绪时结束。
         // 等待几秒后重新打开摄像头做第二次检测，覆盖传感器预热窗口。
         if !authorized {
-            log_service(&exe_dir, "INFO", "auto-lock: first presence check failed; retrying after sensor warm-up delay");
+            let retry_power_gen = state.power.generation();
+            log_service(&exe_dir, "INFO", &format!(
+                "auto-lock: first presence check failed; retrying after sensor warm-up delay (power_gen={retry_power_gen}, baseline={check_power_generation})"
+            ));
             thread::sleep(Duration::from_secs(3));
             // 重试前复查状态
             if state.power.is_camera_blocked()
