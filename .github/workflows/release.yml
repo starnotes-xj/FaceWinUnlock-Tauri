@@ -501,7 +501,7 @@ jobs:
           }
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
-          "is_prerelease=$isPrerelease" >> $env:GITHUB_OUTPUT
+          "is_prerelease=$($isPrerelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           Write-Host "Tag: $tag, Version: $version, Prerelease: $isPrerelease"
 
       # 增量更新清单：列出运行时文件的 SHA256 + 下载直链，客户端按 hash 比对只下变化文件。
