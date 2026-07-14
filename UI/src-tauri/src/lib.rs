@@ -32,7 +32,7 @@ use opencv::{
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     videoio::VideoCapture,
 };
-use proc::wnd_proc_subclass;
+use proc::{register_app_handle, wnd_proc_subclass};
 use tauri_plugin_log::{Target, TargetKind};
 use utils::api::{
     add_scheduled_task, check_process_running, check_scheduled_task, check_trigger_via_xml,
@@ -160,6 +160,7 @@ pub fn run() {
             .setup(|app| {
                 // 启动早期应用上次延迟的增量更新（X.new → X），需在任何文件被使用前执行
                 apply_pending_updates();
+                register_app_handle(app.app_handle().clone());
                 let _ = create_system_tray(app.app_handle());
                 let window = app.get_webview_window("main").unwrap();
                 #[cfg(debug_assertions)] // 仅在调试(debug)版本中包含此代码
