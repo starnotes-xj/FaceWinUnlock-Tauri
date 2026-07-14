@@ -20,7 +20,7 @@
 ## Unlock
 
 - `main.rs`: supervisor/worker entry, three named-pipe servers, face-recognition loop, camera prewarm, UI camera yield, WTS session-idle auto-lock, helper launch, service logging.
-- `power_events.rs`: suspend/resume callback registration and the camera-blocking power generation state.
+- `power_events.rs`: traditional suspend/resume plus console-display power notifications, with a combined camera-blocking generation state for Modern Standby.
 - `webauthn_activity.rs`: Event Log channel/provider validation, ten-minute replay, pull subscription, transaction tracking/expiry, Ready/Active named events.
 - `passkey/mod.rs`: serialized face-authorization state machine for the official Passkey plugin.
 
