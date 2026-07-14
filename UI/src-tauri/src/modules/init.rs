@@ -250,13 +250,10 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         "CREDUI_UIA_DETECT",
         "CREDUI_BROKER_TRY_FACE_UNKNOWN",
         "CREDUI_BROWSER_TITLE_FALLBACK",
+        "PASSKEY_TAKEOVER_ENABLED",
     ] {
         let _ = app_key.delete_value(obsolete);
     }
-
-    app_key
-        .set_value("PASSKEY_TAKEOVER_ENABLED", &"0")
-        .map_err(|e| CustomResult::error(Some(format!("停用旧 Passkey 接管失败: {e}")), None))?;
 
     // 5. 自动创建 Unlock EXE 的定时任务（BootTrigger + SessionUnlock）
     //    用户安装后无需手动去 Options 页点"同步"，就能让面容识别自动可用

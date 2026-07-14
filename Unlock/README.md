@@ -1,26 +1,38 @@
-# FaceWinUnlock-Tauri
+# Unlock: Face Recognition Service
 
-面容识别解锁核心服务。
+`Unlock/` builds `FaceWinUnlock-Server.exe`, a supervisor/worker service that runs the camera and recognition pipeline outside LogonUI.
 
-因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
+## Responsibilities
 
-如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
+- Serve the Credential Provider control and credential pipes.
+- Load enabled face records and OpenCV models, open the configured camera, and match faces.
+- Prewarm the lock-screen camera and release it after inactivity or manual PIN unlock.
+- Coordinate camera ownership with the UI through `ui_release`/`ui_done`.
+- Subscribe to `Microsoft-Windows-WebAuthN/Operational` and publish WebAuthn Ready/Active named events.
+- Serve the dedicated `FaceWinUnlockPasskeyFaceAuth` authorization pipe.
+- Monitor idle time and request automatic locking in the active interactive WTS session.
 
-## 功能特性
+## Process Model
 
-- 支持 Windows 系统的人脸识别身份验证
-- 解锁速度快、安全性高
-- 跨平台桌面应用程序
-- 现代化用户界面
+The scheduled task starts a SYSTEM supervisor. It starts the worker with `--facewinunlock-worker` and restarts it with bounded backoff after failures.
 
-## 🚀 快速开始
+`LockWorkStation` cannot lock an interactive user from Session 0. Auto-lock therefore selects the active WTS session, obtains its user token, launches the same executable with `--lock-workstation-once` on `winsta0\default`, and confirms the WTS session lock flag.
 
-### 前置条件
+## Camera Policy
 
-1. **Rust**: 1.90.0 (1159e78c4 2025-09-14) (包含 `cargo` 工具链)
-2. **Visual Studio**: 包含 C++ 桌面开发组件 (用于编译 DLL)
-3. **OpenCV 环境**: 确保系统已安装 OpenCV 运行时
+Camera opening uses the maintained MSMF, DirectShow, then Any fallback order. MSMF hardware transforms are disabled before first open. The UI can temporarily own the device; every successful or failed UI camera session must eventually emit `ui_done`.
 
-### 安装与运行
+No enabled face records means no lock-screen camera prewarm. After a manual PIN unlock, prewarm remains blocked until the old credential session has disconnected and a new session is observed.
 
-**本项目的核心代码已闭源，无法编译运行。**
+## Build And Test
+
+```powershell
+cargo test -p unlock
+cargo build --release -p unlock
+```
+
+Output: `target\release\FaceWinUnlock-Server.exe`.
+
+If the test executable cannot locate `opencv_world4120.dll`, prepend `target\debug\resources` or the configured OpenCV `bin` directory to `PATH`.
+
+Installed behavior, including issue #26 and #27 regression steps, is covered by [../docs/testing.md](../docs/testing.md).

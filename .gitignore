@@ -10,6 +10,8 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+output/
+hashcat_sessions.db
 *.local
 .playwright-mcp/
 .tmp-*
@@ -45,17 +47,14 @@ UI/src-tauri/bin/Microsoft.WebView2.FixedVersionRuntime.143.0.3650.139.x64.cab
 UI/src-tauri/nsis/installer.nsi
 
 # 大文件资源（不入仓库，由脚本生成/下载）
-# - ONNX 模型：由 UI/resources/download_models.ps1 下载
-# ONNX 模型和 animation_frames.bin 已提交仓库
-# - ONNX 模型：少量更新时替换文件即可
-# - animation_frames.bin：由 UI/resources/capture_frames.js 重新生成
+# - ONNX 模型由 UI/resources/download_models.ps1 下载或由发布流程提供
 
-# 帧捕获调试产物
+# 摄像头/帧调试产物
 UI/resources/debug_*.js
 UI/resources/debug_*.png
 UI/resources/frame_*_preview.png
 
-# 逆向分析：二进制 / Ghidra 工程不入库（体积大 + 含微软系统 DLL）
+# 本地逆向诊断产物不入库（体积大，且可能包含系统二进制）
 reverse_analysis/ghidra_project/
 reverse_analysis/*.dll
 reverse_analysis/*.bin

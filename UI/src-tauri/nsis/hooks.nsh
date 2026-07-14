@@ -90,10 +90,10 @@
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_UIA_DETECT"
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_BROKER_TRY_FACE_UNKNOWN"
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "CREDUI_BROWSER_TITLE_FALLBACK"
+  DeleteRegValue HKLM "Software\facewinunlock-tauri" "PASSKEY_TAKEOVER_ENABLED"
   ; broker(查看密码等)场景从开始人脸识别起，超过此秒数仍未刷脸成功才回退 Windows PIN。
   ; Passkey/WebAuthn 已由事件守卫提前否决，不再进入此超时路径。
   WriteRegStr HKLM "Software\facewinunlock-tauri" "CREDUI_BROKER_FALLBACK_TIMEOUT" "6.0"
-  WriteRegStr HKLM "Software\facewinunlock-tauri" "PASSKEY_TAKEOVER_ENABLED" "0"
 
   DetailPrint "FaceWinUnlock 安装完成"
 !macroend
@@ -143,10 +143,7 @@
   ; 1b. AppCompat 注册（RUNASADMIN）
   DeleteRegValue HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\${MAINBINARYNAME}.exe"
 
-  ; 1c. 应用设置键（所有值：UNLOCK_SCENE, SHOW_TILE, CONNECT_TO_PIPE, DLL_LOG_PATH,
-  ;     ANIMATION_FRAMES_PATH, UNLOCK_GRACE_PERIOD, RETRY_DELAY, CREDUI_ALLOW_BROKER,
-  ;     CREDUI_BROKER_FALLBACK_TIMEOUT, PASSKEY_TAKEOVER_ENABLED, PIN_ENABLED 等）
-  ;     先逐个 DeleteRegValue 确保不残留，再 DeleteRegKey 清理空键
+  ; 1c. 应用设置键和历史实验值。先逐个删除，再清理整个键。
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "PASSKEY_TAKEOVER_ENABLED"
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "PIN_ENABLED"
   DeleteRegValue HKLM "Software\facewinunlock-tauri" "UNLOCK_SCENE"

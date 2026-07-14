@@ -325,8 +325,8 @@ jobs:
           # 清除缓存的构建脚本输出，强制 opencv crate 重新探测
           cargo clean -p clang-sys
           cargo clean -p opencv
-          # 主构建：Server DLL + Unlock EXE。旧的 key_capture/NGC 签名实验已停用，
-          # Passkey 登录改走官方 Provider 插件（后续 MSIX 构建步骤）。
+          # 主构建：Server DLL + Unlock EXE。Passkey 登录走后续构建的官方 Provider MSIX；
+          # 已删除的浏览器接管/密钥捕获实验不属于工作区。
           cargo build --release -p winlogon -p unlock
           # 保留 .cargo/config.toml；后续 Tauri installer 会在 UI/src-tauri 再次调用 Cargo。
 

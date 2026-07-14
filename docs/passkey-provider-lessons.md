@@ -1,141 +1,66 @@
-# FaceWinUnlock Passkey Provider Lessons
+# Passkey Provider Constraints
 
-## Current route
+## Supported Route
 
-The supported passkey route is the official Windows passkey provider plugin:
+The only supported browser passkey route is the official Windows Passkey Provider in `PasskeyPlugin/`.
 
-- `PasskeyPlugin` owns and registers its own non-exportable WebAuthn keys.
-- Sites must register a new credential whose public key belongs to this plugin.
-- FaceWinUnlock only provides the local user-verification gate over
-  `\\.\pipe\FaceWinUnlockPasskeyFaceAuth`.
-- In vault-locked mode, successful face authorization is both user verification
-  and the local operation confirmation, so the plugin can run silently without
-  showing its own confirm window.
+- The plugin creates and owns each WebAuthn key.
+- A website registers the public key created by this plugin.
+- Unlock provides one local face user-verification decision.
+- The plugin signs through the Windows plugin API and its per-user Software KSP key.
 
-## What was proven
+An existing Windows Hello passkey cannot be reused by constructing another local private key. The relying party verifies against the public key registered earlier, and Windows Hello/Passport private keys are non-exportable. The removed browser extension and local HTTP signer were therefore both unreliable and architecturally wrong.
 
-- The old browser-extension takeover path is not a valid way to reuse existing
-  Windows Hello passkeys. Those private keys are non-exportable and Passport KSP
-  rejects third-party silent signing. A locally constructed P-256 key can produce
-  a syntactically valid signature, but it does not match the relying party public
-  key that was registered earlier.
-- WebAuthn sites such as webauthn.io correctly reject signatures whose public key
-  does not match the registered credential.
-- The successful path is: install/register/enable the official provider, register
-  a new site passkey through it, then authenticate through the provider with
-  FaceWinUnlock as the UV gate.
+## Generic Credential Provider Isolation
 
-## Packaging decisions
+The generic Credential Provider must not handle passkey, security-key, FIDO2, or PIN-setup operations. Unlock monitors `Microsoft-Windows-WebAuthN/Operational` and exposes Ready/Active state. Active is a mandatory veto, including if the transaction begins after initial enumeration.
 
-- NSIS does not run `Add-AppxPackage`. MSIX packages are per-user, while NSIS is
-  elevated/per-machine and may run under an administrator account that is not the
-  desktop user.
-- NSIS only trusts `FaceWinUnlock-Passkey.cer` at machine level
-  (`LocalMachine\TrustedPeople` and `LocalMachine\Root`) and leaves MSIX install
-  to the app UI/current user flow.
-- Uninstall must remove both the app package and any certificate trust that was
-  imported by install scripts or NSIS.
+This isolation does not block the official plugin: it requests face authorization over its separate `FaceWinUnlockPasskeyFaceAuth` pipe.
 
-## Manual validation notes
+## Packaging
 
-Expected successful face-present flow:
+- The Passkey Provider requires Windows 11 build 26100 or later.
+- NSIS runs elevated/per-machine, while MSIX registration is per-user. The application installs or updates the package in the current desktop-user context.
+- Machine-level certificate trust may be established by the installer, but enabling the provider and the one-time Windows verification remain explicit user actions.
+- Package identity, provider CLSID, AAGUID, and KSP key naming must remain stable.
 
-1. Browser requests passkey authentication.
-2. Plugin logs `passkey plugin requested face authorization`.
-3. Camera opens and FaceWinUnlock returns `AUTHORIZED`.
-4. Plugin signs through its own credential and the site reports authentication
-   success without PIN input or an extra plugin confirmation popup.
+## Credential Storage
 
-Expected remote/no-face flow:
+Two stores are required:
 
-1. No confirmation popup is shown.
-2. Camera opens but face recognition reports no face.
-3. Plugin logs `passkey face authorization rejected`.
-4. Site shows authentication failure. This is expected and does not indicate a
-   signing-path regression.
+1. Private key: per-user Microsoft Software KSP, deterministic name `facewinunlock/<userId>`.
+2. Metadata: package LocalState mapping credential ID, RP, user ID, and key name.
 
-## Uninstall: preserving credentials for reinstall (issue #3)
+Removing the MSIX can remove LocalState while leaving the KSP key. The key then exists but cannot be found for an assertion. Keep mode therefore backs up metadata outside the package under:
 
-Goal: after uninstall / full-update / reinstall, reuse passkeys already registered
-through the plugin without re-registering on each site.
+```text
+%ProgramData%\facewinunlock-tauri\PasskeyBackup
+```
 
-Storage model (two separate parts):
+ProgramData was chosen so third-party uninstallers that clean `%APPDATA%` and `%LOCALAPPDATA%` FaceWinUnlock folders do not erase the recovery copy.
 
-- **Private key**: NCrypt **Microsoft Software KSP** (`NCryptOpenStorageProvider(nullptr)`),
-  deterministic key name `facewinunlock/<hex(userId)>` (`PluginAuthenticatorImpl.cpp`,
-  constant `facewinunlock_plugin_key_domain`), stored under the user's
-  `%APPDATA%\Microsoft\Crypto\Keys` — **not inside the MSIX package**. No uninstall path
-  deletes it (there is no `NCryptDeleteKey` anywhere except the explicit Purge mode).
-- **Credential metadata** (credentialId ↔ rpId ↔ userId): MSIX LocalState
-  `%LOCALAPPDATA%\Packages\<PFN>\LocalState\CredentialsDB\credentials.dat`. Removed with
-  the package on a normal `Remove-AppxPackage`. GetAssertion needs it to map the site's
-  allow-list credentialId → userId → rebuild the key name → open the KSP key. **So losing
-  metadata makes the still-present private key unusable** → that's why reinstall used to
-  require re-registration.
+## Uninstall Modes
 
-Implementation (`passkey_plugin.rs` + `scripts/uninstall-passkey-plugin.ps1` + `nsis/hooks.nsh`):
+### Keep Credentials
 
-- Two modes: `KeepCredentials` (default) / `Purge`.
-- KeepCredentials:
-  - Non-elevated app uninstall uses `Remove-AppxPackage -PreserveApplicationData` for the current user.
-  - Elevated / NSIS uninstall cannot combine `-AllUsers` with `-PreserveApplicationData`. It must first
-    back up each user's `CredentialsDB\credentials.dat` to that user's
-    `%LOCALAPPDATA%\FaceWinUnlock\PasskeyBackup`, then remove the package with `Remove-AppxPackage -AllUsers`.
-    This prevents "Passkey Manager remains after uninstall" when NSIS runs under an administrator account
-    different from the desktop user.
-  - Keep private key + cert + registry config.
-- After install/reinstall, if LocalState has no metadata but a backup exists, restore it.
-- Purge: remove MSIX data + `certutil -delkey facewinunlock/*` (KSP private keys) + cert +
-  registry + backup.
-- Core uninstall and NSIS app-uninstall default to KeepCredentials; the app's uninstall
-  button offers both options. Full update already uses `Add-AppxPackage -Update` (keeps data).
+- Back up metadata before package removal.
+- Remove/replace the package as required.
+- Keep per-user KSP keys and restore metadata after reinstall.
+- Core and NSIS uninstall default to this mode.
 
-Caveats / must-verify on real hardware:
+### Purge
 
-- PackageFamilyName must stay stable (Identity `Name` + `Publisher` fixed) so the LocalState
-  path is reused on reinstall.
-- Private key is DPAPI per-user: same Windows user reinstall works; profile reset / different
-  user invalidates it (expected).
-- `-PreserveApplicationData` needs Win10 1709+ (passkey itself needs 24H2, so satisfied), but it is
-  incompatible with `Remove-AppxPackage -AllUsers`; all-users uninstall must rely on the explicit backup.
-- End-to-end validation needs **Win11 24H2 + a previously registered site passkey**; the
-  `-PreserveApplicationData` reuse, backup/restore and `certutil -delkey` cannot be verified
-  on a dev box without that setup.
+- Remove package metadata and external backups.
+- Delete matching `facewinunlock/*` keys from Microsoft Software Key Storage Provider.
+- Remove certificate trust and plugin configuration.
 
-## In-app residual-key cleanup + simplified delete UI (issue #3)
+`certutil -delkey` must specify the same `-csp 'Microsoft Software Key Storage Provider'` used for enumeration. Without `-csp`, deletion can report `NTE_BAD_KEYSET` and leave keys behind.
 
-Follow-up to the keep-credentials work above. Two user-reported papercuts:
+## Expected Results
 
-1. The plugin's "clear / delete passkeys" actions only remove credential metadata and the
-   Windows index — they never call `NCryptDeleteKey` (confirmed in
-   `PluginManagement/PluginCredentialManager.cpp`). So repeatedly clicking "clear" leaves the
-   KSP private keys behind under `%APPDATA%\Microsoft\Crypto\Keys` (tiny, but a privacy residue).
-2. The plugin exposed too many delete entries (per-cache / per-local-store / all-locations) plus an
-   "add (write cache)" debug button — users could not tell them apart.
+- Uninstalled package: FaceWinUnlock no longer appears as a passkey save location.
+- Keep uninstall/reinstall under the same Windows profile: previously registered FaceWinUnlock passkeys work after metadata restoration.
+- Different Windows profile or profile reset: old per-user keys are intentionally unusable.
+- Purge: previously registered site credentials no longer work and should be removed from the site account.
 
-Fixes:
-
-- **In-app cleanup** (`passkey_plugin.rs::cleanup_passkey_residual_keys`, wired in `lib.rs`,
-  "清理残留私钥" button in `Options.vue`): enumerates the Microsoft Software KSP via
-  `certutil -user -key`, deletes every key whose name starts with `facewinunlock/` via
-  `certutil -user -delkey`, returns the deleted count. Per-user, no uninstall required.
-  Guarded by a confirm dialog because it invalidates previously registered site passkeys.
-- **Simplified delete UI** (`PasskeyPlugin/MainPage.xaml` + `.xaml.cpp`): keep only
-  "删除所选通行密钥" + "清空全部通行密钥"; the cache/local-store detail items and the
-  "add (write cache)" button get `Visibility="Collapsed"`. **All `x:Name`s are kept** (code-behind
-  in `MainPage.xaml.cpp` sets their `.Text()`/`.IsEnabled()`), so elements are hidden, not deleted —
-  deleting them would break the C++/WinRT code-behind and the `LocalizedText` overrides.
-
-Relationship to keep-credentials uninstall: cleanup is the **active** opposite of the passive
-keep — uninstall preserves keys for reinstall, this button deliberately purges the residue when
-the user no longer wants them. Same `certutil -delkey facewinunlock/*` primitive as Purge mode,
-but invokable without uninstalling. Needs Win11 24H2 to verify the actual KSP deletion.
-
-**Critical: `certutil -delkey` MUST include `-csp`.** Enumeration uses
-`certutil -user -key -csp 'Microsoft Software Key Storage Provider'`, and the delete must specify
-the SAME provider: `certutil -user -csp 'Microsoft Software Key Storage Provider' -delkey '<name>'`.
-Without `-csp`, certutil queries the default provider, can't find the CNG KSP key, and returns
-`NTE_BAD_KEYSET` (0x80090016) → 0 deleted. Both `cleanup_passkey_residual_keys` and the uninstall
-Purge script enumerated with `-csp` but deleted without it, so they silently removed nothing.
-The app runs elevated (`requireAdministrator`); elevation was suspected first, but a non-elevated
-manual `-delkey` failed identically until `-csp` was added — the real cause was the missing `-csp`.
+Manual cases are listed in [testing.md](testing.md).
