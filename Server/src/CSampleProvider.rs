@@ -148,22 +148,13 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
     }
 
     /// 设置序列化的凭据信息（用于预填充凭据）。
-    /// 诊断用途：credentialuibroker 的「网页填密码」与「passkey 登录」触发窗口标题相同、无法区分，
-    /// 而调用方(Chrome)传入的序列化(auth 包 / CLSID / 字节)很可能不同——这是唯一未挖过的可靠信号。
-    /// 此处把序列化全量打进 facewinunlock.log，供对比两场景后确定区分字段（下版据此自动分类）。
+    /// 只记录非敏感元数据；rgbSerialization 可能包含密码或认证材料，绝不能写入日志。
     fn SetSerialization(&self, pcpcs: *const CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION) -> windows_core::Result<()> {
         unsafe {
             if let Some(cs) = pcpcs.as_ref() {
-                let hex = if !cs.rgbSerialization.is_null() && cs.cbSerialization > 0 {
-                    let n = (cs.cbSerialization as usize).min(96);
-                    let slice = std::slice::from_raw_parts(cs.rgbSerialization, n);
-                    slice.iter().map(|b| format!("{:02x}", b)).collect::<String>()
-                } else {
-                    String::from("(空)")
-                };
                 info!(
-                    "SampleProvider::SetSerialization - authPkg={} clsidCP={:?} cbSer={} hex[..96]={}",
-                    cs.ulAuthenticationPackage, cs.clsidCredentialProvider, cs.cbSerialization, hex
+                    "SampleProvider::SetSerialization - authPkg={} clsidCP={:?} cbSer={}",
+                    cs.ulAuthenticationPackage, cs.clsidCredentialProvider, cs.cbSerialization
                 );
             } else {
                 info!("SampleProvider::SetSerialization - pcpcs=null");

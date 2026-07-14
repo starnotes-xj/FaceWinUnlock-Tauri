@@ -42,7 +42,7 @@ use serde::Deserialize;
 use windows::Win32::{
     Foundation::{
         CloseHandle, GetLastError, BOOL, ERROR_ALREADY_EXISTS, HANDLE, HLOCAL,
-        INVALID_HANDLE_VALUE, LocalFree,
+        INVALID_HANDLE_VALUE, LocalFree, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::{
         Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
@@ -57,12 +57,20 @@ use windows::Win32::{
             PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
         },
+        RemoteDesktop::{
+            WTSEnumerateSessionsW, WTSFreeMemory, WTSGetActiveConsoleSessionId,
+            WTSQuerySessionInformationW, WTSQueryUserToken, WTSActive, WTSINFOEXW,
+            WTSSessionInfoEx, WTS_SESSIONSTATE_LOCK, WTS_SESSIONSTATE_UNLOCK,
+        },
         Shutdown::LockWorkStation,
-        Threading::CreateMutexW,
+        Threading::{
+            CreateMutexW, CreateProcessAsUserW, GetExitCodeProcess, WaitForSingleObject,
+            CREATE_NO_WINDOW, PROCESS_INFORMATION, STARTUPINFOW,
+        },
     },
     UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
 };
-use windows_core::PCWSTR;
+use windows_core::{PCWSTR, PWSTR};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -78,6 +86,7 @@ const CAMERA_WARMUP_READY_FRAMES: usize = 10;
 // 并抑制预热（关指示灯、省电），直到收到 run 或 release。
 const PREWARM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const WORKER_ARG: &str = "--facewinunlock-worker";
+const LOCK_WORKSTATION_ARG: &str = "--lock-workstation-once";
 /// UI（录入 / 一致性校验 / 预览）请求让位摄像头后，抑制预热 + 自动开摄像头的兜底时长（毫秒）。
 /// UI 发 "ui_release" 时把 `camera_yield_until` 设为 now+此值，发 "ui_done"(stop_camera) 时清零。
 /// 修复「录入采集黑屏」——后台预热(prewarm)占着摄像头时 UI open_camera 抢不到、只出黑帧；
@@ -2165,26 +2174,45 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             // 无人或非授权人员 → 锁屏，清空授权冷却（锁屏后下次需重新识别）
             log_service(&exe_dir, "INFO", "auto-lock: no authorized face, locking workstation");
             auth_cooldown_until = None;
-            // LockWorkStation 是异步"请求"且可能静默失败（返回错误、组策略
-            // DisableLockWorkstation 禁锁等）。旧实现忽略返回值也不验证结果（issue #27：
-            // 日志已写 "locking workstation" 但电脑没锁），失败后 5s 一轮的复查循环
-            // 每 7-8 秒开一次摄像头死循环。现在：检查返回值 + 轮询输入桌面确认真锁上，
-            // 最多重试 3 次；仍失败写 ERROR 日志并退避 60s。
+            // SYSTEM worker 位于 Session 0，不能直接调用只允许交互桌面的 LockWorkStation。
+            // 在活动用户会话启动一次性 helper 发起锁定，再通过 WTSSessionInfoEx 的
+            // SessionFlags 确认结果；API 查询失败保持 Unknown，绝不能冒充锁定成功。
             let mut locked = false;
             for attempt in 1..=3u32 {
-                if let Err(e) = unsafe { LockWorkStation() } {
-                    log_service(&exe_dir, "WARN", &format!(
-                        "auto-lock: LockWorkStation failed (attempt {attempt}): {e:?}"
-                    ));
-                }
-                // 锁定请求异步生效：轮询输入桌面最多 2s 确认已切到 secure desktop
-                for _ in 0..10 {
+                let session_id = match launch_lock_helper_in_active_session() {
+                    Ok(session_id) => session_id,
+                    Err(error) => {
+                        log_service(&exe_dir, "WARN", &format!(
+                            "auto-lock: interactive lock helper failed (attempt {attempt}): {error}"
+                        ));
+                        thread::sleep(Duration::from_millis(250));
+                        continue;
+                    }
+                };
+                log_service(&exe_dir, "INFO", &format!(
+                    "auto-lock: lock request sent to interactive session {session_id}"
+                ));
+                // LockWorkStation 异步生效，最多等待 5 秒确认 WTS 会话状态。
+                let mut verification_error = None;
+                for _ in 0..25 {
                     thread::sleep(Duration::from_millis(200));
-                    if is_workstation_locked() { locked = true; break; }
+                    match query_session_lock_state(session_id) {
+                        Ok(SessionLockState::Locked) => {
+                            locked = true;
+                            break;
+                        }
+                        Ok(SessionLockState::Unlocked | SessionLockState::Unknown) => {}
+                        Err(error) => verification_error = Some(error),
+                    }
                 }
                 if locked { break; }
+                if let Some(error) = verification_error {
+                    log_service(&exe_dir, "WARN", &format!(
+                        "auto-lock: unable to verify session {session_id} state: {error}"
+                    ));
+                }
                 log_service(&exe_dir, "WARN", &format!(
-                    "auto-lock: workstation still unlocked after attempt {attempt}"
+                    "auto-lock: session {session_id} is not confirmed locked after attempt {attempt}"
                 ));
             }
             if locked {
@@ -2207,34 +2235,214 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
     }
 }
 
-/// 当前输入桌面是否已切离 "Default"（锁定后为 Winlogon secure desktop）。
-/// 打不开输入桌面（锁定状态下常见 ACCESS_DENIED）也视为已锁定。
-fn is_workstation_locked() -> bool {
-    use windows::Win32::System::StationsAndDesktops::{
-        CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, UOI_NAME,
-        DESKTOP_READOBJECTS, DESKTOP_CONTROL_FLAGS,
-    };
-    unsafe {
-        let desk = match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) {
-            Ok(d) => d,
-            Err(_) => return true,
-        };
-        let mut name = [0u16; 64];
-        let mut needed = 0u32;
-        let ok = GetUserObjectInformationW(
-            HANDLE(desk.0),
-            UOI_NAME,
-            Some(name.as_mut_ptr() as *mut _),
-            (name.len() * 2) as u32,
-            Some(&mut needed),
-        )
-        .is_ok();
-        let _ = CloseDesktop(desk);
-        if !ok {
-            return true;
+struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe { let _ = CloseHandle(self.0); }
         }
-        let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
-        !String::from_utf16_lossy(&name[..end]).eq_ignore_ascii_case("default")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionLockState {
+    Locked,
+    Unlocked,
+    Unknown,
+}
+
+fn session_lock_state_from_flags(flags: i32) -> SessionLockState {
+    match flags as u32 {
+        WTS_SESSIONSTATE_LOCK => SessionLockState::Locked,
+        WTS_SESSIONSTATE_UNLOCK => SessionLockState::Unlocked,
+        _ => SessionLockState::Unknown,
+    }
+}
+
+fn prioritize_active_sessions(mut active: Vec<u32>, console_session: Option<u32>) -> Vec<u32> {
+    if let Some(console) = console_session {
+        if let Some(index) = active.iter().position(|session| *session == console) {
+            active.swap(0, index);
+        } else if active.is_empty() {
+            active.push(console);
+        }
+    }
+    active
+}
+
+fn active_session_ids() -> Result<Vec<u32>, String> {
+    let mut session_ids = Vec::new();
+    let mut sessions = std::ptr::null_mut();
+    let mut count = 0u32;
+    let enumeration = unsafe { WTSEnumerateSessionsW(None, 0, 1, &mut sessions, &mut count) };
+    if enumeration.is_ok() && !sessions.is_null() {
+        let entries = unsafe { std::slice::from_raw_parts(sessions, count as usize) };
+        for entry in entries {
+            if entry.State == WTSActive && !session_ids.contains(&entry.SessionId) {
+                session_ids.push(entry.SessionId);
+            }
+        }
+    }
+    if !sessions.is_null() {
+        unsafe { WTSFreeMemory(sessions.cast()); }
+    }
+
+    // RDP 活跃时，物理控制台可能仍有用户令牌但已断开。优先使用枚举得到的
+    // WTSActive 会话；仅在枚举没有活动项时回退到当前物理控制台。
+    let console_session = match unsafe { WTSGetActiveConsoleSessionId() } {
+        u32::MAX => None,
+        session_id => Some(session_id),
+    };
+    session_ids = prioritize_active_sessions(session_ids, console_session);
+
+    if session_ids.is_empty() {
+        Err("no active interactive user session".to_string())
+    } else {
+        Ok(session_ids)
+    }
+}
+
+fn query_active_user_token() -> Result<(u32, OwnedHandle), String> {
+    let mut failures = Vec::new();
+    for session_id in active_session_ids()? {
+        let mut token = HANDLE::default();
+        match unsafe { WTSQueryUserToken(session_id, &mut token) } {
+            Ok(()) => return Ok((session_id, OwnedHandle(token))),
+            Err(error) => {
+                if !token.is_invalid() {
+                    unsafe { let _ = CloseHandle(token); }
+                }
+                failures.push(format!("session {session_id}: {error:?}"));
+            }
+        }
+    }
+    Err(format!("WTSQueryUserToken failed ({})", failures.join(", ")))
+}
+
+fn launch_lock_helper_in_active_session() -> Result<u32, String> {
+    let (session_id, user_token) = query_active_user_token()?;
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("cannot resolve lock helper executable: {error}"))?;
+    let executable_text = executable
+        .to_str()
+        .ok_or_else(|| "lock helper executable path is not valid UTF-8".to_string())?;
+    let current_dir = executable
+        .parent()
+        .ok_or_else(|| "lock helper executable has no parent directory".to_string())?;
+
+    let application = to_wide(executable_text);
+    let mut command_line = to_wide(&format!("\"{executable_text}\" {LOCK_WORKSTATION_ARG}"));
+    let mut desktop = to_wide("winsta0\\default");
+    let current_dir = to_wide(current_dir
+        .to_str()
+        .ok_or_else(|| "lock helper working directory is not valid UTF-8".to_string())?);
+    let startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        lpDesktop: PWSTR(desktop.as_mut_ptr()),
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+
+    let launch_result = unsafe {
+        CreateProcessAsUserW(
+            Some(user_token.0),
+            PCWSTR::from_raw(application.as_ptr()),
+            Some(PWSTR(command_line.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_NO_WINDOW,
+            None,
+            PCWSTR::from_raw(current_dir.as_ptr()),
+            &startup,
+            &mut process,
+        )
+    };
+
+    let process_handle = OwnedHandle(process.hProcess);
+    let _thread_handle = OwnedHandle(process.hThread);
+    launch_result
+        .map_err(|error| format!("CreateProcessAsUserW failed for session {session_id}: {error:?}"))?;
+    match unsafe { WaitForSingleObject(process_handle.0, 3_000) } {
+        WAIT_OBJECT_0 => {
+            let mut exit_code = 1u32;
+            unsafe { GetExitCodeProcess(process_handle.0, &mut exit_code) }
+                .map_err(|error| format!("GetExitCodeProcess(lock helper) failed: {error:?}"))?;
+            if exit_code != 0 {
+                return Err(format!("lock helper exited with code {exit_code}"));
+            }
+        }
+        WAIT_TIMEOUT => return Err("lock helper timed out".to_string()),
+        WAIT_FAILED => return Err(format!(
+            "waiting for lock helper failed: {:?}", unsafe { GetLastError() }
+        )),
+        other => return Err(format!("unexpected lock helper wait result: {other:?}")),
+    }
+    Ok(session_id)
+}
+
+fn query_session_lock_state(session_id: u32) -> Result<SessionLockState, String> {
+    let mut buffer = PWSTR::null();
+    let mut bytes_returned = 0u32;
+    let query_result = unsafe {
+        WTSQuerySessionInformationW(
+            None,
+            session_id,
+            WTSSessionInfoEx,
+            &mut buffer,
+            &mut bytes_returned,
+        )
+    };
+    if let Err(error) = query_result {
+        if !buffer.is_null() {
+            unsafe { WTSFreeMemory(buffer.0.cast()); }
+        }
+        return Err(format!("WTSQuerySessionInformationW failed: {error:?}"));
+    }
+    if buffer.is_null() {
+        return Err("WTSSessionInfoEx returned a null buffer".to_string());
+    }
+
+    let result = if bytes_returned < std::mem::size_of::<WTSINFOEXW>() as u32 {
+        Err(format!("WTSSessionInfoEx returned only {bytes_returned} bytes"))
+    } else {
+        let info = unsafe { &*(buffer.0.cast::<WTSINFOEXW>()) };
+        if info.Level != 1 {
+            Err(format!("unsupported WTSSessionInfoEx level {}", info.Level))
+        } else {
+            let level = unsafe { info.Data.WTSInfoExLevel1 };
+            Ok(session_lock_state_from_flags(level.SessionFlags))
+        }
+    };
+    unsafe { WTSFreeMemory(buffer.0.cast()); }
+    result
+}
+
+fn run_lock_workstation_helper() -> i32 {
+    match unsafe { LockWorkStation() } {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[cfg(test)]
+mod auto_lock_session_tests {
+    use super::{prioritize_active_sessions, session_lock_state_from_flags, SessionLockState};
+
+    #[test]
+    fn session_flags_distinguish_locked_unlocked_and_unknown() {
+        assert_eq!(session_lock_state_from_flags(0), SessionLockState::Locked);
+        assert_eq!(session_lock_state_from_flags(1), SessionLockState::Unlocked);
+        assert_eq!(session_lock_state_from_flags(-1), SessionLockState::Unknown);
+        assert_eq!(session_lock_state_from_flags(99), SessionLockState::Unknown);
+    }
+
+    #[test]
+    fn active_rdp_session_wins_over_disconnected_console() {
+        assert_eq!(prioritize_active_sessions(vec![2], Some(1)), vec![2]);
+        assert_eq!(prioritize_active_sessions(vec![2, 1], Some(1)), vec![1, 2]);
+        assert_eq!(prioritize_active_sessions(Vec::new(), Some(1)), vec![1]);
     }
 }
 
@@ -2393,6 +2601,10 @@ fn main() {
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
+
+    if std::env::args().any(|arg| arg == LOCK_WORKSTATION_ARG) {
+        std::process::exit(run_lock_workstation_helper());
+    }
 
     // OpenCL kernel tuning 缓存目录（issue #3）：不设此目录，OpenCV 的 ocl4dnn 每次 forward
     // 都会对卷积层重新做 OpenCL kernel 编译 + auto-tuning —— OpenCL/FP16 后端首次推理可达
