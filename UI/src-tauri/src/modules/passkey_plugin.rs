@@ -1041,14 +1041,24 @@ pub fn uninstall_passkey_plugin(purge: bool) -> Result<CustomResult, CustomResul
     Ok(CustomResult::success(Some(msg.to_string()), Some(status)))
 }
 
-/// 清理插件残留的 KSP 私钥（`facewinunlock/*`）。
+/// 清理插件残留的 KSP 私钥（`facewinunlock/*`）与凭据元数据。
 ///
 /// 背景：插件的「清空/删除通行密钥」只删元数据与 Windows 索引，**不删** NCrypt 私钥，
 /// 导致私钥残留在 `%APPDATA%\Microsoft\Crypto\Keys`（每个约 1-2KB，占用极小但属隐私残留）。
-/// 本命令用 certutil 枚举并删除所有 `facewinunlock/` 前缀的 Software KSP 私钥，返回删除数量。
+///
+/// **v0.5.10 修复**：原实现仅删除 KSP 私钥，遗漏了插件元数据（`credentials.dat`）与
+/// Windows 平台数据库条目的清理，导致插件 UI 仍显示已删除的凭据（实际已不可用）。
+/// 现在同步清理：
+/// 1. KSP 私钥（`certutil -delkey facewinunlock/*`）
+/// 2. 插件 LocalState 元数据（`credentials.dat`）
+/// 3. 包外备份（`PasskeyBackup`）
+/// 4. 写入 `PurgeRequested.flag` 信号文件，插件下次启动时调用
+///    `DeleteAllPluginCredentials` + `ResetLocalCredentialsStore` 补清平台数据库
+///
 /// 与「彻底卸载(Purge)」删私钥逻辑一致，但无需卸载插件、可单独清理。
 #[tauri::command]
 pub fn cleanup_passkey_residual_keys() -> Result<CustomResult, CustomResult> {
+    // 1. 删除 KSP 私钥
     let script = "\
         $deleted = 0; \
         $keys = & certutil.exe -user -key -csp 'Microsoft Software Key Storage Provider' 2>$null; \
@@ -1071,12 +1081,52 @@ pub fn cleanup_passkey_residual_keys() -> Result<CustomResult, CustomResult> {
             None,
         ));
     }
-    let deleted: i64 = String::from_utf8_lossy(&output.stdout)
+    let deleted_keys: i64 = String::from_utf8_lossy(&output.stdout)
         .trim()
         .parse()
         .unwrap_or(0);
+
+    // 2. 清理插件元数据：删除 MSIX LocalState 下的 credentials.dat，并写入 PurgeRequested.flag
+    //    信号文件让插件下次启动时调用 DeleteAllPluginCredentials() + ResetLocalCredentialsStore()
+    //    来清理 Windows 平台数据库条目（WebAuthNPluginAuthenticatorRemoveAllCredentials 只能
+    //    在插件进程内调用，外部无法直接访问）。
+    let mut metadata_cleaned = 0u32;
+    let formal = query_package(FORMAL_PACKAGE_NAME).unwrap_or(None);
+    if let Some(pkg) = formal {
+        if let Some(pfn) = pkg["package_family_name"].as_str() {
+            if let Some(db_dir) = passkey_localstate_db_dir(pfn) {
+                // 2a. 删除 credentials.dat（本地凭据元数据）
+                let creds_file = db_dir.join(PASSKEY_CREDENTIALS_FILE);
+                if creds_file.exists() {
+                    if std::fs::remove_file(&creds_file).is_ok() {
+                        metadata_cleaned += 1;
+                    }
+                }
+                // 2b. 写入 PurgeRequested.flag — 插件下次启动/刷新时检测到此标记会调用
+                //     DeleteAllPluginCredentials() 清理 Windows 平台数据库中的凭据索引。
+                let flag_file = db_dir.join("PurgeRequested.flag");
+                if std::fs::write(&flag_file, "1").is_ok() {
+                    metadata_cleaned += 1;
+                }
+            }
+        }
+    }
+
+    // 3. 删除包外备份（新旧两处）
+    delete_passkey_backup();
+
+    let key_msg = if deleted_keys > 0 {
+        format!("{deleted_keys} 个私钥")
+    } else {
+        "0 个私钥".to_string()
+    };
+    let meta_msg = if metadata_cleaned > 0 {
+        "、元数据已清除；插件重启后将同步清理凭据列表"
+    } else {
+        ""
+    };
     Ok(CustomResult::success(
-        Some(format!("已清理 {deleted} 个残留通行密钥私钥")),
-        Some(json!({ "deleted": deleted })),
+        Some(format!("已清理 {key_msg}{meta_msg}")),
+        Some(json!({ "deleted": deleted_keys, "metadata_cleaned": metadata_cleaned > 0 })),
     ))
 }

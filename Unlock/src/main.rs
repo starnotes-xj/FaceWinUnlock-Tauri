@@ -375,7 +375,7 @@ fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
             Ok(data) if !data.is_empty() => {
                 let cmd = String::from_utf8_lossy(&data);
                 control_buf.push_str(&cmd);
-                if state.power.is_suspended() {
+                if state.power.is_camera_blocked() {
                     control_buf.clear();
                     continue;
                 }
@@ -1117,11 +1117,14 @@ fn configured_camera_index(db_path: &Path) -> i32 {
     load_camera_index(db_path).unwrap_or(0)
 }
 
-fn warm_up_camera(cam: &mut VideoCapture) {
+fn warm_up_camera(cam: &mut VideoCapture, should_cancel: &impl Fn() -> bool) -> bool {
     let mut dummy = Mat::default();
     let mut ready_frames = 0usize;
 
     for _ in 0..CAMERA_WARMUP_MAX_FRAMES {
+        if should_cancel() {
+            return false;
+        }
         if cam.read(&mut dummy).is_ok() && !dummy.empty() {
             ready_frames += 1;
             if ready_frames >= CAMERA_WARMUP_READY_FRAMES {
@@ -1131,9 +1134,14 @@ fn warm_up_camera(cam: &mut VideoCapture) {
             ready_frames = 0;
         }
     }
+    !should_cancel()
 }
 
-fn open_configured_camera(index: i32, exe_dir: &Path) -> Option<(VideoCapture, &'static str)> {
+fn open_configured_camera(
+    index: i32,
+    exe_dir: &Path,
+    should_cancel: impl Fn() -> bool,
+) -> Option<(VideoCapture, &'static str)> {
     // 后端顺序必须与 UI 录入端 open_camera(None) 一致。v0.5.3 的 DShow 优先会造成
     // Win10 部分机器录入/解锁帧管线不一致；v0.5.4 的 CAP_ANY 优先又会在 issue #3
     // 的 Win10 机器上阻塞约 40 秒才亮摄像头。这里显式采用 UI 当前顺序并记录耗时，
@@ -1143,12 +1151,20 @@ fn open_configured_camera(index: i32, exe_dir: &Path) -> Option<(VideoCapture, &
         ("DShow", videoio::CAP_DSHOW),
         ("Any", videoio::CAP_ANY),
     ] {
+        if should_cancel() {
+            return None;
+        }
         let started = Instant::now();
         if let Ok(mut c) = VideoCapture::new(index, backend) {
+            if should_cancel() {
+                return None;
+            }
             if c.is_opened().unwrap_or(false) {
                 let _ = c.set(videoio::CAP_PROP_FRAME_WIDTH, 640.0);
                 let _ = c.set(videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
-                warm_up_camera(&mut c);
+                if !warm_up_camera(&mut c, &should_cancel) {
+                    return None;
+                }
                 log_service(
                     exe_dir,
                     "INFO",
@@ -1338,7 +1354,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         let power_generation = state.power.generation();
         if power_generation != observed_power_generation {
             observed_power_generation = power_generation;
-            let preserve_new_run = !state.power.is_suspended()
+            let preserve_new_run = !state.power.is_camera_blocked()
                 && state.run_requested.load(Ordering::SeqCst)
                 && state.run_power_generation.load(Ordering::SeqCst) == power_generation;
             state.passkey_face_gate.reject_pending();
@@ -1359,14 +1375,18 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             log_service(
                 &exe_dir,
                 "INFO",
-                if state.power.is_suspended() {
-                    "power suspend detected; camera closed and recognition paused"
+                if state.power.is_camera_blocked() {
+                    if state.power.is_suspended() {
+                        "power suspend detected; camera closed and recognition paused"
+                    } else {
+                        "console display inactive; camera closed and recognition paused"
+                    }
                 } else {
-                    "power resume detected; stale camera state cleared"
+                    "camera power gate cleared; stale camera state discarded"
                 },
             );
         }
-        if state.power.is_suspended() {
+        if state.power.is_camera_blocked() {
             thread::sleep(Duration::from_millis(20));
             continue;
         }
@@ -1652,11 +1672,20 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 // 让主循环尽快在下一轮响应 should_exit/release，避免关机/解锁被这次预热拖 2-3s。
                 && !state.should_exit.load(Ordering::SeqCst)
                 && !state.release_requested.load(Ordering::SeqCst)
-                && !state.power.is_suspended()
+                && !state.power.is_camera_blocked()
             {
                 let open_power_generation = state.power.generation();
-                if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
-                    if state.power.is_suspended()
+                if let Some((c, backend_name)) = open_configured_camera(
+                    camera_index,
+                    &exe_dir,
+                    || {
+                        state.power.is_camera_blocked()
+                            || state.power.generation() != open_power_generation
+                            || state.should_exit.load(Ordering::SeqCst)
+                            || state.release_requested.load(Ordering::SeqCst)
+                    },
+                ) {
+                    if state.power.is_camera_blocked()
                         || state.power.generation() != open_power_generation
                     {
                         drop(c);
@@ -1782,9 +1811,24 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
         // 打开首选项中保存的摄像头索引，避免每次解锁都扫描 0-3 号设备。
         if cam.is_none() {
+            if state.power.is_camera_blocked() {
+                state.recognition_active.store(false, Ordering::SeqCst);
+                continue 'main;
+            }
             let open_power_generation = state.power.generation();
-            if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
-                if state.power.is_suspended()
+            if let Some((c, backend_name)) = open_configured_camera(
+                camera_index,
+                &exe_dir,
+                || {
+                    state.power.is_camera_blocked()
+                        || state.power.generation() != open_power_generation
+                        || state.should_exit.load(Ordering::SeqCst)
+                        || state.release_requested.load(Ordering::SeqCst)
+                        || (passkey_request_id.is_none()
+                            && state.broker_guard_release_requested.load(Ordering::SeqCst))
+                },
+            ) {
+                if state.power.is_camera_blocked()
                     || state.power.generation() != open_power_generation
                 {
                     drop(c);
@@ -1819,7 +1863,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         while no_face_retries < MAX_NO_FACE_RETRIES {
             if state.should_exit.load(Ordering::SeqCst)
                 || state.release_requested.load(Ordering::SeqCst)
-                || state.power.is_suspended()
+                || state.power.is_camera_blocked()
                 || state.power.generation() != observed_power_generation
                 || (passkey_request_id.is_none()
                     && state.broker_guard_release_requested.load(Ordering::SeqCst))
@@ -1844,7 +1888,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 while Instant::now() < hard_deadline {
                     if state.should_exit.load(Ordering::SeqCst)
                         || state.release_requested.load(Ordering::SeqCst)
-                        || state.power.is_suspended()
+                        || state.power.is_camera_blocked()
                         || state.power.generation() != observed_power_generation
                         || (passkey_request_id.is_none()
                             && state.broker_guard_release_requested.load(Ordering::SeqCst))
@@ -1920,7 +1964,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             // 无人脸：摄像头可能尚未预热，内部重试
             no_face_retries += 1;
             if no_face_retries < MAX_NO_FACE_RETRIES {
-                if state.power.is_suspended()
+                if state.power.is_camera_blocked()
                     || state.power.generation() != observed_power_generation
                 {
                     break;
@@ -1928,8 +1972,17 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 log_service(&exe_dir, "INFO", &format!("no face in round {}, retrying ({}/{})", no_face_retries, no_face_retries + 1, MAX_NO_FACE_RETRIES));
                 // 释放当前摄像头后重开，获取新数据流（take() 取出旧值并 drop，显式释放）
                 drop(cam.take());
-                if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
-                    if state.power.is_suspended()
+                if let Some((c, backend_name)) = open_configured_camera(
+                    camera_index,
+                    &exe_dir,
+                    || {
+                        state.power.is_camera_blocked()
+                            || state.power.generation() != observed_power_generation
+                            || state.should_exit.load(Ordering::SeqCst)
+                            || state.release_requested.load(Ordering::SeqCst)
+                    },
+                ) {
+                    if state.power.is_camera_blocked()
                         || state.power.generation() != observed_power_generation
                     {
                         drop(c);
@@ -1944,7 +1997,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             }
         }
 
-        if state.power.is_suspended()
+        if state.power.is_camera_blocked()
             || state.power.generation() != observed_power_generation
         {
             if let Some(orig) = saved_brightness {
@@ -2037,6 +2090,56 @@ fn load_auto_lock_settings(db_path: &Path) -> (bool, u64) {
     (enabled, timeout)
 }
 
+fn request_auto_lock(exe_dir: &Path) -> bool {
+    // SYSTEM worker 位于 Session 0，不能直接调用只允许交互桌面的 LockWorkStation。
+    // 在活动用户会话启动一次性 helper 发起锁定，再通过 WTSSessionInfoEx 确认结果。
+    for attempt in 1..=3u32 {
+        let session_id = match launch_lock_helper_in_active_session() {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                log_service(exe_dir, "WARN", &format!(
+                    "auto-lock: interactive lock helper failed (attempt {attempt}): {error}"
+                ));
+                thread::sleep(Duration::from_millis(250));
+                continue;
+            }
+        };
+        log_service(exe_dir, "INFO", &format!(
+            "auto-lock: lock request sent to interactive session {session_id}"
+        ));
+        let mut verification_error = None;
+        for _ in 0..25 {
+            thread::sleep(Duration::from_millis(200));
+            match query_session_lock_state(session_id) {
+                Ok(SessionLockState::Locked) => {
+                    log_service(exe_dir, "INFO", "auto-lock: workstation locked");
+                    return true;
+                }
+                Ok(SessionLockState::Unlocked | SessionLockState::Unknown) => {}
+                Err(error) => verification_error = Some(error),
+            }
+        }
+        if let Some(error) = verification_error {
+            log_service(exe_dir, "WARN", &format!(
+                "auto-lock: unable to verify session {session_id} state: {error}"
+            ));
+        }
+        log_service(exe_dir, "WARN", &format!(
+            "auto-lock: session {session_id} is not confirmed locked after attempt {attempt}"
+        ));
+    }
+
+    let hint = if lock_workstation_disabled_by_policy() {
+        "; DisableLockWorkstation policy is set — Windows forbids locking on this system"
+    } else {
+        ""
+    };
+    log_service(exe_dir, "ERROR", &format!(
+        "auto-lock: failed to lock workstation after 3 attempts{hint}; next attempt in 60s"
+    ));
+    false
+}
+
 /// 自动锁屏监控线程
 fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
     let db_path = exe_dir.join("database.db");
@@ -2098,9 +2201,17 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         if power_generation != observed_power_generation {
             observed_power_generation = power_generation;
             next_idle_probe_at = Instant::now();
-            if state.power.is_suspended() {
+            if state.power.is_camera_blocked() {
                 auth_cooldown_until = None;
-                log_service(&exe_dir, "INFO", "auto-lock: paused for system suspend");
+                log_service(
+                    &exe_dir,
+                    "INFO",
+                    if state.power.is_suspended() {
+                        "auto-lock: paused for system suspend"
+                    } else {
+                        "auto-lock: console display inactive; camera checks disabled"
+                    },
+                );
             } else {
                 let cooldown = AUTH_COOLDOWN_MIN.max(Duration::from_secs(auto_lock_timeout));
                 auth_cooldown_until = Some(Instant::now() + cooldown);
@@ -2166,6 +2277,53 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
 
         // 空闲超时，且没有正在进行的解锁请求（避免冲突）
         if state.run_requested.load(Ordering::SeqCst) { continue; }
+        if state.recognition_active.load(Ordering::SeqCst) { continue; }
+        if state.dll_creds_pipe.load(Ordering::SeqCst) != INVALID_HANDLE_VALUE.0 as isize { continue; }
+
+        // 先加载人脸记录。未录入人脸时保持既有行为，不启用本项目的自动锁屏。
+        if last_record_reload.elapsed() > Duration::from_secs(60) {
+            records = load_face_records(&exe_dir, &db_path);
+            last_record_reload = Instant::now();
+        }
+        if records.is_empty() { continue; }
+
+        // Modern Standby 从控制台屏幕关闭开始，且可能没有 PBT_APMSUSPEND。此时绝不打开
+        // 摄像头；真实会话已空闲则直接锁屏。远控持续输入会在上面的 idle 检查中阻止此路径。
+        if state.power.is_display_inactive() {
+            match active_interactive_idle_millis() {
+                Ok(latest_idle_ms) if latest_idle_ms < timeout_ms => {
+                    next_idle_probe_at = Instant::now()
+                        + Duration::from_millis(
+                            timeout_ms.saturating_sub(latest_idle_ms).max(1_000),
+                        );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log_service(
+                        &exe_dir,
+                        "WARN",
+                        &format!(
+                            "auto-lock: display inactive but idle query failed; lock cancelled: {error}"
+                        ),
+                    );
+                    next_idle_probe_at = Instant::now() + Duration::from_secs(5);
+                    continue;
+                }
+            }
+            log_service(
+                &exe_dir,
+                "INFO",
+                "auto-lock: display inactive and session idle; locking without camera",
+            );
+            auth_cooldown_until = None;
+            if request_auto_lock(&exe_dir) {
+                thread::sleep(Duration::from_secs(5));
+            } else {
+                auth_cooldown_until = Some(Instant::now() + Duration::from_secs(60));
+            }
+            continue;
+        }
 
         // UI 正用摄像头（录入/预览）时不开摄像头做在场检测，把摄像头让给 UI（防抢占黑屏）。
         {
@@ -2182,13 +2340,6 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
                 .map(|(loaded, _)| loaded);
         }
         let models = match models.as_mut() { Some(m) => m, None => continue };
-
-        // 重新加载人脸记录
-        if last_record_reload.elapsed() > Duration::from_secs(60) {
-            records = load_face_records(&exe_dir, &db_path);
-            last_record_reload = Instant::now();
-        }
-        if records.is_empty() { continue; } // 无人脸记录，不锁屏
 
         // broker 冷却期内不打开摄像头
         let now_ms = SystemTime::now()
@@ -2214,13 +2365,37 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         );
         let mut cam: Option<VideoCapture> = None;
         let camera_index = configured_camera_index(&db_path);
+        if state.power.is_camera_blocked() {
+            log_service(
+                &exe_dir,
+                "INFO",
+                "auto-lock: camera check cancelled by display or suspend transition",
+            );
+            continue;
+        }
         let check_power_generation = state.power.generation();
-        if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
-            if state.power.is_suspended()
+        if let Some((c, backend_name)) = open_configured_camera(
+            camera_index,
+            &exe_dir,
+            || {
+                state.power.is_camera_blocked()
+                    || state.power.generation() != check_power_generation
+                    || state.should_exit.load(Ordering::SeqCst)
+                    || state.run_requested.load(Ordering::SeqCst)
+                    || state.recognition_active.load(Ordering::SeqCst)
+                    || state.dll_creds_pipe.load(Ordering::SeqCst)
+                        != INVALID_HANDLE_VALUE.0 as isize
+            },
+        ) {
+            if state.power.is_camera_blocked()
                 || state.power.generation() != check_power_generation
+                || state.run_requested.load(Ordering::SeqCst)
+                || state.recognition_active.load(Ordering::SeqCst)
+                || state.dll_creds_pipe.load(Ordering::SeqCst)
+                    != INVALID_HANDLE_VALUE.0 as isize
             {
                 drop(c);
-                log_service(&exe_dir, "INFO", "auto-lock: camera open interrupted by power transition");
+                log_service(&exe_dir, "INFO", "auto-lock: camera open cancelled by power or unlock activity");
                 continue;
             }
             log_service(&exe_dir, "INFO", &format!("auto-lock: camera opened via {}", backend_name));
@@ -2234,24 +2409,41 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             }
         };
 
+        // 在场检测超时与退避：与主识别循环的 not_face_delay 策略一致。
+        // 之前只扫 15 帧（～0.5-1.5s），摄像头传感器的自动曝光/白平衡可能尚在
+        // 稳定期，导致人脸在画面中但检测不到 → 用户端坐电脑前却被误锁。
+        // 现在用 not_face_delay 做"无人脸多久放弃"判断 + hard_deadline 做硬上限。
+        let check_not_face_delay = load_not_face_delay(&db_path);
+        let hard_deadline = Instant::now() + Duration::from_secs(10);
         let mut authorized = false;
-        let mut power_interrupted = false;
-        for _ in 0..15 {
+        let mut camera_check_cancelled = false;
+        let mut no_face_since: Option<Instant> = None;
+        while Instant::now() < hard_deadline {
             if state.should_exit.load(Ordering::SeqCst) { break; }
-            if state.power.is_suspended()
+            if state.power.is_camera_blocked()
                 || state.power.generation() != check_power_generation
+                || state.run_requested.load(Ordering::SeqCst)
+                || state.recognition_active.load(Ordering::SeqCst)
+                || state.dll_creds_pipe.load(Ordering::SeqCst)
+                    != INVALID_HANDLE_VALUE.0 as isize
             {
-                power_interrupted = true;
+                camera_check_cancelled = true;
                 break;
             }
             let mut frame = Mat::default();
             if cap.read(&mut frame).is_err() || frame.empty() {
-                thread::sleep(Duration::from_millis(100));
+                let since = no_face_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= check_not_face_delay {
+                    log_service(&exe_dir, "INFO", "auto-lock: no usable camera frame, timing out presence check");
+                    break;
+                }
+                thread::sleep(Duration::from_millis(30));
                 continue;
             }
             let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
 
             if let Some(feat) = detect_and_extract(models, &frame) {
+                no_face_since = None;
                 let cam_bytes = feature_to_bytes(&feat);
                 for rec in &records {
                     let score = cosine_sim(&cam_bytes, &rec.feature_bytes);
@@ -2261,13 +2453,100 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
                         break;
                     }
                 }
+            } else {
+                // 无人脸：记录首次无脸时刻，超时则放弃（与主识别循环一致）
+                let since = no_face_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= check_not_face_delay {
+                    log_service(&exe_dir, "INFO", "auto-lock: no face detected within timeout, giving up");
+                    break;
+                }
             }
             if authorized { break; }
+            thread::sleep(Duration::from_millis(30));
         }
         // 释放摄像头
         drop(cam);
-        if power_interrupted {
-            log_service(&exe_dir, "INFO", "auto-lock: presence check interrupted by power transition");
+        if camera_check_cancelled {
+            log_service(&exe_dir, "INFO", "auto-lock: presence check cancelled by power or unlock activity");
+            continue;
+        }
+
+        // 初次在场检测未授权、且键鼠仍空闲 → 给一次重试机会。摄像头传感器从冷启动
+        // 到自动曝光稳定有时需 3-5 秒；单次检测可能在传感器尚未就绪时结束。
+        // 等待几秒后重新打开摄像头做第二次检测，覆盖传感器预热窗口。
+        if !authorized {
+            log_service(&exe_dir, "INFO", "auto-lock: first presence check failed; retrying after sensor warm-up delay");
+            thread::sleep(Duration::from_secs(3));
+            // 重试前复查状态
+            if state.power.is_camera_blocked()
+                || state.power.generation() != check_power_generation
+                || state.run_requested.load(Ordering::SeqCst)
+                || state.recognition_active.load(Ordering::SeqCst)
+                || state.dll_creds_pipe.load(Ordering::SeqCst)
+                    != INVALID_HANDLE_VALUE.0 as isize
+            {
+                continue;
+            }
+            if let Some((mut c2, backend2)) = open_configured_camera(
+                camera_index,
+                &exe_dir,
+                || {
+                    state.power.is_camera_blocked()
+                        || state.power.generation() != check_power_generation
+                        || state.run_requested.load(Ordering::SeqCst)
+                        || state.recognition_active.load(Ordering::SeqCst)
+                        || state.dll_creds_pipe.load(Ordering::SeqCst)
+                            != INVALID_HANDLE_VALUE.0 as isize
+                },
+            ) {
+                log_service(&exe_dir, "INFO", &format!("auto-lock: retry camera opened via {}", backend2));
+                let retry_deadline = Instant::now() + Duration::from_secs(8);
+                let mut no_face_retry: Option<Instant> = None;
+                while Instant::now() < retry_deadline {
+                    if state.power.is_camera_blocked()
+                        || state.power.generation() != check_power_generation
+                        || state.run_requested.load(Ordering::SeqCst)
+                        || state.recognition_active.load(Ordering::SeqCst)
+                        || state.dll_creds_pipe.load(Ordering::SeqCst)
+                            != INVALID_HANDLE_VALUE.0 as isize
+                    {
+                        camera_check_cancelled = true;
+                        break;
+                    }
+                    let mut frame = Mat::default();
+                    if c2.read(&mut frame).is_err() || frame.empty() {
+                        let since = no_face_retry.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= check_not_face_delay { break; }
+                        thread::sleep(Duration::from_millis(30));
+                        continue;
+                    }
+                    let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
+                    if let Some(feat) = detect_and_extract(models, &frame) {
+                        no_face_retry = None;
+                        let cam_bytes = feature_to_bytes(&feat);
+                        for rec in &records {
+                            let score = cosine_sim(&cam_bytes, &rec.feature_bytes);
+                            let threshold = rec.threshold as f64 / 100.0;
+                            if score >= threshold {
+                                authorized = true;
+                                break;
+                            }
+                        }
+                    } else {
+                        let since = no_face_retry.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= check_not_face_delay { break; }
+                    }
+                    if authorized { break; }
+                    thread::sleep(Duration::from_millis(30));
+                }
+                drop(c2);
+                if authorized {
+                    log_service(&exe_dir, "INFO", "auto-lock: presence confirmed on retry");
+                }
+            }
+        }
+        if camera_check_cancelled {
+            log_service(&exe_dir, "INFO", "auto-lock: presence check cancelled during retry");
             continue;
         }
 
@@ -2317,60 +2596,9 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             // 无人或非授权人员 → 锁屏，清空授权冷却（锁屏后下次需重新识别）
             log_service(&exe_dir, "INFO", "auto-lock: no authorized face, locking workstation");
             auth_cooldown_until = None;
-            // SYSTEM worker 位于 Session 0，不能直接调用只允许交互桌面的 LockWorkStation。
-            // 在活动用户会话启动一次性 helper 发起锁定，再通过 WTSSessionInfoEx 的
-            // SessionFlags 确认结果；API 查询失败保持 Unknown，绝不能冒充锁定成功。
-            let mut locked = false;
-            for attempt in 1..=3u32 {
-                let session_id = match launch_lock_helper_in_active_session() {
-                    Ok(session_id) => session_id,
-                    Err(error) => {
-                        log_service(&exe_dir, "WARN", &format!(
-                            "auto-lock: interactive lock helper failed (attempt {attempt}): {error}"
-                        ));
-                        thread::sleep(Duration::from_millis(250));
-                        continue;
-                    }
-                };
-                log_service(&exe_dir, "INFO", &format!(
-                    "auto-lock: lock request sent to interactive session {session_id}"
-                ));
-                // LockWorkStation 异步生效，最多等待 5 秒确认 WTS 会话状态。
-                let mut verification_error = None;
-                for _ in 0..25 {
-                    thread::sleep(Duration::from_millis(200));
-                    match query_session_lock_state(session_id) {
-                        Ok(SessionLockState::Locked) => {
-                            locked = true;
-                            break;
-                        }
-                        Ok(SessionLockState::Unlocked | SessionLockState::Unknown) => {}
-                        Err(error) => verification_error = Some(error),
-                    }
-                }
-                if locked { break; }
-                if let Some(error) = verification_error {
-                    log_service(&exe_dir, "WARN", &format!(
-                        "auto-lock: unable to verify session {session_id} state: {error}"
-                    ));
-                }
-                log_service(&exe_dir, "WARN", &format!(
-                    "auto-lock: session {session_id} is not confirmed locked after attempt {attempt}"
-                ));
-            }
-            if locked {
-                log_service(&exe_dir, "INFO", "auto-lock: workstation locked");
-                // 锁屏后等 5 秒再继续检查
+            if request_auto_lock(&exe_dir) {
                 thread::sleep(Duration::from_secs(5));
             } else {
-                let hint = if lock_workstation_disabled_by_policy() {
-                    "; DisableLockWorkstation policy is set — Windows forbids locking on this system"
-                } else {
-                    ""
-                };
-                log_service(&exe_dir, "ERROR", &format!(
-                    "auto-lock: failed to lock workstation after 3 attempts{hint}; next attempt in 60s"
-                ));
                 // 复用授权冷却做失败退避，避免每 7-8s 开摄像头复查的死循环
                 auth_cooldown_until = Some(Instant::now() + Duration::from_secs(60));
             }

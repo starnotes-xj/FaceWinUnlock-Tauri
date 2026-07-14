@@ -3,6 +3,7 @@
 #include <string>
 #include <map>
 #include <fstream>
+#include <filesystem>
 #include <windows.h>
 #include <winrt/Microsoft.UI.Xaml.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
@@ -139,6 +140,26 @@ namespace winrt::PasskeyManager::implementation
         {
             LoadSavedCredentialsFromMockDatabase();
             RefreshAutofillPluginCredentialsList();
+            // v0.5.10: 检测主程序写入的 PurgeRequested.flag 信号文件，若存在则
+            // 调用 DeleteAllPluginCredentials（清理 Windows 平台数据库凭据索引）+
+            // ResetLocalCredentialsStore（清理本地元数据 credentials.dat），
+            // 实现「清理残留私钥」命令的完整闭环：KSP 私钥由主程序侧的 certutil 删除，
+            // 元数据与平台数据库由本侧在下次启动时补清。
+            std::wstring purgeFlagPath;
+            if (GetCredentialStorageFilePath(purgeFlagPath)) {
+                std::wstring flagFile = purgeFlagPath;
+                // purgeFlagPath 指向 ...\CredentialsDB\credentials.dat，
+                // PurgeRequested.flag 在同一目录。
+                size_t lastSep = flagFile.find_last_of(L'\\');
+                if (lastSep != std::wstring::npos) {
+                    flagFile.replace(lastSep + 1, std::wstring::npos, L"PurgeRequested.flag");
+                }
+                if (std::filesystem::exists(flagFile)) {
+                    DeleteAllPluginCredentials();
+                    ResetLocalCredentialsStore();
+                    std::filesystem::remove(flagFile);
+                }
+            }
         }
         bool GetCredentialStorageFolderPath(std::wstring& outPath)
         {

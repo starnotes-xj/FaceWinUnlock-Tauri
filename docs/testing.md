@@ -95,7 +95,9 @@ Save open work before `shutdown /h`. If `powercfg /a` reports that S4 hibernatio
 
 After every wake, confirm that the account tile, PIN/password field, and lower-left account controls are present; the spinner does not remain indefinitely; the desktop opens normally; and the camera LED turns off within 5 seconds after manual PIN unlock. Record the exact failure time and preserve `unlock.log`, `facewinunlock.log`, and `app.log` before reinstalling or clearing logs.
 
-On Modern Standby (`powercfg /a` reports S0 Low Power Idle), the camera LED must turn off before the machine finishes entering standby and remain off for the entire sleep interval. The Unlock log should contain `power suspend detected; camera closed and recognition paused`; after wake it should contain `power resume detected; stale camera state cleared` and an auto-lock resume grace message. A camera prewarm/open line between those suspend and resume lines is a failure.
+On Modern Standby (`powercfg /a` reports S0 Low Power Idle), the camera LED must turn off as soon as the console display becomes inactive and remain off for the entire sleep interval. The Unlock log must contain `console display inactive; camera closed and recognition paused`; a traditional S3/S4 transition can additionally log `power suspend detected`. After wake it must contain `camera power gate cleared; stale camera state discarded`. A camera prewarm/open line after the inactive-display line and before the gate-cleared line is a failure.
+
+Also test ordinary display timeout separately from **Sleep**. While the display is off, continuous vivo/Sunlogin/ToDesk input must still prevent automatic locking. With no local or remote input, automatic lock may lock the session but must log `locking without camera` and must not turn on the camera LED.
 
 Issue #26 is ready to close only after the active-camera Sleep case, hibernate/resume, face unlock, and manual PIN release all pass repeatedly on an installed build. Unit tests alone are insufficient.
 
