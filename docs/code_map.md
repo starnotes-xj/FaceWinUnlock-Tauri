@@ -13,16 +13,16 @@
 
 - `lib.rs`: COM exports, DLL lifetime, shared credential state, logging, owner-window context, browser allowlist, WebAuthn event handles, broker classification and tests.
 - `CSampleProvider.rs`: usage-scenario filtering, broker policy, credential enumeration, listener lifecycle.
-- `CSampleCredential.rs`: tile fields, optional manual PIN field, credential serialization, failed-result cleanup.
+- `CSampleCredential.rs`: face tile fields, credential serialization and failed-result cleanup.
 - `CPipeListener.rs`: control/credential threads, WebAuthn race checks, broker fallback, asynchronous teardown, DLL lifetime guards.
 - `Pipe.rs`: Win32 named-pipe operations and payload parsing.
 
 ## Unlock
 
 - `main.rs`: supervisor/worker entry, three named-pipe servers, face-recognition loop, camera prewarm, UI camera yield, auto-lock, WTS helper launch, service logging.
+- `power_events.rs`: suspend/resume callback registration and the camera-blocking power generation state.
 - `webauthn_activity.rs`: Event Log channel/provider validation, ten-minute replay, pull subscription, transaction tracking/expiry, Ready/Active named events.
 - `passkey/mod.rs`: serialized face-authorization state machine for the official Passkey plugin.
-- `ngc/`: optional manual Hello PIN tile support and diagnostics. It is not the browser/passkey route and must not be used for UI injection.
 
 ## UI Backend
 
@@ -64,7 +64,6 @@ Registry root: `HKLM\SOFTWARE\facewinunlock-tauri`.
 | `CREDUI_ALLOW_BROKER` | `1` | Enable broker scene classification |
 | `CREDUI_BROKER_FALLBACK_TIMEOUT` | `5` or installer `6` | Face timeout before Windows fallback |
 | `CREDUI_BROWSER_PASSWORD_FILL` | `1` | Guarded unknown browser password-fill fallback |
-| `PIN_ENABLED` | `0` | Optional manual Hello PIN tile field |
 
 `CREDUI_UIA_DETECT`, `CREDUI_BROKER_TRY_FACE_UNKNOWN`, animation settings, and old takeover flags are obsolete. Their remaining uses must only delete old installations.
 

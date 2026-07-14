@@ -12,8 +12,8 @@
 
 #![windows_subsystem = "windows"]
 
-mod ngc;
 mod passkey;
+mod power_events;
 mod webauthn_activity;
 
 use std::{
@@ -100,6 +100,8 @@ struct State {
     should_exit:      AtomicBool,
     prepare_requested: AtomicBool,
     run_requested:    AtomicBool,
+    /// `run_requested` 所属的电源代际。恢复后的新 run 可保留；挂起前遗留的 run 必须丢弃。
+    run_power_generation: AtomicU64,
     recognition_active: AtomicBool,
     release_requested: AtomicBool,
     /// Stops only generic broker recognition. Official passkey-plugin face
@@ -137,6 +139,9 @@ struct State {
     /// 设为 now + UI_CAMERA_YIELD_FALLBACK_MS，发 "ui_done" 清零。> now 时后台不预热、不自动
     /// 开摄像头，把摄像头让给 UI，修复录入采集黑屏（UI 与后台服务争抢同一摄像头）。
     camera_yield_until: AtomicI64,
+    /// Windows 挂起/恢复状态。挂起期间所有摄像头路径必须保持关闭；generation 用于
+    /// 中断跨越 Modern Standby 的旧捕获对象，并让恢复后的自动锁重新进入冷却。
+    power: Arc<power_events::PowerLifecycle>,
     /// 浏览器 passkey assertion 的一次性人脸授权门。
     passkey_face_gate: Arc<passkey::FaceAuthorizationGate>,
 }
@@ -149,6 +154,7 @@ impl State {
             should_exit:     AtomicBool::new(false),
             prepare_requested: AtomicBool::new(false),
             run_requested:   AtomicBool::new(false),
+            run_power_generation: AtomicU64::new(0),
             recognition_active: AtomicBool::new(false),
             release_requested: AtomicBool::new(false),
             broker_guard_release_requested: AtomicBool::new(false),
@@ -162,6 +168,7 @@ impl State {
             consecutive_failures: AtomicU32::new(0),
             after_release_cooldown_until: AtomicI64::new(0),
             camera_yield_until: AtomicI64::new(0),
+            power: Arc::new(power_events::PowerLifecycle::default()),
             passkey_face_gate: Arc::new(passkey::FaceAuthorizationGate::default()),
         })
     }
@@ -365,6 +372,10 @@ fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
             Ok(data) if !data.is_empty() => {
                 let cmd = String::from_utf8_lossy(&data);
                 control_buf.push_str(&cmd);
+                if state.power.is_suspended() {
+                    control_buf.clear();
+                    continue;
+                }
                 if control_buf.contains("run") {
                     // broker 冷却期内拒绝 "run"：防止新 CredUIBroker 进程
                     // 重新发送 "run" 激活摄像头
@@ -381,6 +392,9 @@ fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
                         log_service(&state.exe_dir, "INFO", "run ignored while recognition is active");
                     } else {
                         state.release_requested.store(false, Ordering::SeqCst);
+                        state
+                            .run_power_generation
+                            .store(state.power.generation(), Ordering::SeqCst);
                         state.run_requested.store(true, Ordering::SeqCst);
                         state.dll_run_received.store(true, Ordering::SeqCst);
                         log_service(&state.exe_dir, "INFO", "run requested from credential provider");
@@ -632,52 +646,6 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                         .fetch_add(1, Ordering::SeqCst);
                     *state.matched_creds.lock().unwrap() = None;
                 }
-                cmd if cmd.starts_with("pin:") => {
-                    // Hello PIN NGC 解密请求：pin:<username>:<PIN>
-                    let payload = &cmd[4..]; // 去掉 "pin:" 前缀
-                    if let Some(colon_pos) = payload.find(':') {
-                        let username = &payload[..colon_pos];
-                        let pin = &payload[colon_pos + 1..];
-                        log_service(
-                            &state.exe_dir, "INFO",
-                            &format!("收到 PIN 解锁请求 (用户: {})", username),
-                        );
-                        // 根据用户名查找 SID
-                        let sid = ngc::find_sid_by_username(username);
-                        match sid {
-                            Ok(sid) => match ngc::recover_password(&sid, pin) {
-                                Ok((ngc_user, password, domain)) => {
-                                    log_service(
-                                        &state.exe_dir,
-                                        "INFO",
-                                        &format!("NGC PIN 解密成功，用户: {}", ngc_user),
-                                    );
-                                    *state.matched_creds.lock().unwrap() =
-                                        Some((ngc_user, password, domain));
-                                    let _ = pipe_write(pipe, b"ok");
-                                }
-                                Err(e) => {
-                                    log_service(
-                                        &state.exe_dir,
-                                        "WARN",
-                                        &format!("NGC PIN 解密失败: {}", e),
-                                    );
-                                    let _ = pipe_write(pipe, format!("fail:{}", e).as_bytes());
-                                }
-                            },
-                            Err(e) => {
-                                log_service(
-                                    &state.exe_dir,
-                                    "WARN",
-                                    &format!("查找 SID 失败: {}", e),
-                                );
-                                let _ = pipe_write(pipe, format!("fail:{}", e).as_bytes());
-                            }
-                        }
-                    } else {
-                        let _ = pipe_write(pipe, b"fail:invalid format, expected pin:<username>:<PIN>");
-                    }
-                }
                 _ => {}
             }
         }
@@ -834,7 +802,7 @@ fn feature_to_bytes(feat: &Mat) -> Vec<u8> {
 
 /// 余弦相似度（0.0 ~ 1.0）
 fn cosine_sim(a: &[u8], b: &[u8]) -> f64 {
-    if a.len() != b.len() || a.len() % 4 != 0 { return 0.0; }
+    if a.len() != b.len() || !a.len().is_multiple_of(4) { return 0.0; }
     let to_f32 = |bytes: &[u8]| -> Vec<f32> {
         bytes.chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -1358,9 +1326,47 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let mut prewarm_at: Option<Instant> = None;
     let mut prewarm_suppressed = false;
     let mut prewarm_session_gate = PrewarmSessionGate::default();
+    let mut power_resume_requires_run = false;
+    let mut observed_power_generation = state.power.generation();
 
     'main: loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
+
+        let power_generation = state.power.generation();
+        if power_generation != observed_power_generation {
+            observed_power_generation = power_generation;
+            let preserve_new_run = !state.power.is_suspended()
+                && state.run_requested.load(Ordering::SeqCst)
+                && state.run_power_generation.load(Ordering::SeqCst) == power_generation;
+            state.passkey_face_gate.reject_pending();
+            cam = None;
+            prewarm_at = None;
+            prewarm_suppressed = true;
+            power_resume_requires_run = true;
+            delayed_run_at = None;
+            delay_session_armed = false;
+            last_failed_at = None;
+            state.prepare_requested.store(false, Ordering::SeqCst);
+            if !preserve_new_run {
+                state.run_requested.store(false, Ordering::SeqCst);
+                state.dll_run_received.store(false, Ordering::SeqCst);
+            }
+            state.recognition_active.store(false, Ordering::SeqCst);
+            *state.matched_creds.lock().unwrap() = None;
+            log_service(
+                &exe_dir,
+                "INFO",
+                if state.power.is_suspended() {
+                    "power suspend detected; camera closed and recognition paused"
+                } else {
+                    "power resume detected; stale camera state cleared"
+                },
+            );
+        }
+        if state.power.is_suspended() {
+            thread::sleep(Duration::from_millis(20));
+            continue;
+        }
 
         if state
             .broker_guard_release_requested
@@ -1412,7 +1418,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             for _ in 0..300 {
                 thread::sleep(Duration::from_millis(100));
                 if state.matched_creds.lock().unwrap().is_none()
-                    || state.should_exit.load(Ordering::SeqCst) { break; }
+                    || state.should_exit.load(Ordering::SeqCst)
+                    || state.power.generation() != observed_power_generation { break; }
             }
             continue;
         }
@@ -1420,7 +1427,9 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         let has_credential_client =
             state.dll_creds_pipe.load(Ordering::SeqCst) != INVALID_HANDLE_VALUE.0 as isize;
         if prewarm_session_gate.observe_credential_client(has_credential_client) {
-            prewarm_suppressed = false;
+            if !power_resume_requires_run {
+                prewarm_suppressed = false;
+            }
             log_service(
                 &exe_dir,
                 "INFO",
@@ -1430,6 +1439,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         if !has_credential_client && !state.recognition_active.load(Ordering::SeqCst) {
             delayed_run_at = None;
             delay_session_armed = false;
+            power_resume_requires_run = false;
         }
 
         if state.prepare_requested.swap(false, Ordering::SeqCst) {
@@ -1639,8 +1649,16 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 // 让主循环尽快在下一轮响应 should_exit/release，避免关机/解锁被这次预热拖 2-3s。
                 && !state.should_exit.load(Ordering::SeqCst)
                 && !state.release_requested.load(Ordering::SeqCst)
+                && !state.power.is_suspended()
             {
+                let open_power_generation = state.power.generation();
                 if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
+                    if state.power.is_suspended()
+                        || state.power.generation() != open_power_generation
+                    {
+                        drop(c);
+                        continue 'main;
+                    }
                     cam = Some(c);
                     prewarm_at = Some(Instant::now());
                     log_service(
@@ -1696,6 +1714,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         // "if cam.is_none()" 处 cam 已 Some → 跳过 2-3s 打开 → 秒识别）；下一轮锁屏仍可预热。
         prewarm_at = None;
         prewarm_suppressed = false;
+        power_resume_requires_run = false;
         prewarm_session_gate.on_run();
 
         // 定期重新加载人脸记录和配置
@@ -1760,7 +1779,14 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
         // 打开首选项中保存的摄像头索引，避免每次解锁都扫描 0-3 号设备。
         if cam.is_none() {
+            let open_power_generation = state.power.generation();
             if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
+                if state.power.is_suspended()
+                    || state.power.generation() != open_power_generation
+                {
+                    drop(c);
+                    continue 'main;
+                }
                 cam = Some(c);
                 log_service(
                     &exe_dir,
@@ -1790,6 +1816,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         while no_face_retries < MAX_NO_FACE_RETRIES {
             if state.should_exit.load(Ordering::SeqCst)
                 || state.release_requested.load(Ordering::SeqCst)
+                || state.power.is_suspended()
+                || state.power.generation() != observed_power_generation
                 || (passkey_request_id.is_none()
                     && state.broker_guard_release_requested.load(Ordering::SeqCst))
             {
@@ -1813,6 +1841,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 while Instant::now() < hard_deadline {
                     if state.should_exit.load(Ordering::SeqCst)
                         || state.release_requested.load(Ordering::SeqCst)
+                        || state.power.is_suspended()
+                        || state.power.generation() != observed_power_generation
                         || (passkey_request_id.is_none()
                             && state.broker_guard_release_requested.load(Ordering::SeqCst))
                     {
@@ -1887,10 +1917,21 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             // 无人脸：摄像头可能尚未预热，内部重试
             no_face_retries += 1;
             if no_face_retries < MAX_NO_FACE_RETRIES {
+                if state.power.is_suspended()
+                    || state.power.generation() != observed_power_generation
+                {
+                    break;
+                }
                 log_service(&exe_dir, "INFO", &format!("no face in round {}, retrying ({}/{})", no_face_retries, no_face_retries + 1, MAX_NO_FACE_RETRIES));
                 // 释放当前摄像头后重开，获取新数据流（take() 取出旧值并 drop，显式释放）
                 drop(cam.take());
                 if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
+                    if state.power.is_suspended()
+                        || state.power.generation() != observed_power_generation
+                    {
+                        drop(c);
+                        break;
+                    }
                     cam = Some(c);
                     log_service(&exe_dir, "INFO", &format!("camera reopened for retry via {}", backend_name));
                 } else {
@@ -1898,6 +1939,17 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                     break;
                 }
             }
+        }
+
+        if state.power.is_suspended()
+            || state.power.generation() != observed_power_generation
+        {
+            if let Some(orig) = saved_brightness {
+                set_brightness(orig);
+            }
+            state.recognition_active.store(false, Ordering::SeqCst);
+            cam = None;
+            continue 'main;
         }
 
         // 识别结束，恢复原始亮度
@@ -2015,6 +2067,7 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
     // 而非固定每 60s 一次，把空闲期间摄像头亮起频率降到与 autoLockTimeout 一致（通常 5 分钟）。
     const AUTH_COOLDOWN_MIN: Duration = Duration::from_secs(60);
     let mut auth_cooldown_until: Option<Instant> = None;
+    let mut observed_power_generation = state.power.generation();
 
     loop {
         if state.should_exit.load(Ordering::SeqCst) { break; }
@@ -2041,6 +2094,28 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         }
 
         if !auto_lock_enabled { continue; }
+
+        let power_generation = state.power.generation();
+        if power_generation != observed_power_generation {
+            observed_power_generation = power_generation;
+            if state.power.is_suspended() {
+                auth_cooldown_until = None;
+                log_service(&exe_dir, "INFO", "auto-lock: paused for system suspend");
+            } else {
+                let cooldown = AUTH_COOLDOWN_MIN.max(Duration::from_secs(auto_lock_timeout));
+                auth_cooldown_until = Some(Instant::now() + cooldown);
+                log_service(
+                    &exe_dir,
+                    "INFO",
+                    &format!(
+                        "auto-lock: resume grace active for {}s; camera remains closed",
+                        cooldown.as_secs()
+                    ),
+                );
+            }
+            continue;
+        }
+        if state.power.is_suspended() { continue; }
 
         // 屏幕已锁（凭据提供程序活跃、DLL creds 管道已连）时不再自动锁屏：既避免对已锁屏幕
         // 重复锁定，也避免与解锁端「摄像头预热」抢占摄像头（autoLockTimeout 小于预热空闲超时
@@ -2115,7 +2190,15 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         );
         let mut cam: Option<VideoCapture> = None;
         let camera_index = configured_camera_index(&db_path);
+        let check_power_generation = state.power.generation();
         if let Some((c, backend_name)) = open_configured_camera(camera_index, &exe_dir) {
+            if state.power.is_suspended()
+                || state.power.generation() != check_power_generation
+            {
+                drop(c);
+                log_service(&exe_dir, "INFO", "auto-lock: camera open interrupted by power transition");
+                continue;
+            }
             log_service(&exe_dir, "INFO", &format!("auto-lock: camera opened via {}", backend_name));
             cam = Some(c);
         }
@@ -2128,8 +2211,15 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         };
 
         let mut authorized = false;
+        let mut power_interrupted = false;
         for _ in 0..15 {
             if state.should_exit.load(Ordering::SeqCst) { break; }
+            if state.power.is_suspended()
+                || state.power.generation() != check_power_generation
+            {
+                power_interrupted = true;
+                break;
+            }
             // 中途用户回来操作了
             if get_idle_millis() < 500 { authorized = true; break; }
 
@@ -2155,6 +2245,10 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
         }
         // 释放摄像头
         drop(cam);
+        if power_interrupted {
+            log_service(&exe_dir, "INFO", "auto-lock: presence check interrupted by power transition");
+            continue;
+        }
 
         if authorized {
             // 授权用户在场，更新活跃时间并进入授权冷却：下一轮 OS idle 仍会超时
@@ -2244,7 +2338,6 @@ impl Drop for OwnedHandle {
         }
     }
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionLockState {
     Locked,
@@ -2515,6 +2608,22 @@ fn run_service_worker(exe_dir: PathBuf) -> i32 {
     let state = State::new(exe_dir.clone());
     log_service(&exe_dir, "INFO", "FaceWinUnlock service worker started");
 
+    let _power_notifications = match power_events::register(state.power.clone()) {
+        Ok(registration) => {
+            log_service(&exe_dir, "INFO", "suspend/resume power notifications registered");
+            Some(registration)
+        }
+        Err(error) => {
+            state.power.inhibit_camera();
+            log_service(
+                &exe_dir,
+                "ERROR",
+                &format!("{error}; all camera paths are disabled for this worker"),
+            );
+            None
+        }
+    };
+
     let s1 = state.clone();
     thread::spawn(move || run_control_server(s1));
 
@@ -2628,1160 +2737,9 @@ fn main() {
     // 特征空间一致，不必退回 DShow（会造成"检测到脸但匹配不上"）。必须在任何 VideoCapture 打开前设置。
     std::env::set_var("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0");
 
-    // ── NGC 解密链 Smoke Test（CLI 模式）────────────────────────────
-    let args: Vec<String> = std::env::args().collect();
-    let is_cli_mode = args.iter().any(|a| a == "--ngc-smoke-test" || a == "--ngc-probe" || a == "--ngc-dump" || a == "--ngc-keys" || a == "--ngc-enum-cng" || a == "--ngc-sign-probe" || a == "--ngc-container-dump" || a == "--ngc-srk" || a == "--ngc-ncrypt" || a == "--ngc-ncrypt-vault" || a == "--ngc-ncrypt-export" || a == "--ngc-dump-enc" || a == "--ngc-cbor-deep-dump" || a == "--ngc-phase1" || a == "--ngc-phase1-path-a" || a == "--ngc-probe-derive" || a == "--pin-save");
-
-    // windows_subsystem="windows" → 无控制台。CLI 结果全量写入文件。
-    let cli_out_path: Option<std::path::PathBuf> = if is_cli_mode {
-        let p = exe_dir.join("ngc_test_result.txt");
-        // 清空旧结果 + 写入 UTF-8 BOM（记事本自动识别）
-        let _ = std::fs::write(&p, "\u{FEFF}");
-        Some(p)
-    } else {
-        None
-    };
-
-    // CLI 输出：仅写文件（GUI 程序无控制台 stdout）
-    fn cli_write(file: &Option<std::path::PathBuf>, text: &str) {
-        if let Some(ref p) = file {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-                let _ = f.write_all(text.as_bytes());
-            }
-        }
-    }
-    macro_rules! cli_println {
-        ($file:expr) => { cli_write($file, "\n") };
-        ($file:expr, $($arg:tt)*) => { cli_write($file, &format!("{}\n", format!($($arg)*))) };
-    }
-
-    // PsExec SYSTEM 环境下无控制台 → 弹窗告知用户结果文件路径
-    fn cli_done(path: &std::path::Path, passed: bool) -> ! {
-        // 不弹 MessageBox——PsExec SYSTEM 会话 (Session 0) 里弹窗不可见，
-        // 会卡死进程。直接写文件退出，用户自行查看。
-        let summary = if passed { "PASS" } else { "FAIL" };
-        cli_write(&Some(path.to_path_buf()), &format!("\n[{}] 测试结束，结果见本文件。\n", summary));
-        let _ = std::fs::write(path.join("..").join("ngc_test_done.txt"), summary);
-        std::process::exit(if passed { 0 } else { 1 });
-    }
-
-    if args.iter().any(|a| a == "--ngc-enum-cng") {
-        // CNG/KSP 密钥枚举诊断：确认 FIDO/passkey 私钥能否经 CNG 直接访问。
-        // 若 FIDO 密钥出现在 Passport/Platform KSP 中，签名应走 NCrypt 原地签名，
-        // 而非逆向解密文件格式。
-        cli_println!(&cli_out_path, "=== CNG/KSP 密钥枚举诊断 ===");
-        cli_println!(&cli_out_path, "（以当前进程身份枚举；NGC 密钥属 LocalService，");
-        cli_println!(&cli_out_path, " 若此处为空，可能需要模拟 LocalService 令牌）");
-        for provider in [
-            "Microsoft Passport Key Storage Provider",
-            "Microsoft Platform Crypto Provider",
-            "Microsoft Software Key Storage Provider",
-        ] {
-            cli_println!(&cli_out_path);
-            cli_println!(&cli_out_path, "--- Provider: {} ---", provider);
-            match ngc::dpapi::enum_cng_keys(provider) {
-                Ok(keys) => {
-                    cli_println!(&cli_out_path, "  共 {} 个密钥:", keys.len());
-                    for (name, alg) in &keys {
-                        cli_println!(&cli_out_path, "    [{}] {}", if alg.is_empty() { "?" } else { alg }, name);
-                    }
-                }
-                Err(e) => cli_println!(&cli_out_path, "  枚举失败: {}", e),
-            }
-        }
-        cli_done(cli_out_path.as_ref().unwrap(), true);
-    }
-
-    if args.iter().any(|a| a == "--ngc-container-dump") {
-        // PIN-free：递归 dump NGC 容器真实磁盘结构，用于把现代格式逆向写对。
-        // 仅读结构与已加密 blob（不解密、不碰 PIN）。
-        cli_println!(&cli_out_path, "=== NGC 容器结构 Dump (PIN-free) ===");
-        let ngc_root = std::path::Path::new(r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc");
-        let mut files: Vec<std::path::PathBuf> = Vec::new();
-        let mut stack: Vec<std::path::PathBuf> = vec![ngc_root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for e in entries.flatten() {
-                    let p = e.path();
-                    if p.is_dir() { stack.push(p); } else { files.push(p); }
-                }
-            }
-        }
-        files.sort();
-        cli_println!(&cli_out_path, "共 {} 个文件\n", files.len());
-        for p in &files {
-            let rel = p.strip_prefix(ngc_root).unwrap_or(p);
-            let data = match std::fs::read(p) { Ok(d) => d, Err(_) => { cli_println!(&cli_out_path, "■ {}  (读取失败)", rel.display()); continue; } };
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            cli_println!(&cli_out_path, "■ {}  ({} bytes)", rel.display(), data.len());
-            if name.ends_with(".json") {
-                let txt = String::from_utf8_lossy(&data);
-                let shown: String = txt.chars().take(6000).collect();
-                cli_println!(&cli_out_path, "{}", shown);
-            } else {
-                let n = data.len().min(192);
-                let hex: String = data[..n].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-                cli_println!(&cli_out_path, "  hex[{}/{}]: {}", n, data.len(), hex);
-                if data.len() >= 2 && data.len() % 2 == 0 {
-                    let u16s: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-                    let s = String::from_utf16_lossy(&u16s);
-                    let printable = s.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').count();
-                    if printable > s.chars().count() / 2 {
-                        cli_println!(&cli_out_path, "  utf16: {}", s.trim_end_matches('\0'));
-                    }
-                }
-            }
-            cli_println!(&cli_out_path);
-        }
-        cli_done(cli_out_path.as_ref().unwrap(), true);
-    }
-
-    if args.iter().any(|a| a == "--ngc-sign-probe") {
-        // FIDO 签名探针：测多种 PIN 供给策略对 Passport KSP 密钥签名是否成功。
-        // 用法: --ngc-sign-probe <rpId> <PIN>   例: --ngc-sign-probe google.com 1234
-        let idx = args.iter().position(|a| a == "--ngc-sign-probe").unwrap_or(0) + 1;
-        let rp_id = args.get(idx).map(|s| s.as_str()).unwrap_or("");
-        let pin = args.get(idx + 1).map(|s| s.as_str()).unwrap_or("");
-        cli_println!(&cli_out_path, "=== FIDO 签名探针 ===");
-        if rp_id.is_empty() || pin.is_empty() {
-            cli_println!(&cli_out_path, "用法: --ngc-sign-probe <rpId> <PIN>");
-            cli_println!(&cli_out_path, "示例: --ngc-sign-probe google.com 1234");
-            cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-        let mut any_ok = false;
-        for line in ngc::dpapi::ncrypt_sign_probe(rp_id, pin) {
-            if line.contains("签名成功") { any_ok = true; }
-            cli_println!(&cli_out_path, "{}", line);
-        }
-        cli_done(cli_out_path.as_ref().unwrap(), any_ok);
-    }
-
-    if args.iter().any(|a| a == "--ngc-dump") {
-        // NGC 加密原始数据 dump（调试用）
-        let ngc_root = r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc";
-        cli_println!(&cli_out_path, "=== NGC encryptedCbor Raw Dump ===");
-        cli_println!(&cli_out_path);
-        if let Ok(entries) = std::fs::read_dir(ngc_root) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if !p.is_dir() || p.file_name().and_then(|n| n.to_str()).map_or(true, |n| !n.starts_with('{')) { continue; }
-                let pj = p.join("Protectors.json");
-                if !pj.is_file() { continue; }
-                if let Ok(json_str) = std::fs::read_to_string(&pj) {
-                    if let Ok(root) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                        if let Some(cbor_b64) = root.get("pin").and_then(|p| p.get("secretStore")).and_then(|s| s.get("encryptedCbor")).and_then(|v| v.as_str()) {
-                            use base64::Engine;
-                            if let Ok(cbor_bytes) = base64::engine::general_purpose::STANDARD.decode(cbor_b64) {
-                                cli_println!(&cli_out_path, "encryptedCbor size: {} bytes", cbor_bytes.len());
-                                // Hex dump of first 128 bytes
-                                cli_println!(&cli_out_path, "--- hex dump (first 128 bytes) ---");
-                                let dump_len = cbor_bytes.len().min(128);
-                                for chunk in cbor_bytes[..dump_len].chunks(16) {
-                                    let hex: String = chunk.iter().map(|b| format!("{:02X} ", b)).collect();
-                                    let ascii: String = chunk.iter().map(|&b| if b >= 32 && b < 127 { b as char } else { '.' }).collect();
-                                    cli_println!(&cli_out_path, "  {:45} {}", hex, ascii);
-                                }
-                                cli_println!(&cli_out_path);
-
-                                // 尝试解析 NgcIsoHeader
-                                if let Ok(hdr) = ngc::container::parse_ngciso_header(&cbor_bytes) {
-                                    cli_println!(&cli_out_path, "--- NgcIsoHeader ---");
-                                    cli_println!(&cli_out_path, "salt (first 8 bytes): {:02X?}", &hdr.salt[..8.min(hdr.salt.len())]);
-                                    cli_println!(&cli_out_path, "rounds: {}", hdr.rounds);
-                                    cli_println!(&cli_out_path, "iv (len {}): {:02X?}", hdr.iv.len(), &hdr.iv);
-                                    cli_println!(&cli_out_path, "payload_offset: {} (0x{:X})", hdr.payload_offset, hdr.payload_offset);
-                                    cli_println!(&cli_out_path, "ciphertext size after header: {} bytes", cbor_bytes.len() - hdr.payload_offset);
-                                } else {
-                                    cli_println!(&cli_out_path, "parse_ngciso_header FAILED");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        cli_done(cli_out_path.as_ref().unwrap(), true);
-    }
-
-    if args.iter().any(|a| a == "--ngc-srk") {
-        let uidx = args.iter().position(|a| a == "--ngc-srk").unwrap_or(0) + 1;
-        let u = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
-        let p = args.get(uidx+1).map(|s| s.as_str()).unwrap_or("");
-        if u.is_empty() || p.is_empty() { cli_println!(&cli_out_path, "用法: --ngc-srk <用户名> <PIN>"); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        cli_println!(&cli_out_path, "=== Protector GCM 解密 SRK 提取 ===");
-        let sid = match ngc::lookup_sid_by_username(u) { Ok(s) => s, Err(e) => { cli_println!(&cli_out_path, "SID: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); } };
-        let ci = match ngc::container::find_ngc_container(&sid) { Ok(c) => c, Err(e) => { cli_println!(&cli_out_path, "容器: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); } };
-        if let Ok(entropy) = ngc::pin::derive_entropy(p, &ci.salt, ci.rounds) {
-            // 诊断: DPAPI unwrap SRK
-            let cj = ci.container_path.join("Container.json");
-            if let Ok(cj_js) = std::fs::read_to_string(&cj) {
-                if let Ok(cj_v) = serde_json::from_str::<serde_json::Value>(&cj_js) {
-                    if let Some(srk_b64) = cj_v.get("srk").and_then(|s| s.as_str()) {
-                        use base64::Engine;
-                        cli_println!(&cli_out_path, "SRK base64: {}", srk_b64);
-                        if let Ok(srk_blob) = base64::engine::general_purpose::STANDARD.decode(srk_b64) {
-                            cli_println!(&cli_out_path, "SRK decoded: {} bytes", srk_blob.len());
-                            cli_println!(&cli_out_path, "SRK hex: {:02X?}", &srk_blob);
-                            // Try DPAPI
-                            match ngc::dpapi::dpapi_unprotect(&srk_blob, &entropy) {
-                                Ok(key) => {
-                                    cli_println!(&cli_out_path, "DPAPI unwrap OK: {} bytes", key.len());
-                                    cli_println!(&cli_out_path, "key[..32]: {:02X?}", &key.iter().take(32).collect::<Vec<_>>());
-                                }
-                                Err(e) => { cli_println!(&cli_out_path, "DPAPI unwrap FAILED: {}", e); }
-                            }
-                            // Try without entropy
-                            match ngc::dpapi::dpapi_unprotect(&srk_blob, &[]) {
-                                Ok(key) => {
-                                    cli_println!(&cli_out_path, "DPAPI(no entropy) OK: {} bytes", key.len());
-                                }
-                                Err(e) => { cli_println!(&cli_out_path, "DPAPI(no entropy): {}", e); }
-                            }
-                        }
-                    }
-                }
-            }
-            let pj = ci.container_path.join("Protectors.json");
-            if let Ok(js) = std::fs::read_to_string(&pj) {
-                if let Ok(r) = serde_json::from_str::<serde_json::Value>(&js) {
-                    if let Some(cbor_b64) = r.get("pin").and_then(|p| p.get("secretStore")).and_then(|s| s.get("encryptedCbor")).and_then(|v| v.as_str()) {
-                        use base64::Engine;
-                        if let Ok(cb) = base64::engine::general_purpose::STANDARD.decode(cbor_b64) {
-                            if let Ok(hdr) = ngc::container::parse_ngciso_header(&cb) {
-                                let ct = &cb[hdr.payload_offset..];
-                                cli_println!(&cli_out_path, "ct_len={} ct%16={}", ct.len(), ct.len()%16);
-                                if let Some((desc, pt)) = ngc::try_multiple_key_derivations(&entropy, &hdr.iv, ct) {
-                                    cli_println!(&cli_out_path, "成功: {}", desc);
-                                    cli_println!(&cli_out_path, "payload长度: {} bytes", pt.len());
-                                    // Hex dump first 128 bytes
-                                    for chunk in pt.iter().take(128).collect::<Vec<_>>().chunks(16) {
-                                        cli_println!(&cli_out_path, "  {}", chunk.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" "));
-                                    }
-                                    // 如果 payload 看起来像 CBOR，尝试提取 32 字节密钥段
-                                    if pt.len() >= 32 {
-                                        cli_println!(&cli_out_path, "first 32B (candidate SRK):");
-                                        for chunk in pt[..32].chunks(16) {
-                                            cli_println!(&cli_out_path, "  {}", chunk.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" "));
-                                        }
-                                    }
-                                } else {
-                                    cli_println!(&cli_out_path, "所有派生方式均失败");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        cli_done(cli_out_path.as_ref().unwrap(), true);
-    }
-
-    // ── Path A: NCrypt KSP 签名验证（新路线）───────────────────────────
-    if args.iter().any(|a| a == "--ngc-ncrypt") {
-        let uidx = args.iter().position(|a| a == "--ngc-ncrypt").unwrap_or(0) + 1;
-        let u = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
-        let p = args.get(uidx+1).map(|s| s.as_str()).unwrap_or("");
-        if u.is_empty() || p.is_empty() {
-            cli_println!(&cli_out_path, "用法: --ngc-ncrypt <用户名> <PIN>");
-            cli_println!(&cli_out_path, "示例: --ngc-ncrypt \"星记\" \"<PIN>\"");
-            cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-        cli_println!(&cli_out_path, "=== Path A: NCrypt KSP PIN 验证 ===");
-        use sha2::{Sha256, Digest};
-        let test_hash = Sha256::digest(b"FaceWinUnlock NCrypt test data 2026").to_vec();
-        cli_println!(&cli_out_path, "用户: {}", u);
-        cli_println!(&cli_out_path, "测试数据: SHA256(...)= {} bytes", test_hash.len());
-
-        let sid = match ngc::lookup_sid_by_username(u) {
-            Ok(s) => { cli_println!(&cli_out_path, "SID: {}", s); s }
-            Err(e) => { cli_println!(&cli_out_path, "SID lookup 失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-
-        match ngc::ncrypt::verify_pin_and_sign(&sid, p, &test_hash) {
-            Ok((result, log)) => {
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "✅✅✅ NCrypt KSP 签名成功！PIN 正确！ ✅✅✅");
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "密钥名称:   {}", result.key_name);
-                cli_println!(&cli_out_path, "算法:       {}", result.algorithm);
-                cli_println!(&cli_out_path, "密钥长度:   {} bits", result.key_length);
-                cli_println!(&cli_out_path, "签名长度:   {} bytes", result.signature.len());
-                cli_println!(&cli_out_path, "签名前16B:  {:02X?}", &result.signature[..result.signature.len().min(16)]);
-                cli_println!(&cli_out_path, "");
-                let _ = &log; // 成功时 log 为空，真实日志在 result.log
-                cli_println!(&cli_out_path, "--- 完整诊断日志 ---");
-                for line in &result.log {
-                    cli_println!(&cli_out_path, "{}", line);
-                }
-                cli_done(cli_out_path.as_ref().unwrap(), true);
-            }
-            Err((e, log)) => {
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "❌ NCrypt KSP 验证失败: {}", e);
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "--- 诊断日志 ---");
-                for line in &log {
-                    cli_println!(&cli_out_path, "{}", line);
-                }
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "可能原因:");
-                cli_println!(&cli_out_path, "  1. PIN 错误");
-                cli_println!(&cli_out_path, "  2. Passport KSP 中无该用户的密钥");
-                cli_println!(&cli_out_path, "  3. 进程非 SYSTEM 身份（需要 PsExec -s 运行）");
-                cli_println!(&cli_out_path, "  4. Windows Hello 未设置或已损坏");
-                cli_done(cli_out_path.as_ref().unwrap(), false);
-            }
-        }
-    }
-
-    // ── Phase 1 完整链路: NCrypt PIN 验证 + Vault 解密 ───────────────
-    if args.iter().any(|a| a == "--ngc-ncrypt-vault") {
-        let uidx = args.iter().position(|a| a == "--ngc-ncrypt-vault").unwrap_or(0) + 1;
-        let u = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
-        let p = args.get(uidx+1).map(|s| s.as_str()).unwrap_or("");
-        if u.is_empty() || p.is_empty() {
-            cli_println!(&cli_out_path, "用法: --ngc-ncrypt-vault <用户名> <PIN>");
-            cli_println!(&cli_out_path, "示例: --ngc-ncrypt-vault \"星记\" \"<PIN>\"");
-            cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-        cli_println!(&cli_out_path, "========================================");
-        cli_println!(&cli_out_path, "Phase 1 完整链路: NCrypt PIN 验证 + Vault 解密");
-        cli_println!(&cli_out_path, "========================================");
-        use sha2::{Sha256, Digest};
-        let test_hash = Sha256::digest(b"FaceWinUnlock NCrypt-Vault chain test 2026").to_vec();
-        cli_println!(&cli_out_path, "");
-        cli_println!(&cli_out_path, "[Step 1] NCrypt KSP PIN 验证...");
-        cli_println!(&cli_out_path, "  用户: {}", u);
-
-        let sid = match ngc::lookup_sid_by_username(u) {
-            Ok(s) => { cli_println!(&cli_out_path, "  SID: {}", s); s }
-            Err(e) => { cli_println!(&cli_out_path, "  SID lookup 失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-
-        // Step 1: PIN 验证
-        let sign_result = match ngc::ncrypt::verify_pin_and_sign(&sid, p, &test_hash) {
-            Ok((sr, log)) => {
-                cli_println!(&cli_out_path, "  ✅ Step 1 完成: PIN 验证通过！");
-                cli_println!(&cli_out_path, "     密钥: {} ({}, {} bits)", sr.key_name, sr.algorithm, sr.key_length);
-                cli_println!(&cli_out_path, "     签名长度: {} bytes", sr.signature.len());
-                for line in &log { cli_println!(&cli_out_path, "     | {}", line); }
-                Some(sr)
-            }
-            Err((e, diag_log)) => {
-                cli_println!(&cli_out_path, "  ❌ Step 1 失败: {}", e);
-                for line in &diag_log { cli_println!(&cli_out_path, "    | {}", line); }
-                None
-            }
-        };
-
-        // Step 2: 尝试用 RSA 私钥解密 vault / KSP 内部解封
-        cli_println!(&cli_out_path, "");
-        cli_println!(&cli_out_path, "[Step 2] NCryptDecrypt 尝试解密 EncData...");
-        
-        match ngc::ncrypt::try_ncrypt_decrypt_vault(&sid, p) {
-            Ok((pt, dec_log)) => {
-                cli_println!(&cli_out_path, "  ✅✅✅ NCryptDecrypt 解封成功!");
-                cli_println!(&cli_out_path, "     数据长度: {} bytes", pt.len());
-                cli_println!(&cli_out_path, "     前64B hex: {:02X?}", &pt[..pt.len().min(64)]);
-                for line in &dec_log { cli_println!(&cli_out_path, "    | {}", line); }
-                // UTF-16LE 解码尝试
-                if pt.len() >= 2 {
-                    let decoded = String::from_utf16_lossy(
-                        &pt[..pt.len() & !1]
-                            .chunks_exact(2)
-                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                            .collect::<Vec<_>>()
-                    ).trim_matches('\0').to_string();
-                    if !decoded.is_empty() {
-                        cli_println!(&cli_out_path, "     🎉 明文内容: [{} chars] {:?}", decoded.chars().count(), decoded);
-                    } else {
-                        cli_println!(&cli_out_path, "     UTF-16 解码为空或非文本数据");
-                    }
-                }
-                cli_done(cli_out_path.as_ref().unwrap(), true);
-            }
-            Err((e, dec_log)) => {
-                cli_println!(&cli_out_path, "  ❌ NCryptDecrypt 解封失败: {}", e);
-                for line in &dec_log { cli_println!(&cli_out_path, "    | {}", line); }
-                
-                // 即使解封失败，Step 1 成功也说明 PIN 正确
-                if sign_result.is_some() {
-                    cli_println!(&cli_out_path, "");
-                    cli_println!(&cli_out_path, "📋 总结:");
-                    cli_println!(&cli_out_path, "  ✅ PIN 验证 — 通过 (NCryptSignHash 成功)");
-                    cli_println!(&cli_out_path, "  ❌ Vault 解密 — 失败 (KSP 可能不允许导出明文)");
-                    cli_println!(&cli_out_path, "");
-                    cli_println!(&cli_out_path, "下一步方向:");
-                    cli_println!(&cli_out_path, "  A) 用 SYSTEM 身份运行 (PsExec -s)，KSP 行为可能不同");
-                    cli_println!(&cli_out_path, "  B) 研究 NCryptExportKey 导出 PLAINTEXTKEY_BLOB");
-                    cli_println!(&cli_out_path, "  C) 走 WebAuthn/Passkey 路线绕过密码获取");
-                }
-                cli_done(cli_out_path.as_ref().unwrap(), sign_result.is_some());
-            }
-        }
-    }
-
-    // ── 导出 encryptedCbor 供 CyberChef 分析 ────────────────────
-    if args.iter().any(|a| a == "--ngc-dump-enc") {
-        let uidx = args.iter().position(|a| a == "--ngc-dump-enc").unwrap_or(0) + 1;
-        let u = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
-        cli_println!(&cli_out_path, "=== 导出 EncData (encryptedCbor) ===");
-        cli_println!(&cli_out_path, "用户: {}", u);
-        let sid = match ngc::lookup_sid_by_username(u) {
-            Ok(s) => { cli_println!(&cli_out_path, "SID: {}", s); s }
-            Err(e) => { cli_println!(&cli_out_path, "SID 失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-        let ci = match ngc::container::find_ngc_container(&sid) {
-            Ok(c) => c,
-            Err(e) => { cli_println!(&cli_out_path, "容器未找到: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-        cli_println!(&cli_out_path, "容器: {}", ci.container_path.display());
-        let pj = ci.container_path.join("Protectors.json");
-        let ps_str = match std::fs::read_to_string(&pj) {
-            Ok(s) => s,
-            Err(_) => { cli_println!(&cli_out_path, "无法读 Protectors.json"); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-        let pv: serde_json::Value = match serde_json::from_str(&ps_str) {
-            Ok(v) => v,
-            Err(_) => { cli_println!(&cli_out_path, "JSON 解析失败"); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-        let ec_b64 = pv.get("pin").and_then(|p| p.get("secretStore")).and_then(|s| s.get("encryptedCbor")).and_then(|e| e.as_str()).unwrap_or("");
-        if ec_b64.is_empty() {
-            cli_println!(&cli_out_path, "无 encryptedCbor"); cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-        use base64::Engine;
-        match base64::engine::general_purpose::STANDARD.decode(ec_b64) {
-            Ok(ec_bytes) => {
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "========== CyberChef Base64 ==========");
-                for chunk in ec_b64.as_bytes().chunks(100) { cli_println!(&cli_out_path, "{}", std::str::from_utf8(chunk).unwrap_or("?")); }
-                cli_println!(&cli_out_path, "[Info] {} B, Head32: {:02X?}", ec_bytes.len(), &ec_bytes[..ec_bytes.len().min(32)]);
-            }
-            Err(e) => { cli_println!(&cli_out_path, "b64 失败: {}", e); }
-        }
-        cli_done(cli_out_path.as_ref().unwrap(), true);
-    }
-
-    // ── CBOR 深度 dump: 解析所有加密Cbor 的 CBOR 结构 (路B 诊断) ────────
-    if args.iter().any(|a| a == "--ngc-cbor-deep-dump") {
-        use base64::Engine;
-        let uidx = args.iter().position(|a| a == "--ngc-cbor-deep-dump").unwrap_or(0) + 1;
-        let u = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
-        cli_println!(&cli_out_path, "========================================");
-        cli_println!(&cli_out_path, "  CBOR 深度 dump (路B 诊断)");
-        cli_println!(&cli_out_path, "========================================");
-        cli_println!(&cli_out_path, "用户: {}", u);
-        let sid = match ngc::lookup_sid_by_username(u) {
-            Ok(s) => { cli_println!(&cli_out_path, "SID: {}", s); s }
-            Err(e) => { cli_println!(&cli_out_path, "SID 失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-        let ci = match ngc::container::find_ngc_container(&sid) {
-            Ok(c) => c,
-            Err(e) => { cli_println!(&cli_out_path, "容器未找到: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-        cli_println!(&cli_out_path, "容器: {}", ci.container_path.display());
-
-        // 1. Protectors.json -> pin.secretStore.encryptedCbor
-        let pj = ci.container_path.join("Protectors.json");
-        if pj.exists() {
-            cli_println!(&cli_out_path, "");
-            cli_println!(&cli_out_path, "─── 1. Protectors.json → pin.secretStore.encryptedCbor ───");
-            if let Ok(ps) = std::fs::read_to_string(&pj) {
-                if let Ok(pv) = serde_json::from_str::<serde_json::Value>(&ps) {
-                    let ec = pv.get("pin").and_then(|p| p.get("secretStore")).and_then(|s| s.get("encryptedCbor")).and_then(|v| v.as_str());
-                    if let Some(ec_b64) = ec {
-                        if let Ok(ec_bytes) = base64::engine::general_purpose::STANDARD.decode(ec_b64) {
-                            cli_println!(&cli_out_path, "{}", ngc::cbor::deep_dump_cbor("Protectors.encryptedCbor", &ec_bytes));
-                        }
-                    } else {
-                        cli_println!(&cli_out_path, "(无 pin.secretStore.encryptedCbor 字段)");
-                    }
-                }
-            }
-        } else {
-            cli_println!(&cli_out_path, "(Protectors.json 不存在)");
-        }
-
-        // 2. Container.json -> encryptedCbor
-        let cj = ci.container_path.join("Container.json");
-        if cj.exists() {
-            cli_println!(&cli_out_path, "");
-            cli_println!(&cli_out_path, "─── 2. Container.json → encryptedCbor ───");
-            if let Ok(cs) = std::fs::read_to_string(&cj) {
-                if let Ok(cv) = serde_json::from_str::<serde_json::Value>(&cs) {
-                    let ec = cv.get("encryptedCbor").and_then(|v| v.as_str());
-                    if let Some(ec_b64) = ec {
-                        if let Ok(ec_bytes) = base64::engine::general_purpose::STANDARD.decode(ec_b64) {
-                            cli_println!(&cli_out_path, "{}", ngc::cbor::deep_dump_cbor("Container.encryptedCbor", &ec_bytes));
-                        }
-                    } else {
-                        cli_println!(&cli_out_path, "(无 encryptedCbor 字段)");
-                    }
-                    // 同时打印 srk 字段 (如果存在)
-                    if let Some(srk) = cv.get("srk").and_then(|v| v.as_str()) {
-                        cli_println!(&cli_out_path, "");
-                        cli_println!(&cli_out_path, "[Container.srk 存在] {} chars(base64)", srk.len());
-                        if let Ok(srk_bytes) = base64::engine::general_purpose::STANDARD.decode(srk) {
-                            cli_println!(&cli_out_path, "  decoded {}B, head32: {:02X?}", srk_bytes.len(), &srk_bytes[..srk_bytes.len().min(32)]);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Keys/*.json -> encrypted.encryptedCbor (每个 key 文件)
-        let keys_dir = ci.container_path.join("Keys");
-        if keys_dir.is_dir() {
-            cli_println!(&cli_out_path, "");
-            cli_println!(&cli_out_path, "─── 3. Keys/*.json → encrypted.encryptedCbor ───");
-            if let Ok(entries) = std::fs::read_dir(&keys_dir) {
-                for entry in entries.flatten() {
-                    let kf = entry.path();
-                    if !kf.is_file() || kf.extension().map_or(true, |e| e != "json") { continue; }
-                    let fname = kf.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-                    if let Ok(ks) = std::fs::read_to_string(&kf) {
-                        if let Ok(kv) = serde_json::from_str::<serde_json::Value>(&ks) {
-                            let ec = kv.get("encrypted").and_then(|e| e.get("encryptedCbor")).and_then(|v| v.as_str())
-                                .or_else(|| kv.get("encryptedCbor").and_then(|v| v.as_str()));
-                            if let Some(ec_b64) = ec {
-                                if let Ok(ec_bytes) = base64::engine::general_purpose::STANDARD.decode(ec_b64) {
-                                    cli_println!(&cli_out_path, "─── Keys/{} ({}B) ───", fname, ec_bytes.len());
-                                    cli_println!(&cli_out_path, "{}", ngc::cbor::deep_dump_cbor(&format!("Keys/{fname}"), &ec_bytes));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            cli_println!(&cli_out_path, "(Keys 目录不存在)");
-        }
-
-        cli_println!(&cli_out_path, "");
-        cli_println!(&cli_out_path, "========================================");
-        cli_println!(&cli_out_path, "  CBOR 深度 dump 完成");
-        cli_println!(&cli_out_path, "========================================");
-        cli_done(cli_out_path.as_ref().unwrap(), true);
-    }
-
-    // ── NCryptExportKey: 尝试导出 uvkey RSA 私钥 ──────────────────
-    if args.iter().any(|a| a == "--ngc-ncrypt-export") {
-        let uidx = args.iter().position(|a| a == "--ngc-ncrypt-export").unwrap_or(0) + 1;
-        let u = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
-        let p = args.get(uidx+1).map(|s| s.as_str()).unwrap_or("");
-        if u.is_empty() || p.is_empty() {
-            cli_println!(&cli_out_path, "用法: --ngc-ncrypt-export <用户名> <PIN>");
-            cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-        cli_println!(&cli_out_path, "=== NCryptExportKey: 导出 RSA 私钥 ===");
-        let sid = match ngc::lookup_sid_by_username(u) {
-            Ok(s) => { cli_println!(&cli_out_path, "SID: {}", s); s }
-            Err(e) => { cli_println!(&cli_out_path, "SID失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-
-        match ngc::ncrypt::export_rsa_key_and_decrypt(&sid, p) {
-            Ok((key_blob, dec_log)) => {
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "✅✅✅ ExportKey 成功!");
-                cli_println!(&cli_out_path, "私钥 blob: {} bytes", key_blob.len());
-                cli_println!(&cli_out_path, "前64B hex: {:02X?}", &key_blob[..key_blob.len().min(64)]);
-                for line in &dec_log { cli_println!(&cli_out_path, "| {}", line); }
-                
-                // 用导出的私钥尝试解密 encryptedCbor
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "--- 用导出的私钥解密 EncData ---");
-                match ngc::ncrypt::decrypt_with_exported_key(&sid, &key_blob, p) {
-                    Ok((pt, dec2_log)) => {
-                        cli_println!(&cli_out_path, "🎉🎉🎉 解密成功! {} bytes", pt.len());
-                        let s = ngc::ncrypt::utf16_le_to_string(&pt);
-                        if !s.is_empty() { cli_println!(&cli_out_path, "明文: [{} chars] {:?}", s.chars().count(), s); }
-                        else { cli_println!(&cli_out_path, "hex: {:02X?}", &pt[..pt.len().min(64)]); }
-                        for line in &dec2_log { cli_println!(&cli_out_path, "| {}", line); }
-                    }
-                    Err((e, dec2_log)) => {
-                        cli_println!(&cli_out_path, "❌ 解密失败: {}", e);
-                        for line in &dec2_log { cli_println!(&cli_out_path, "| {}", line); }
-                    }
-                }
-                cli_done(cli_out_path.as_ref().unwrap(), true);
-            }
-            Err((e, exp_log)) => {
-                cli_println!(&cli_out_path, "❌ ExportKey 失败: {}", e);
-                for line in &exp_log { cli_println!(&cli_out_path, "| {}", line); }
-                cli_done(cli_out_path.as_ref().unwrap(), false);
-            }
-        }
-    }
-
-    // ═══ Phase 1 完整链路: NCryptExportKey → RSA私钥 → 解密vault → 明文密码 ═══
-    if args.iter().any(|a| a == "--ngc-phase1") {
-        let uidx = args.iter().position(|a| a == "--ngc-phase1").unwrap_or(0) + 1;
-        let u = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
-        let p = args.get(uidx+1).map(|s| s.as_str()).unwrap_or("");
-        if u.is_empty() || p.is_empty() {
-            cli_println!(&cli_out_path, "用法: --ngc-phase1 <用户名> <PIN>");
-            cli_println!(&cli_out_path, "示例: --ngc-phase1 \"星记\" \"<PIN>\"");
-            cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-        cli_println!(&cli_out_path, "========================================");
-        cli_println!(&cli_out_path, "  Phase 1: NCrypt → RSA → Vault → 密码");
-        cli_println!(&cli_out_path, "========================================");
-        cli_println!(&cli_out_path, "用户: {}", u);
-
-        let sid = match ngc::lookup_sid_by_username(u) {
-            Ok(s) => { cli_println!(&cli_out_path, "SID: {}", s); s }
-            Err(e) => { cli_println!(&cli_out_path, "SID 失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-
-        match ngc::ncrypt::phase1_ncrypt_full_chain(&sid, p) {
-            Ok((password, chain_log)) => {
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "╔══════════════════════════════════════╗");
-                cli_println!(&cli_out_path, "║  ✅✅✅  PHASE 1 解密成功!  ✅✅✅     ║");
-                cli_println!(&cli_out_path, "╚══════════════════════════════════════╝");
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "明文密码: [{} chars] '{}'", password.chars().count(), password);
-                cli_println!(&cli_out_path, "");
-                for line in &chain_log { cli_println!(&cli_out_path, "| {}", line); }
-                cli_done(cli_out_path.as_ref().unwrap(), true);
-            }
-            Err((e, chain_log)) => {
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "❌ Phase 1 失败: {}", e);
-                cli_println!(&cli_out_path, "");
-                for line in &chain_log { cli_println!(&cli_out_path, "| {}", line); }
-                cli_done(cli_out_path.as_ref().unwrap(), false);
-            }
-        }
-    }
-
-    // ═══ 路A phase1 专用入口: NCryptDecrypt 多点尝试 ═══
-    if args.iter().any(|a| a == "--ngc-phase1-path-a") {
-        let uidx = args.iter().position(|a| a == "--ngc-phase1-path-a").unwrap_or(0) + 1;
-        let u = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
-        let p = args.get(uidx+1).map(|s| s.as_str()).unwrap_or("");
-        if u.is_empty() || p.is_empty() {
-            cli_println!(&cli_out_path, "用法: --ngc-phase1-path-a <用户名> <PIN>");
-            cli_println!(&cli_out_path, "示例: --ngc-phase1-path-a \"星记\" \"<PIN>\"");
-            cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-        cli_println!(&cli_out_path, "========================================");
-        cli_println!(&cli_out_path, "  路A Phase 1: NCryptDecrypt 原地解密");
-        cli_println!(&cli_out_path, "========================================");
-        cli_println!(&cli_out_path, "用户: {}", u);
-
-        let sid = match ngc::lookup_sid_by_username(u) {
-            Ok(s) => { cli_println!(&cli_out_path, "SID: {}", s); s }
-            Err(e) => { cli_println!(&cli_out_path, "SID 失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-
-        match ngc::ncrypt::phase1_ncrypt_path_a(&sid, p) {
-            Ok((password, chain_log)) => {
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "╔══════════════════════════════════════╗");
-                cli_println!(&cli_out_path, "║  ✅✅✅  路A PHASE 1 解密成功!  ✅✅✅   ║");
-                cli_println!(&cli_out_path, "╚══════════════════════════════════════╝");
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "明文密码: [{} chars] '{}'", password.chars().count(), password);
-                cli_println!(&cli_out_path, "");
-                for line in &chain_log { cli_println!(&cli_out_path, "| {}", line); }
-                cli_done(cli_out_path.as_ref().unwrap(), true);
-            }
-            Err((e, chain_log)) => {
-                cli_println!(&cli_out_path, "");
-                cli_println!(&cli_out_path, "❌ 路A Phase 1 失败: {}", e);
-                cli_println!(&cli_out_path, "");
-                for line in &chain_log { cli_println!(&cli_out_path, "| {}", line); }
-                cli_done(cli_out_path.as_ref().unwrap(), false);
-            }
-        }
-    }
-
-    // ═══ 路B-4 探针: NCryptSecretAgreement / NCryptDeriveKey ═══
-    if args.iter().any(|a| a == "--ngc-probe-derive") {
-        let uidx = args.iter().position(|a| a == "--ngc-probe-derive").unwrap_or(0) + 1;
-        let u = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
-        let p = args.get(uidx+1).map(|s| s.as_str()).unwrap_or("");
-        if u.is_empty() || p.is_empty() {
-            cli_println!(&cli_out_path, "用法: --ngc-probe-derive <用户名> <PIN>");
-            cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-        cli_println!(&cli_out_path, "========================================");
-        cli_println!(&cli_out_path, "  路B-4 探针: KSP SecretAgreement 派生");
-        cli_println!(&cli_out_path, "========================================");
-        cli_println!(&cli_out_path, "用户: {}", u);
-        let sid = match ngc::lookup_sid_by_username(u) {
-            Ok(s) => { cli_println!(&cli_out_path, "SID: {}", s); s }
-            Err(e) => { cli_println!(&cli_out_path, "SID 失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-        let log = ngc::ncrypt::probe_secret_agreement(&sid, p);
-        for line in &log { cli_println!(&cli_out_path, "{}", line); }
-        cli_println!(&cli_out_path, "");
-        cli_println!(&cli_out_path, "[下一步] 若 NCryptSecretAgreement 成功 + NCryptDeriveKey 也能工作,");
-        cli_println!(&cli_out_path, "  我们就能拿到 KSP 派生的中间 secret —— 这就是路B 想要的结果。");
-        cli_done(cli_out_path.as_ref().unwrap(), true);
-    }
-
-    if args.iter().any(|a| a == "--ngc-keys") {
-        let username = args.iter().position(|a| a == "--ngc-keys")
-            .and_then(|i| args.get(i + 1)).map(|s| s.as_str()).unwrap_or("");
-        let pin = args.iter().position(|a| a == "--ngc-keys")
-            .and_then(|i| args.get(i + 2)).map(|s| s.as_str()).unwrap_or("");
-
-        if username.is_empty() || pin.is_empty() {
-            cli_println!(&cli_out_path, "用法: --ngc-keys <用户名> <PIN>");
-            cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-
-        cli_println!(&cli_out_path, "=== NGC 密钥解密 ===");
-        cli_println!(&cli_out_path, "用户: {}", username);
-
-        let sid = match ngc::lookup_sid_by_username(username) {
-            Ok(s) => { cli_println!(&cli_out_path, "SID: {}", s); s }
-            Err(e) => { cli_println!(&cli_out_path, "SID 查找失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-        };
-
-        match ngc::decrypt_ngc_keys(&sid, pin) {
-            Ok(keys) => {
-                cli_println!(&cli_out_path, "共 {} 个密钥:", keys.len());
-                cli_println!(&cli_out_path);
-                let mut decrypted_count = 0;
-                for k in &keys {
-                    let status = if k.decrypted { "✅" } else { "❌" };
-                    let cache_desc = match k.cache_type {
-                        1 => "NGC 登录密钥",
-                        2 => "RSA 认证密钥",
-                        4 => "FIDO2 (ECDSA_P256)",
-                        _ => "未知类型",
-                    };
-                    cli_println!(&cli_out_path, "  {} {} {}bit cacheType:{} ({}) [{}]",
-                        status, k.alg, k.bits, k.cache_type, cache_desc,
-                        if k.method.is_empty() { "—" } else { k.method.as_str() });
-                    cli_println!(&cli_out_path, "    {}", k.filename);
-                    if k.decrypted { decrypted_count += 1; }
-                }
-                cli_println!(&cli_out_path);
-                cli_println!(&cli_out_path, "解密成功: {}/{}", decrypted_count, keys.len());
-                if decrypted_count > 0 {
-                    let fido_gcm = keys.iter().any(|k| k.cache_type == 4 && k.decrypted && k.method.starts_with("GCM"));
-                    let fido_cbc = keys.iter().any(|k| k.cache_type == 4 && k.decrypted && k.method.starts_with("CBC"));
-                    let has_login = keys.iter().any(|k| k.cache_type == 1 && k.decrypted);
-                    cli_println!(&cli_out_path);
-                    if has_login {
-                        cli_println!(&cli_out_path, "💡 NGC 登录密钥已解密 → Phase 2 passkey 可用");
-                    }
-                    if fido_gcm {
-                        cli_println!(&cli_out_path, "🔑 FIDO2 密钥已解密【GCM 认证·铁证】→ Phase 2 passkey 签名可用，可放心推进");
-                    } else if fido_cbc {
-                        cli_println!(&cli_out_path, "⚠ FIDO2 仅 CBC 解出【无认证·疑似假阳性】→ 推进前需用「公钥比对」二次验证");
-                    }
-                }
-                cli_done(cli_out_path.as_ref().unwrap(), decrypted_count > 0);
-            }
-            Err(e) => {
-                cli_println!(&cli_out_path, "密钥解密失败: {}", e);
-                cli_done(cli_out_path.as_ref().unwrap(), false);
-            }
-        }
-    }
-
-    if args.iter().any(|a| a == "--pin-save") {
-        let uidx = args.iter().position(|a| a == "--pin-save").unwrap_or(0) + 1;
-        let user = args.get(uidx).map(|s| s.as_str()).unwrap_or("");
-        let pin  = args.get(uidx+1).map(|s| s.as_str()).unwrap_or("");
-        let sid_arg = args.get(uidx+2).map(|s| s.as_str());
-        if user.is_empty() || pin.is_empty() {
-            cli_println!(&cli_out_path, "用法: --pin-save <用户名> <PIN> [SID]");
-            cli_println!(&cli_out_path, "示例: --pin-save \"星记\" <PIN> S-1-5-21-...");
-            cli_done(cli_out_path.as_ref().unwrap(), false);
-        }
-        // 如果提供了 SID 参数，直接用它；否则自动查找
-        let sid = if let Some(s) = sid_arg.filter(|s| s.starts_with("S-1-")) {
-            Ok(s.to_string())
-        } else {
-            ngc::find_sid_by_username(user)
-        };
-        match sid {
-            Ok(sid) => {
-                cli_println!(&cli_out_path, "SID: {}", sid);
-                // 直接用 load_pin_with_sid 的方式手动保存（绕过 get_current_sid）
-                // save_pin 内部也调 get_current_sid —— 写一个直接保存的版本
-                cli_println!(&cli_out_path, "正在保存 PIN (用户: {}) ...", user);
-                match ngc::pin_store::save_pin_with_sid(user, pin, &sid, None) {
-                    Ok(()) => { cli_println!(&cli_out_path, "✅ PIN 已加密存储"); cli_done(cli_out_path.as_ref().unwrap(), true); }
-                    Err(e) => { cli_println!(&cli_out_path, "❌ 保存失败: {}", e); cli_done(cli_out_path.as_ref().unwrap(), false); }
-                }
-            }
-            Err(e) => {
-                cli_println!(&cli_out_path, "❌ 找不到 SID: {}", e);
-                cli_println!(&cli_out_path, "请手动指定: --pin-save \"星记\" <PIN> S-1-5-21-xxx");
-                cli_done(cli_out_path.as_ref().unwrap(), false);
-            }
-        }
-    }
-
-    // 诊断探针：直接测试 Passport KSP 能否对真实 FIDO 密钥静默签名。
-    // 用法: --probe-ksp-sign <rpId> <PIN文件路径>
-    // PIN 从文件读取，避免出现在进程参数 / 命令行回显里。
-    if args.iter().any(|a| a == "--probe-ksp-sign") {
-        let idx = args.iter().position(|a| a == "--probe-ksp-sign").unwrap() + 1;
-        let rp_id = args.get(idx).map(|s| s.as_str()).unwrap_or("webauthn.io");
-        let pin_file = args.get(idx + 1).map(|s| s.as_str()).unwrap_or("");
-        let pin = if pin_file.is_empty() {
-            String::new()
-        } else {
-            std::fs::read_to_string(pin_file)
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default()
-        };
-        println!("=== Passport KSP 签名探针 ===");
-        println!("rpId : {}", rp_id);
-        println!(
-            "PIN  : {} ({} 位)",
-            if pin.is_empty() { "<空>" } else { "<已从文件读取>" },
-            pin.chars().count()
-        );
-        let digest = [0x42u8; 32];
-        let start = std::time::Instant::now();
-        match ngc::ncrypt::sign_fido_assertion_hash(rp_id, &pin, &digest) {
-            Ok((sig, key_name)) => {
-                println!("✅ 签名成功: {} 字节 DER (耗时 {:.2?})", sig.len(), start.elapsed());
-                println!("   密钥名: {}", key_name);
-                println!("   → Passport KSP 允许静默签名，Approach B 对现有密钥可行。");
-                std::process::exit(0);
-            }
-            Err(e) => {
-                println!("❌ 签名失败 (耗时 {:.2?}): {}", start.elapsed(), e);
-                println!("   → 若错误指向拒绝/需交互式 UI，则 KSP 禁止静默签名，须走官方插件。");
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if args.iter().any(|a| a == "--ngc-smoke-test") {
-        let username_idx = args.iter().position(|a| a == "--ngc-smoke-test").unwrap_or(0) + 1;
-        let username = args.get(username_idx).map(|s| s.as_str()).unwrap_or("");
-        let pin = args.get(username_idx + 1).map(|s| s.as_str()).unwrap_or("");
-
-        if username.is_empty() || pin.is_empty() {
-            cli_println!(&cli_out_path, "用法: FaceWinUnlock-Server.exe --ngc-smoke-test <用户名> <PIN>");
-            cli_println!(&cli_out_path, "示例: FaceWinUnlock-Server.exe --ngc-smoke-test John 123456");
-            std::process::exit(1);
-        }
-
-        cli_println!(&cli_out_path, "╔══════════════════════════════════════════════════════════╗");
-        cli_println!(&cli_out_path, "║       NGC 解密链 Smoke Test                              ║");
-        cli_println!(&cli_out_path, "╠══════════════════════════════════════════════════════════╣");
-        cli_println!(&cli_out_path, "║ 用户名 : {:<48}║", username);
-        cli_println!(&cli_out_path, "║ PIN    : {:<48}║", "*".repeat(pin.len()));
-        cli_println!(&cli_out_path, "╚══════════════════════════════════════════════════════════╝");
-        cli_println!(&cli_out_path);
-
-        // Step 0: 检查运行权限
-        cli_println!(&cli_out_path, "[Step 0/3] 检查运行权限...");
-        let ngc_root = r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc";
-        match std::fs::read_dir(ngc_root) {
-            Ok(entries) => {
-                let count = entries.filter_map(|e| e.ok()).count();
-                cli_println!(&cli_out_path, "  ✓ NGC 目录可读 ({} 个容器)", count);
-                if count == 0 {
-                    cli_println!(&cli_out_path, "  ⚠ 警告: 未找到任何 NGC 容器！请确认已设置 Windows Hello PIN");
-                }
-            }
-            Err(e) => {
-                cli_println!(&cli_out_path, "  ✗ 无法读取 NGC 目录: {}", e);
-                cli_println!(&cli_out_path);
-                cli_println!(&cli_out_path, "  🔴 权限不足！NGC 解密需要 SYSTEM 权限。");
-                cli_println!(&cli_out_path, "     请用 PsExec 以 SYSTEM 身份运行:");
-                cli_println!(&cli_out_path, "     PsExec.exe -s -i \"{}\" --ngc-smoke-test \"{}\" \"****\"",
-                         std::env::current_exe().unwrap_or_default().display(), username);
-                std::process::exit(2);
-            }
-        }
-        cli_println!(&cli_out_path);
-
-        // Step 1: 用户名 → SID
-        cli_println!(&cli_out_path, "[Step 1/3] 查找用户 SID...");
-        let sid = match ngc::find_sid_by_username(username) {
-            Ok(s) => {
-                cli_println!(&cli_out_path, "  ✓ SID: {}", s);
-                s
-            }
-            Err(e) => {
-                cli_println!(&cli_out_path, "  ✗ 查找 SID 失败: {}", e);
-                cli_println!(&cli_out_path);
-                cli_println!(&cli_out_path, "  🔴 请确认:");
-                cli_println!(&cli_out_path, "     1. 用户名拼写正确（区分大小写）");
-                cli_println!(&cli_out_path, "     2. 该用户是本地账户（非 Microsoft 在线账户）");
-                cli_println!(&cli_out_path, "     3. 该用户已设置 Windows Hello PIN");
-                std::process::exit(3);
-            }
-        };
-        cli_println!(&cli_out_path);
-
-        // Step 2: NGC 解密
-        cli_println!(&cli_out_path, "[Step 2/3] 执行 NGC 解密链...");
-        cli_println!(&cli_out_path, "  → PIN entropy 派生 (PBKDF2+SHA512)...");
-        cli_println!(&cli_out_path, "  → DPAPI 解密 RSA 私钥...");
-        cli_println!(&cli_out_path, "  → Vault Policy 密钥提取...");
-        cli_println!(&cli_out_path, "  → .vcrd 解密...");
-        cli_println!(&cli_out_path, "  → RSA OAEP 解密对称密钥...");
-        cli_println!(&cli_out_path, "  → AES-256-CBC 解密密码...");
-        cli_println!(&cli_out_path);
-
-        let start = std::time::Instant::now();
-        match ngc::recover_password(&sid, pin) {
-            Ok((ngc_user, password, domain)) => {
-                let elapsed = start.elapsed();
-                cli_println!(&cli_out_path, "╔══════════════════════════════════════════════════════════╗");
-                cli_println!(&cli_out_path, "║  ✅ NGC 解密成功！                                      ║");
-                cli_println!(&cli_out_path, "╠══════════════════════════════════════════════════════════╣");
-                cli_println!(&cli_out_path, "║ NGC 用户名 : {:<44}║", ngc_user);
-                cli_println!(&cli_out_path, "║ 域         : {:<44}║", domain);
-                cli_println!(&cli_out_path, "║ 密码长度   : {:<44}║", password.len());
-                cli_println!(&cli_out_path, "║ 耗时       : {:<43.1?}║", elapsed);
-                cli_println!(&cli_out_path, "╚══════════════════════════════════════════════════════════╝");
-
-                // 安全：不打印明文密码，但确认非空
-                if password.is_empty() {
-                    cli_println!(&cli_out_path);
-                    cli_println!(&cli_out_path, "  ⚠ 警告: 密码为空——NGC 解密成功但凭据可能无效");
-                } else {
-                    cli_println!(&cli_out_path);
-                    cli_println!(&cli_out_path, "  💡 NGC 解密链工作正常！PIN → 明文密码 全链路验证通过。");
-                }
-                std::process::exit(0);
-            }
-            Err(e) => {
-                let elapsed = start.elapsed();
-                cli_println!(&cli_out_path, "╔══════════════════════════════════════════════════════════╗");
-                cli_println!(&cli_out_path, "║  ❌ NGC 解密失败                                         ║");
-                cli_println!(&cli_out_path, "╠══════════════════════════════════════════════════════════╣");
-                cli_println!(&cli_out_path, "║ 错误 : {:<48}║", e.to_string().chars().take(48).collect::<String>());
-                cli_println!(&cli_out_path, "║ 耗时 : {:<43.1?}║", elapsed);
-                cli_println!(&cli_out_path, "╚══════════════════════════════════════════════════════════╝");
-
-                match &e {
-                    ngc::NgcError::InvalidPin => {
-                        cli_println!(&cli_out_path);
-                        cli_println!(&cli_out_path, "  🔴 PIN 错误。请确认输入的 PIN 正确。");
-                    }
-                    ngc::NgcError::ContainerNotFound => {
-                        cli_println!(&cli_out_path);
-                        cli_println!(&cli_out_path, "  🔴 未找到 NGC 容器。请确认该用户已设置 Windows Hello PIN。");
-                    }
-                    ngc::NgcError::DecryptionFailed(msg) if msg.contains("暂未实现") => {
-                        cli_println!(&cli_out_path);
-                        cli_println!(&cli_out_path, "  🟡 功能尚未实现: {}", msg);
-                    }
-                    _ => {
-                        cli_println!(&cli_out_path);
-                        cli_println!(&cli_out_path, "  🔴 解密链在某个环节失败。详细信息见上方。");
-                        cli_println!(&cli_out_path, "     可能原因: protector 格式/偏移不匹配当前 Windows 版本。");
-                    }
-                }
-                std::process::exit(4);
-            }
-        }
-    }
-
-    // ── NGC 环境探测（不执行解密，仅检查容器和文件）──────────────
-    if args.iter().any(|a| a == "--ngc-probe") {
-        cli_println!(&cli_out_path, "=== NGC 环境探测 ===");
-        cli_println!(&cli_out_path);
-
-        // 1. NGC 目录
-        let ngc_root = r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc";
-        match std::fs::read_dir(ngc_root) {
-            Ok(entries) => {
-                cli_println!(&cli_out_path, "NGC 容器目录: ✓ 可读");
-                for e in entries.flatten() {
-                    let p = e.path();
-                    if p.is_dir() {
-                        cli_println!(&cli_out_path, "  容器: {}", p.file_name().and_then(|n| n.to_str()).unwrap_or("?"));
-                        let prot = p.join("protectors");
-                        if prot.is_dir() {
-                            if let Ok(pe) = std::fs::read_dir(&prot) {
-                                for pp in pe.flatten() {
-                                    cli_println!(&cli_out_path, "    protector: {}", pp.file_name().to_string_lossy());
-	                                let pd = pp.path();
-	                                let pname = pp.file_name().to_string_lossy().to_string();
-	                                if pd.is_dir() {
-	                                    if let Ok(pf) = std::fs::read_dir(&pd) {
-	                                        for pf_entry in pf.flatten() {
-	                                            let fpath = pf_entry.path();
-	                                            let size = fpath.metadata().map(|m| m.len()).unwrap_or(0);
-	                                            cli_println!(&cli_out_path, "      {}/{} ({} bytes)", pname, fpath.file_name().and_then(|n| n.to_str()).unwrap_or("?"), size);
-	                                        }
-	                                    }
-	                                } else {
-	                                    let size = pd.metadata().map(|m| m.len()).unwrap_or(0);
-	                                    cli_println!(&cli_out_path, "      {} ({} bytes)", pname, size);
-	                                }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => cli_println!(&cli_out_path, "NGC 目录: ✗ 无法访问 ({})", e),
-        }
-        cli_println!(&cli_out_path);
-
-        
-        // 1b. 读取微软账户 NGC 容器的 JSON 元数据
-        if let Ok(ce) = std::fs::read_dir(ngc_root) {
-            for e in ce.flatten() {
-                let p = e.path();
-                if p.is_dir() && p.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.starts_with('{')) {
-                    let cj = p.join("Container.json");
-                    if cj.is_file() {
-                        if let Ok(data) = std::fs::read_to_string(&cj) {
-                            cli_println!(&cli_out_path, "--- Container.json ---");
-                            cli_println!(&cli_out_path, "{}", &data[..data.len().min(4000)]);
-                            cli_println!(&cli_out_path);
-                        }
-                    }
-                    let pj = p.join("Protectors.json");
-                    if pj.is_file() {
-                        if let Ok(data) = std::fs::read_to_string(&pj) {
-                            cli_println!(&cli_out_path, "--- Protectors.json ({} bytes) ---", data.len());
-                            cli_println!(&cli_out_path, "{}", &data[..data.len().min(5000)]);
-                            cli_println!(&cli_out_path);
-                        }
-                    }
-                    let kd = p.join("Keys");
-                    if kd.is_dir() {
-                        if let Ok(kf) = std::fs::read_dir(&kd) {
-                            for key_file in kf.flatten() {
-                                let kp = key_file.path();
-                                let size = kp.metadata().map(|m| m.len()).unwrap_or(0);
-                                let fname = kp.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-                                cli_println!(&cli_out_path, "  Key: {} ({} bytes)", fname, size);
-                                // 读取小文件内容
-                                if size < 5000 {
-                                    if let Ok(kdata) = std::fs::read_to_string(&kp) {
-                                        cli_println!(&cli_out_path, "    {}", &kdata[..kdata.len().min(2000)]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        cli_println!(&cli_out_path);
-
-        // 2. Crypto Keys
-        let keys_dir = r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\Microsoft\Crypto\Keys";
-        match std::fs::read_dir(keys_dir) {
-            Ok(entries) => {
-                let count = entries.filter_map(|e| e.ok()).count();
-                cli_println!(&cli_out_path, "Crypto Keys 目录: ✓ ({} 个文件)", count);
-            }
-            Err(e) => cli_println!(&cli_out_path, "Crypto Keys 目录: ✗ ({})", e),
-        }
-        cli_println!(&cli_out_path);
-
-        // 3. Vault
-        let vault_root = r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Vault";
-        let ngc_schema = "1d4350a3-330d-4af9-b3ff-a927a45998ac";
-        let schema_dir = std::path::Path::new(vault_root).join(ngc_schema);
-        if schema_dir.is_dir() {
-            cli_println!(&cli_out_path, "Vault NGC schema: ✓");
-            if let Ok(entries) = std::fs::read_dir(&schema_dir) {
-                for e in entries.flatten() {
-                    let p = e.path();
-                    cli_println!(&cli_out_path, "  {} ({} bytes)", p.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
-                        p.metadata().map(|m| m.len()).unwrap_or(0));
-                }
-            }
-        } else {
-            cli_println!(&cli_out_path, "Vault NGC schema: ✗ 目录不存在 ({})", schema_dir.display());
-        }
-        cli_println!(&cli_out_path);
-
-        // 4. ProfileList SID 扫描
-        cli_println!(&cli_out_path, "ProfileList 本地账户:");
-        let profile_list = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
-        if let Ok(sids) = list_profile_sids(profile_list) {
-            for (sid_str, profile_path) in &sids {
-                if let Some(name) = profile_path.rsplit('\\').next() {
-                    let marker = if sid_str.ends_with("-500") { " (Administrator)" }
-                        else if sid_str.ends_with("-501") { " (Guest)" }
-                        else { "" };
-                    cli_println!(&cli_out_path, "  {} → {}{}", sid_str, name, marker);
-                }
-            }
-            if sids.is_empty() {
-                cli_println!(&cli_out_path, "  (无本地账户)");
-            }
-        } else {
-            cli_println!(&cli_out_path, "  ✗ 无法读取注册表");
-        }
-
-        cli_done(cli_out_path.as_ref().unwrap(), true);
-    }
-
     if std::env::args().any(|arg| arg == WORKER_ARG) {
         std::process::exit(run_service_worker(exe_dir));
     }
 
     run_service_supervisor(exe_dir);
-}
-
-/// 列出 ProfileList 中所有本地账户 SID 和配置文件路径
-fn list_profile_sids(key_path: &str) -> Result<Vec<(String, String)>, String> {
-    use windows::Win32::System::Registry::{
-        RegOpenKeyExW, RegQueryValueExW, RegCloseKey, RegEnumKeyExW,
-        HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ,
-    };
-    use windows_core::{PCWSTR, PWSTR};
-
-    let key_wide: Vec<u16> = key_path.encode_utf16().chain(std::iter::once(0)).collect();
-    let val_name: Vec<u16> = "ProfileImagePath".encode_utf16().chain(std::iter::once(0)).collect();
-
-    unsafe {
-        let mut hkey = std::mem::zeroed();
-        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR::from_raw(key_wide.as_ptr()), None, KEY_READ, &mut hkey).is_err() {
-            return Err("无法打开 ProfileList".to_string());
-        }
-
-        let mut results = Vec::new();
-        for idx in 0u32.. {
-            let mut sid_buf = vec![0u16; 128];
-            let mut sid_len = (sid_buf.len() * 2) as u32;
-            if RegEnumKeyExW(hkey, idx, Some(PWSTR(sid_buf.as_mut_ptr())), &mut sid_len, None, None, None, None).is_err() {
-                break;
-            }
-            let char_len = (sid_len as usize) / 2;
-            let sid_str = String::from_utf16_lossy(&sid_buf[..char_len.min(sid_buf.len())]);
-            if !sid_str.starts_with("S-1-5-21") && !sid_str.starts_with("S-1-5-32") {
-                continue;
-            }
-
-            let sub_path: Vec<u16> = format!("{}\\{}", key_path, sid_str).encode_utf16().chain(std::iter::once(0)).collect();
-            let mut sub_hkey = std::mem::zeroed();
-            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR::from_raw(sub_path.as_ptr()), None, KEY_READ, &mut sub_hkey).is_err() {
-                continue;
-            }
-
-            let mut data_len = 0u32;
-            let mut data_type = REG_SZ;
-            let _ = RegQueryValueExW(sub_hkey, PCWSTR::from_raw(val_name.as_ptr()), None, Some(&mut data_type), None, Some(&mut data_len));
-            if data_len > 0 {
-                let mut buf = vec![0u16; (data_len / 2) as usize];
-                if RegQueryValueExW(sub_hkey, PCWSTR::from_raw(val_name.as_ptr()), None, None, Some(buf.as_mut_ptr() as *mut u8), Some(&mut data_len)).is_ok() {
-                    let path = String::from_utf16_lossy(&buf).trim_end_matches('\0').to_string();
-                    if !path.is_empty() {
-                        results.push((sid_str, path));
-                    }
-                }
-            }
-            let _ = RegCloseKey(sub_hkey);
-        }
-        let _ = RegCloseKey(hkey);
-        Ok(results)
-    }
 }

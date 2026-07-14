@@ -313,15 +313,26 @@ pub fn open_camera(
     Err(CustomResult::error(Some(last_err), None))
 }
 
-// 关闭摄像头
-#[tauri::command]
-pub fn stop_camera() -> Result<CustomResult, CustomResult> {
+fn close_ui_camera() -> Result<(), CustomResult> {
     {
         let mut app_state = APP_STATE
             .lock()
             .map_err(|e| CustomResult::error(Some(format!("获取app状态失败 {}", e)), None))?;
         app_state.camera = None;
     }
+    Ok(())
+}
+
+/// 电源挂起前只关闭 UI 自己的摄像头。这里不能发送 `ui_done`，否则会在系统正进入
+/// Modern Standby 时重新启用后台预热，导致摄像头指示灯整段睡眠持续点亮。
+pub fn suspend_camera() -> Result<(), CustomResult> {
+    close_ui_camera()
+}
+
+// 关闭摄像头
+#[tauri::command]
+pub fn stop_camera() -> Result<CustomResult, CustomResult> {
+    close_ui_camera()?;
     // 通知 Unlock 后台服务：UI 已用完摄像头，可解除让位、恢复锁屏预热（秒解锁）。
     notify_unlock_camera("ui_done");
     Ok(CustomResult::success(None, None))

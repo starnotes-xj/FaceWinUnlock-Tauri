@@ -95,6 +95,8 @@ Save open work before `shutdown /h`. If `powercfg /a` reports that S4 hibernatio
 
 After every wake, confirm that the account tile, PIN/password field, and lower-left account controls are present; the spinner does not remain indefinitely; the desktop opens normally; and the camera LED turns off within 5 seconds after manual PIN unlock. Record the exact failure time and preserve `unlock.log`, `facewinunlock.log`, and `app.log` before reinstalling or clearing logs.
 
+On Modern Standby (`powercfg /a` reports S0 Low Power Idle), the camera LED must turn off before the machine finishes entering standby and remain off for the entire sleep interval. The Unlock log should contain `power suspend detected; camera closed and recognition paused`; after wake it should contain `power resume detected; stale camera state cleared` and an auto-lock resume grace message. A camera prewarm/open line between those suspend and resume lines is a failure.
+
 Issue #26 is ready to close only after the active-camera Sleep case, hibernate/resume, face unlock, and manual PIN release all pass repeatedly on an installed build. Unit tests alone are insufficient.
 
 ## Automatic Lock And Issue #27
