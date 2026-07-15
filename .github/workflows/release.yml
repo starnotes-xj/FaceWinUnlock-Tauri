@@ -288,6 +288,8 @@ jobs:
             ~/.cargo/git
             target
           key: rust-release-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-release-${{ runner.os }}-
 
       - name: Build Server DLL + Unlock EXE
         shell: pwsh

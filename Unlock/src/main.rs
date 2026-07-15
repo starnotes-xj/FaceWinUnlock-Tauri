@@ -147,6 +147,9 @@ struct State {
     power: Arc<power_events::PowerLifecycle>,
     /// 浏览器 passkey assertion 的一次性人脸授权门。
     passkey_face_gate: Arc<passkey::FaceAuthorizationGate>,
+    /// broker_guard_release 设置的预热抑制——必须在 release 或成功识别时清除，
+    /// 不能由非 gate 路径自动清除（否则 passkey 场景下摄像头会被错误打开）。
+    broker_guard_prewarm_blocked: AtomicBool,
 }
 
 impl State {
@@ -173,6 +176,7 @@ impl State {
             camera_yield_until: AtomicI64::new(0),
             power: Arc::new(power_events::PowerLifecycle::default()),
             passkey_face_gate: Arc::new(passkey::FaceAuthorizationGate::default()),
+            broker_guard_prewarm_blocked: AtomicBool::new(false),
         })
     }
 }
@@ -1412,6 +1416,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             prewarm_at = None;
             prewarm_suppressed = true;
             power_resume_requires_run = true;
+            state.broker_guard_prewarm_blocked.store(false, Ordering::SeqCst);
             delayed_run_at = None;
             delay_session_armed = false;
             last_failed_at = None;
@@ -1456,6 +1461,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             // 在 passkey 进行中点亮指示灯（M1），与本特性「passkey 时不亮摄像头」的目标相悖。
             // 抑制到下次真正的 release / 成功识别再解除。
             prewarm_suppressed = true;
+            state.broker_guard_prewarm_blocked.store(true, Ordering::SeqCst);
             log_service(
                 &exe_dir,
                 "INFO",
@@ -1471,6 +1477,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             // 下方预热块会在同一秒重新打开摄像头。保持抑制，直到观察到旧客户端断开并有
             // 新客户端连接；显式 run 也可解除，确保极端竞态下下一次解锁仍可正常识别。
             prewarm_suppressed = true;
+            state.broker_guard_prewarm_blocked.store(false, Ordering::SeqCst);
             prewarm_session_gate.on_manual_release();
             delayed_run_at = None;
             delay_session_armed = false;
@@ -1500,13 +1507,39 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         let has_credential_client =
             state.dll_creds_pipe.load(Ordering::SeqCst) != INVALID_HANDLE_VALUE.0 as isize;
         if prewarm_session_gate.observe_credential_client(has_credential_client) {
-            if !power_resume_requires_run {
+            // power_resume_requires_run 仅当摄像头实际被阻断时才保持抑制——
+            // 防止 Modern Standby 恢复后锁屏界面立刻预热。若摄像头未被阻断
+            // 但标志仍为 true（虚假 power 事件、初始通知等），则解除。
+            if !power_resume_requires_run || !state.power.is_camera_blocked() {
                 prewarm_suppressed = false;
+                power_resume_requires_run = false;
             }
             log_service(
                 &exe_dir,
                 "INFO",
-                "new credential session detected; camera prewarm re-enabled",
+                if prewarm_suppressed {
+                    "new credential session; prewarm deferred (camera blocked)"
+                } else {
+                    "new credential session detected; camera prewarm re-enabled"
+                },
+            );
+        }
+        // Gate 未阻断（无 prior release）但预热仍被抑制的路径：电源事件/空闲超时/
+        // 预热打开失败等原因设了 prewarm_suppressed=true，但 gate 未触发（blocked_after_release=false）
+        // → 新凭据客户端已连且摄像头可用时清除抑制，恢复秒解锁预热。
+        // 修复 Win+L 锁屏后移动鼠标要等 1-2s 摄像头才亮（rc5 回归）。
+        // ★ broker_guard_release 也设 prewarm_suppressed=true 但不经 gate——
+        //   必须用专用标记排除，否则 passkey 场景下摄像头会被错误打开（CRITICAL）。
+        if has_credential_client && prewarm_suppressed && !prewarm_session_gate.blocks_prewarm()
+            && !state.power.is_camera_blocked()
+            && !state.broker_guard_prewarm_blocked.load(Ordering::SeqCst)
+        {
+            prewarm_suppressed = false;
+            power_resume_requires_run = false;
+            log_service(
+                &exe_dir,
+                "INFO",
+                "camera prewarm re-enabled on new credential session (non-gate path)",
             );
         }
         if !has_credential_client && !state.recognition_active.load(Ordering::SeqCst) {
@@ -1797,6 +1830,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         prewarm_at = None;
         prewarm_suppressed = false;
         power_resume_requires_run = false;
+        state.broker_guard_prewarm_blocked.store(false, Ordering::SeqCst);
         prewarm_session_gate.on_run();
 
         // 定期重新加载人脸记录和配置
