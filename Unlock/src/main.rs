@@ -1564,6 +1564,17 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             delayed_run_at = None;
             delay_session_armed = false;
             power_resume_requires_run = false;
+            // ★ broker_guard_prewarm_blocked 跨会话泄漏修复（CRITICAL）：
+            //   passkey CredUI 结束→DLL 断开→标记仍为 true→下一次锁屏/密码填充
+            //   的预热被非 gate 路径的 `!broker_guard_prewarm_blocked` 检查挡住，
+            //   直到完整识别流程跑完才解除。DLL 断开时清除，新会话可立即预热。
+            if state.broker_guard_prewarm_blocked.swap(false, Ordering::SeqCst) {
+                log_service(
+                    &exe_dir,
+                    "INFO",
+                    "broker_guard prewarm block cleared on credential client disconnect",
+                );
+            }
         }
 
         if state.prepare_requested.swap(false, Ordering::SeqCst) {
