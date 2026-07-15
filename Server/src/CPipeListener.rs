@@ -553,9 +553,9 @@ impl CPipeListener {
                             // ★ WebAuthn 守卫复查 + 实时 debounce（v0.5.10-rc5 修复）：
                             //   passkey CredUI 打开时 CTAP 事务可能尚未启动。500ms 实测
                             //   仍有 1-2/5 漏过 → 延长至 800ms。密码填充场景无 CTAP 事务，
-                            //   这 800ms 纯轮询开销（每 30ms 一次 OpenEventW），对用户无感。
+                            //   这 500ms 纯轮询开销（每 30ms 一次 OpenEventW），对用户无感。
                             if broker_fallback_to_pin {
-                                let debounce = Duration::from_millis(800);
+                                let debounce = Duration::from_millis(500);
                                 let deadline = Instant::now() + debounce;
                                 loop {
                                     if crate::is_webauthn_guard_active() {
