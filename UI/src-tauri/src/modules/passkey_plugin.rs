@@ -246,8 +246,9 @@ fn cleanup_passkey_registry_residue() -> Result<(), String> {
     }
 
     // 清理开始菜单磁贴备份残留（ListOfEventDrivenBackedUpTiles_*）。
-    // MSIX 卸载时 Windows 应自动清理，但某些版本会残留含我们 AppUserModelId 的项。
-    // 仅删除匹配的值（不删整个子键——同一子键可能含其他应用的磁贴备份）。
+    // MSIX 卸载时 Windows 应自动清理，但某些版本会残留。值名和值数据都可能
+    // 含 AppUserModelId（值名如 "FaceWinUnlock.PasskeyManager!App"，
+    // 值数据如二进制中含包全名）。按名+数据双重匹配，删除匹配值。
     if let Ok(backup_key) =
         hkcu.open_subkey_with_flags(APP_LIST_BACKUP_PATH, KEY_READ | KEY_WRITE)
     {
@@ -255,9 +256,12 @@ fn cleanup_passkey_registry_residue() -> Result<(), String> {
             if let Ok(tile_key) =
                 backup_key.open_subkey_with_flags(&tile_key_name, KEY_READ | KEY_WRITE)
             {
-                for (value_name, _reg_value) in tile_key.enum_values().flatten() {
+                for (value_name, reg_value) in tile_key.enum_values().flatten() {
+                    let data_str = String::from_utf8_lossy(&reg_value.bytes);
                     if value_name.contains(FORMAL_PACKAGE_NAME)
                         || value_name.contains(SAMPLE_PACKAGE_NAME)
+                        || data_str.contains(FORMAL_PACKAGE_NAME)
+                        || data_str.contains(SAMPLE_PACKAGE_NAME)
                     {
                         let _ = tile_key.delete_value(&value_name);
                     }
