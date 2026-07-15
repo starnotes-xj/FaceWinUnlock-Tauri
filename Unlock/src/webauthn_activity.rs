@@ -661,9 +661,12 @@ fn reset_status_events(ready_event: HANDLE, active_event: HANDLE) {
 }
 
 fn sleep_until_exit(state: &Arc<State>, duration: Duration) {
+    // 上层循环每轮都检查 should_exit，这里只需睡眠即可。
+    // 拆分长睡眠为 500ms 片段以确保及时响应退出命令。
     let deadline = std::time::Instant::now() + duration;
     while !state.should_exit.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(100));
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        thread::sleep(remaining.min(Duration::from_millis(500)));
     }
 }
 

@@ -112,6 +112,24 @@ export function useUnlockLog() {
         });
     };
 
+    /**
+     * 仅查询今日日志数量（轻量，适合高频轮询）
+     * @returns {Promise<number>} 今日日志条数
+     */
+    const queryTodayLogCount = () => {
+        return new Promise((resolve, reject) => {
+            selectCustom(
+                "SELECT COUNT(id) AS cnt FROM unlock_log WHERE date(lastTime) = date('now', 'localtime')",
+                []
+            ).then((result) => {
+                resolve(result.rows?.[0]?.cnt || 0);
+            }).catch((error) => {
+                errorLog(formatObjectString("查询今日日志数量失败：", error));
+                reject(error);
+            });
+        });
+    };
+
     const deleteBlockImage = (id) => {
         return new Promise((resolve, reject) => {
             update("unlock_log", {block_img: null}, "id = ?", [id]).then(()=>{
@@ -128,6 +146,7 @@ export function useUnlockLog() {
         queryAllLogs,
         queryLogsByPage,
         queryTodayLogs,
+        queryTodayLogCount,
         queryLogsByDate,
         deleteBlockImage
     };

@@ -25,7 +25,7 @@ use std::{
     process::Command as ProcessCommand,
     sync::{
         atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -101,6 +101,8 @@ const UI_CAMERA_YIELD_FALLBACK_MS: i64 = 60_000;
 struct State {
     exe_dir:           PathBuf,
     should_exit:      AtomicBool,
+    /// Condvar：退出时 notify_all() 唤醒所有等待线程，消除轮询。
+    exit_cv:          Condvar,
     prepare_requested: AtomicBool,
     run_requested:    AtomicBool,
     /// `run_requested` 所属的电源代际。恢复后的新 run 可保留；挂起前遗留的 run 必须丢弃。
@@ -116,7 +118,10 @@ struct State {
     /// DLL 在 MansonWindowsUnlockRustUnlock 上等待凭据的连接句柄（raw isize）
     dll_creds_pipe:   AtomicIsize,
     /// 人脸匹配到的 (username, password, domain)。所有场景统一只交密码（Approach B）。
+    /// 写入后通过 matched_creds_cv 唤醒等待凭据的 DLL 连接线程。
     matched_creds:    Mutex<Option<(String, String, String)>>,
+    /// Condvar：face_recognition_loop 写入凭据后通知等待线程，消除 30ms 轮询。
+    matched_creds_cv: Condvar,
     /// 上一次用户活跃的时间戳（Unix 秒），用于自动锁屏
     last_user_active: AtomicI64,
     active_pipe_handlers: AtomicUsize,
@@ -158,6 +163,7 @@ impl State {
         Arc::new(Self {
             exe_dir,
             should_exit:     AtomicBool::new(false),
+            exit_cv:         Condvar::new(),
             prepare_requested: AtomicBool::new(false),
             run_requested:   AtomicBool::new(false),
             run_power_generation: AtomicU64::new(0),
@@ -167,6 +173,7 @@ impl State {
             broker_guard_release_generation: AtomicU64::new(0),
             dll_creds_pipe:  AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize),
             matched_creds:   Mutex::new(None),
+            matched_creds_cv: Condvar::new(),
             last_user_active: AtomicI64::new(now),
             active_pipe_handlers: AtomicUsize::new(0),
             dll_run_received: AtomicBool::new(false),
@@ -639,6 +646,7 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                     log_service(&state.exe_dir, "INFO", "received exit command");
                     state.release_requested.store(true, Ordering::SeqCst);
                     state.should_exit.store(true, Ordering::SeqCst);
+                    state.exit_cv.notify_all();
                 }
                 "release" => {
                     log_service(&state.exe_dir, "INFO", "received release command, closing camera");
@@ -737,26 +745,34 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                 break;
             }
 
-            // A DLL client can disconnect while no credentials are ready. Without
-            // probing the pipe, the session stays latched forever and suppresses
-            // auto-lock/prewarm state transitions.
-            let mut available = 0u32;
-            if unsafe {
-                PeekNamedPipe(pipe, None, 0, None, Some(&mut available), None)
+            // Condvar 等待凭据就绪（替代 30ms 轮询）：face_recognition_loop 写入
+            // matched_creds 后 notify_all()，此线程立即唤醒。超时 500ms 仅用于探测
+            // DLL 断连（PeekNamedPipe），避免凭据未就绪时永远阻塞。
+            let guard = state.matched_creds.lock().unwrap();
+            let (mut guard, timeout_result) = state
+                .matched_creds_cv
+                .wait_timeout(guard, Duration::from_millis(500))
+                .unwrap();
+            if timeout_result.timed_out() {
+                // 超时：探测 DLL 是否仍连接
+                let mut available = 0u32;
+                if unsafe {
+                    PeekNamedPipe(pipe, None, 0, None, Some(&mut available), None)
+                }
+                .is_err()
+                {
+                    log_service(&state.exe_dir, "INFO", "credential client disconnected");
+                    break;
+                }
+                continue;
             }
-            .is_err()
-            {
-                log_service(&state.exe_dir, "INFO", "credential client disconnected");
-                break;
-            }
-
-            let creds = state.matched_creds.lock().unwrap().take();
+            // 被唤醒：取出凭据并发送
+            let creds = guard.take();
             if let Some((username, password, domain)) = creds {
                 let payload = format!("{}\0{}\0{}\0", username, password, domain);
                 let _ = pipe_write(pipe, payload.as_bytes());
                 break;
             }
-            thread::sleep(Duration::from_millis(30));
         }
 
         state.dll_creds_pipe.compare_exchange(
@@ -1494,6 +1510,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         // 轮询 test_creds.tmp（UI 测试模式）
         if let Some((user, pwd)) = check_test_creds(&exe_dir) {
             *state.matched_creds.lock().unwrap() = Some((user, pwd, ".".to_string()));
+            state.matched_creds_cv.notify_all();
             // 等待 DLL 消费（最多 30s）
             for _ in 0..300 {
                 thread::sleep(Duration::from_millis(100));
@@ -2024,6 +2041,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                                     rec.user_pwd.clone(),
                                     rec.domain.clone(),
                                 ));
+                                state.matched_creds_cv.notify_all();
                                 log_service(&exe_dir, "INFO", &format!("face matched for {}", rec.user_name));
                             }
                             matched_face_id = Some(rec.id);

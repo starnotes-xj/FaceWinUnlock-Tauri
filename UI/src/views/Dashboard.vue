@@ -10,7 +10,8 @@ import { formatObjectString } from '../utils/function';
 
 const optionsStore = useOptionsStore();
 const facesStore = useFacesStore();
-const { queryTodayLogs } = useUnlockLog();
+const { queryTodayLogs, queryTodayLogCount } = useUnlockLog();
+const lastLogCount = ref(-1);  // 变化时触发全量刷新
 
 const faceCount = computed(() => facesStore.faceList.length);
 const successCount = ref(0);
@@ -27,6 +28,15 @@ const systemStatus = ref([
 const recentLogs = ref<any[]>([]);
 
 async function refreshDashboardData() {
+  // 先查 COUNT（轻量），仅数量变化时才查全表
+  try {
+    const count = await queryTodayLogCount();
+    if (count === lastLogCount.value) return;  // 无新记录，跳过
+    lastLogCount.value = count;
+  } catch {
+    return;  // COUNT 失败静默跳过，等下一轮
+  }
+
   try {
     const result = await queryTodayLogs();
     let s = 0, f = 0;
