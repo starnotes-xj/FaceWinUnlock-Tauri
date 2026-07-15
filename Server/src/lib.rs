@@ -416,15 +416,16 @@ pub fn classify_broker_context(
         if !browser_password_fill_enabled {
             return BrokerScene::Unknown;
         }
-        // ★ monitor 间歇性不捕获事件（unlock.log 零条 WebAuthn 事件），
-        //   Active 永不置位 → debounce 永不触发 → passkey 漏过人脸。
-        //   结论：ready 时必须标题含「填充密码」关键词才参与——
-        //   关键词是唯一不依赖 monitor 的防线，passkey 弹窗永远不含它们。
-        //   debounce 保留作为参与后的二道防线（monitor 正常时生效）。
-        if context.webauthn_ready && title_has(PASSWORD_FILL_KEYWORDS) {
+        // ★ 三层防御体系（v0.5.10 修复 #1）：
+        //   第一层（步骤②）：webauthn_active=true → Passkey（CTAP 事务/枚举事件）
+        //   第二层（步骤⑥）：webauthn_ready + browser → BrowserPasswordFill（参与）
+        //   第三层（debounce）：CP 参与后，发 "run" 前 30ms 轮询
+        //     is_webauthn_guard_active 最多 500ms → 拦截 passkey。
+        //   分类阶段不依赖标题关键词——由 debounce 和枚举事件做最终判断。
+        if context.webauthn_ready {
             return BrokerScene::BrowserPasswordFill;
         }
-        // 监视器不可用：退回纯关键词兜底。
+        // 监视器不可用：退回标题关键词兜底。
         if title_has(PASSWORD_FILL_KEYWORDS) {
             return BrokerScene::BrowserPasswordFill;
         }
