@@ -416,12 +416,9 @@ pub fn classify_broker_context(
         if !browser_password_fill_enabled {
             return BrokerScene::Unknown;
         }
-        // ★ 参与条件：monitor 就绪 + 标题含「填充密码」关键词。
-        //   Google passkey 弹窗标题有时是「通行密钥」（步骤③截），有时是
-        //   「登录 - google 账号」（无任何关键词）。monitor 间歇性不捕获事件时
-        //   Active/CTAP 都无法检测，debounce 也失效。关键词是唯一的确定性防线。
-        //   QQ邮箱/阿里云/学信网填密码时标题均含「填充」等关键词，不受影响。
-        if context.webauthn_ready && title_has(PASSWORD_FILL_KEYWORDS) {
+        // ★ 监视器 Ready 且无 active（CTAP + 枚举均无）：枚举事件 2250 已为
+        //   passkey 弹窗提供 5s 早期 active 窗口。到此 active=false → 必为密码填充。
+        if context.webauthn_ready {
             return BrokerScene::BrowserPasswordFill;
         }
         // 监视器不可用：纯关键词兜底。
