@@ -550,20 +550,37 @@ impl CPipeListener {
                             && (input_requested || auto_requested);
 
                         if should_send_run {
-                            // ★ WebAuthn 守卫复查：send "run" 前最后一道防线。
-                            // 循环顶部的检查与 mouse/keyboard hook 之间间隔最长 ~20ms，
-                            // CTAP 事务恰好在此窗口内开始时 hook 已经捕获输入但 guard 尚未生效。
-                            if broker_fallback_to_pin && crate::is_webauthn_guard_active() {
-                                trigger_broker_pin_fallback(
-                                    &shared_creds_for_client,
-                                    &stop_flag,
-                                    &creds_pipe_raw_for_client,
-                                    &send_events_for_client,
-                                    "WebAuthn transaction active before run",
-                                    BrokerReleaseMode::WebAuthnGuard,
-                                );
-                                unsafe { let _ = CloseHandle(pipe); }
-                                return;
+                            // ★ WebAuthn 守卫复查 + 实时 debounce（v0.5.10-rc5 修复）：
+                            //   Google passkey CredUI 打开时 GetAssertion 事务可能尚未启动，
+                            //   此时 webauthn_active=false → 分类阶段无法可靠区分 passkey。
+                            //   这里发 "run" 前轮询 is_webauthn_guard_active() 最多 500ms：
+                            //   · 真 passkey：CTAP 事务在 500ms 内启动 → guard 拦截 → 不亮摄像头
+                            //   · 真密码填充：无 CTAP 事务 → 500ms 后正常走人脸
+                            //   已发 "run" 后 CTAP 事务才启动的极端情况，由 broker_guard_release
+                            //   在 Unlock 侧兜底停止识别。
+                            if broker_fallback_to_pin {
+                                let debounce = Duration::from_millis(500);
+                                let deadline = Instant::now() + debounce;
+                                loop {
+                                    if crate::is_webauthn_guard_active() {
+                                        trigger_broker_pin_fallback(
+                                            &shared_creds_for_client,
+                                            &stop_flag,
+                                            &creds_pipe_raw_for_client,
+                                            &send_events_for_client,
+                                            "WebAuthn transaction active before run (debounce)",
+                                            BrokerReleaseMode::WebAuthnGuard,
+                                        );
+                                        unsafe { let _ = CloseHandle(pipe); }
+                                        return;
+                                    }
+                                    if Instant::now() >= deadline { break; }
+                                    if stop_flag.load(Ordering::SeqCst) {
+                                        unsafe { let _ = CloseHandle(pipe); }
+                                        return;
+                                    }
+                                    thread::sleep(Duration::from_millis(30));
+                                }
                             }
                             if let Err(e) = pipe_write_raw(pipe, b"run") {
                                 warn!("发送 run 失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
