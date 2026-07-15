@@ -748,13 +748,22 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
             // Condvar 等待凭据就绪（替代 30ms 轮询）：face_recognition_loop 写入
             // matched_creds 后 notify_all()，此线程立即唤醒。超时 500ms 仅用于探测
             // DLL 断连（PeekNamedPipe），避免凭据未就绪时永远阻塞。
+            // ★ 关键：超时也检查 guard.take()——修复 Condvar 竞态：wait_timeout 到期
+            // → 本线程解锁重入 → 解锁间隙 notify_all() 到达 → 信号丢失（#144）。
+            // 解锁-重锁之间凭据可能已被写入，必须主动 take 而不是直接 continue。
             let guard = state.matched_creds.lock().unwrap();
             let (mut guard, timeout_result) = state
                 .matched_creds_cv
                 .wait_timeout(guard, Duration::from_millis(500))
                 .unwrap();
+            // 无论超时还是被唤醒，先检查凭据是否已就绪
+            if let Some((username, password, domain)) = guard.take() {
+                let payload = format!("{}\0{}\0{}\0", username, password, domain);
+                let _ = pipe_write(pipe, payload.as_bytes());
+                break;
+            }
             if timeout_result.timed_out() {
-                // 超时：探测 DLL 是否仍连接
+                // 超时且无凭据：探测 DLL 是否仍连接
                 let mut available = 0u32;
                 if unsafe {
                     PeekNamedPipe(pipe, None, 0, None, Some(&mut available), None)
@@ -764,14 +773,6 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                     log_service(&state.exe_dir, "INFO", "credential client disconnected");
                     break;
                 }
-                continue;
-            }
-            // 被唤醒：取出凭据并发送
-            let creds = guard.take();
-            if let Some((username, password, domain)) = creds {
-                let payload = format!("{}\0{}\0{}\0", username, password, domain);
-                let _ = pipe_write(pipe, payload.as_bytes());
-                break;
             }
         }
 
