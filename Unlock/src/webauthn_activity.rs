@@ -58,11 +58,8 @@ const TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
 /// 通常间隔 >30s，不会被 5s TTL 影响）。
 const ENUM_TTL: Duration = Duration::from_secs(5);
 const CTAP_EVENT_IDS: &str = "1000 or 1001 or 1002 or 1003 or 1004 or 1005 or 1006 or 1007 or 1008";
-/// EvtSubscribe 订阅查询——必须显式指定 channel 路径。
-/// `*[...]` 通配在 EvtSubscribeToFutureEvents 下不会继承 ChannelPath 参数，
-/// 导致订阅到错误的 channel（或不订阅任何 channel）→ 永远收不到事件。
 const EVENT_QUERY: &str =
-    "Microsoft-Windows-WebAuthN/Operational[System[(EventID=2250 or EventID=2251 or EventID=1000 or EventID=1001 or EventID=1002 or EventID=1003 or EventID=1004 or EventID=1005 or EventID=1006 or EventID=1007 or EventID=1008)]]";
+    "*[System[(EventID=2250 or EventID=2251 or EventID=1000 or EventID=1001 or EventID=1002 or EventID=1003 or EventID=1004 or EventID=1005 or EventID=1006 or EventID=1007 or EventID=1008)]]";
 const REQUIRED_EVENT_IDS: [u32; 11] =
     [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 2250, 2251];
 
@@ -281,11 +278,9 @@ fn replay_recent(
     active_event: HANDLE,
 ) -> Result<(), String> {
     let channel = wide(CHANNEL);
-    // 回放时也要查询枚举事件，启动后立即恢复近期 WebAuthn 活动状态。
-    // EvtQueryChannelPath 将 Path 视为 channel 名，Query 应为纯过滤表达式
-    // （不含 channel 前缀或 * 通配），否则可能匹配到错误的 channel。
+    // 回放近期事件（含枚举 2250/2251），启动后立即恢复活跃状态。
     let query_str = format!(
-        "System[(EventID=2250 or EventID=2251 or {CTAP_EVENT_IDS}) and TimeCreated[timediff(@SystemTime) <= 600000]]"
+        "*[System[(EventID=2250 or EventID=2251 or {CTAP_EVENT_IDS}) and TimeCreated[timediff(@SystemTime) <= 600000]]]"
     );
     let query = wide(&query_str);
     let result_set = unsafe {
