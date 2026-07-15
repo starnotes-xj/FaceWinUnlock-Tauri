@@ -27,7 +27,7 @@ impl MotionDetector {
     /// 输入新帧，返回当前运动量（0.0 = 完全静止，越大运动越剧烈）。
     pub fn update(&mut self, frame: &Mat) -> Result<f32, String> {
         let mut gray = Mat::default();
-        imgproc::cvt_color(frame, &mut gray, imgproc::COLOR_BGR2GRAY, 0, opencv::core::AlgorithmHint(0))
+        imgproc::cvt_color(frame, &mut gray, imgproc::COLOR_BGR2GRAY, 0, opencv::core::AlgorithmHint::ALGO_HINT_DEFAULT)
             .map_err(|e| format!("灰度转换失败: {:?}", e))?;
 
         let motion = if let Some(ref prev) = self.prev_gray {
