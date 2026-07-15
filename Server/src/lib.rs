@@ -416,12 +416,11 @@ pub fn classify_broker_context(
         if !browser_password_fill_enabled {
             return BrokerScene::Unknown;
         }
-        // ★ 浏览器 + 无 active CTAP 事务时，不能仅凭 ready-monitor 就开人脸（v0.5.10 修）。
-        //   Google/其他 passkey 弹窗会在 CTAP 事务开始前出现，标题如"登录 - google 账号"
-        //   （不含 passkey 关键词），webauthn_ready=true 但 active=false。旧逻辑在此分支直
-        //   接归类 BrowserPasswordFill，导致选密钥登录时移动鼠标触发人脸。
-        //   现在：ready-monitor 仅配合显式「填充密码」关键词时启用；无关键词则保守回退。
-        if context.webauthn_ready && title_has(PASSWORD_FILL_KEYWORDS) {
+        // ★ 监视器 Ready 且「无」active（CTAP + 枚举均无近期活动）：
+        //   枚举事件 2250 已为 passkey 弹窗提供 5s 早期 active 窗口，到这一步
+        //   active=false 说明既不是 passkey 事务也不是近期枚举 → 必为密码填充。
+        //   直接走人脸——完全不看标题关键词，彻底摆脱名单依赖。
+        if context.webauthn_ready {
             return BrokerScene::BrowserPasswordFill;
         }
         // 监视器不可用（启动窗口 / 通道禁用 / 异常）：无法用 active 判断当前是否
@@ -482,7 +481,7 @@ impl IClassFactory_Impl for SampleClassFactory_Impl {
         ppv_object: *mut *mut std::ffi::c_void,
     ) -> windows::core::Result<()> {
         info!("SampleClassFactory::CreateInstance 被调用 - 开始创建凭据提供程序实例");
-        
+
         // 不支持聚合，若提供了外部对象则返回错误
         if punkouter.is_some() {
             error!("不支持聚合，返回CLASS_E_NOAGGREGATION");
@@ -495,7 +494,7 @@ impl IClassFactory_Impl for SampleClassFactory_Impl {
                 error!("输出指针为空，返回E_INVALIDARG");
                 return Err(E_INVALIDARG.into());
             }
-            
+
             // 实例化凭据提供程序并转换为ICredentialProvider接口
             let provider: ICredentialProvider = SampleProvider::new().into();
             // 查询请求的接口并返回
@@ -509,7 +508,7 @@ impl IClassFactory_Impl for SampleClassFactory_Impl {
             }
         }
     }
-    
+
     /// 锁定或解锁DLL，用于控制DLL卸载
     /// flock: true表示锁定（增加引用计数），false表示解锁（减少引用计数）
     fn LockServer(&self, flock: BOOL) -> windows::core::Result<()> {
@@ -535,7 +534,7 @@ pub unsafe extern "system" fn DllGetClassObject(
     ppv: *mut *mut c_void,
 ) -> HRESULT {
     info!("DllGetClassObject 被调用 - 尝试获取类工厂");
-    
+
     // 检查输入参数有效性
     if rclsid.is_null() || riid.is_null() || ppv.is_null() {
         error!("输入参数为空，返回E_INVALIDARG");
@@ -569,7 +568,7 @@ pub unsafe extern "system" fn DllGetClassObject(
 pub unsafe extern "system" fn DllCanUnloadNow() -> HRESULT {
     let count = G_REF_COUNT.load(Ordering::SeqCst);
     info!("DllCanUnloadNow 被调用 - 当前引用计数: {}", count);
-    
+
     if count == 0 {
         info!("引用计数为0，可以卸载DLL");
         S_OK
@@ -628,7 +627,7 @@ pub unsafe extern "system" fn DllMain(
                     }
                 }
             }
-            
+
             info!("DllMain: 基础框架初始化完成");
 
             if let Err(e) = result {
@@ -733,10 +732,9 @@ mod shared_credentials_tests {
     }
 
     #[test]
-    fn unknown_browser_requires_ready_monitor_and_enabled_fallback() {
-        // v0.5.10: ready-monitor 单独不足以启用人脸——Google passkey 弹窗在 CTAP
-        // 事务开始前出现，标题不含 passkey 关键词，webauthn_ready=true 但 active=false。
-        // 仅当标题同时匹配「填充密码」关键词时才走人脸。
+    fn ready_monitor_with_browser_triggers_password_fill() {
+        // v0.5.10: 枚举事件 2250 为 passkey 提供 5s 早期 active 窗口，
+        // 因此 ready + no keywords + no active = 必为密码填充。
         let ready_no_keywords = context(
             "windows 安全中心 登录qq邮箱",
             &["credentialuibroker.exe", "chrome.exe"],
@@ -746,7 +744,7 @@ mod shared_credentials_tests {
         );
         assert_eq!(
             classify_broker_context(&ready_no_keywords, true),
-            BrokerScene::MonitorUnavailable
+            BrokerScene::BrowserPasswordFill
         );
         assert_eq!(classify_broker_context(&ready_no_keywords, false), BrokerScene::Unknown);
 
@@ -806,10 +804,10 @@ mod shared_credentials_tests {
     }
 
     #[test]
-    fn ready_monitor_without_keywords_requires_password_fill_title() {
-        // v0.5.10: QQ邮箱/Google登录页填密码时，标题必须含「填充密码」关键词才走人脸。
-        // ready-monitor 单独不足以启用人脸——Google passkey 弹窗（"登录 - google 账号"）
-        // 同样满足 ready=true、active=false、browser owner，但应被拒绝。
+    fn ready_monitor_with_browser_triggers_fill_even_without_keywords() {
+        // v0.5.10: 枚举事件 2250 已为 passkey 弹窗提供 5s 早期 active 窗口，
+        // 到此 active=false 说明既非 passkey 亦非近期枚举 → 必为密码填充，
+        // 不看标题关键词，彻底摆脱名单依赖。
         let qq = context(
             "windows 安全中心 登录qq邮箱 - google chrome 登录qq邮箱 - google chrome",
             &["credentialuibroker.exe", "chrome.exe"],
@@ -819,7 +817,7 @@ mod shared_credentials_tests {
         );
         assert_eq!(
             classify_broker_context(&qq, true),
-            BrokerScene::MonitorUnavailable
+            BrokerScene::BrowserPasswordFill
         );
     }
 
