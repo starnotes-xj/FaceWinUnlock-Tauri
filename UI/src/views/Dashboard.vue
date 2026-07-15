@@ -15,6 +15,7 @@ const { queryTodayLogs } = useUnlockLog();
 const faceCount = computed(() => facesStore.faceList.length);
 const successCount = ref(0);
 const failCount = ref(0);
+const passkeyVersion = ref('');
 
 const systemStatus = ref([
   { name: 'WinLogon 凭据提供程序', desc: '系统登录对接', active: true },
@@ -43,8 +44,15 @@ async function refreshDashboardData() {
     successCount.value = s;
     failCount.value = f;
   } catch (error) {
-    // 数据库表可能尚未创建，静默降级
     console.warn('[Dashboard] 加载今日识别记录失败:', error);
+  }
+
+  try {
+    const result: any = await invoke('get_passkey_plugin_status');
+    const status = result?.data || {};
+    passkeyVersion.value = status.package?.version || status.bundled_version || '';
+  } catch {
+    passkeyVersion.value = '';
   }
 }
 
@@ -187,9 +195,9 @@ onUnmounted(() => {
         <div class="flex-between" style="height:100%">
           <div>
             <div class="card-label">通行密钥插件</div>
-            <div class="v7-ver-num" style="margin-top:8px">0.6.0.0</div>
+            <div class="v7-ver-num" style="margin-top:8px">{{ passkeyVersion || '未安装' }}</div>
           </div>
-          <el-button class="v7-btn-primary" size="small" @click="$router.push('/options')">
+          <el-button class="v7-btn-primary" size="small" @click="$router.push('/options?tab=dll')">
             管理
           </el-button>
         </div>
