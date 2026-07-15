@@ -1,88 +1,92 @@
-# CredUI Broker And Automatic Lock Invariants
+# CredUI Broker Scene Classification & Auto-Lock Fixes (v0.5.10)
 
-## Why CredUI Needs A Guard
+## 1. Passkey 登录时移动鼠标触发人脸识别
 
-Chromium password reauthentication and WebAuthn operations can both be hosted by `credentialuibroker.exe` with the same Credential Provider usage scenario and flags. `ICredentialProvider::SetUsageScenario` does not expose the caller's prompt text, so `CPUS_CREDUI` and `dwFlags` alone cannot safely distinguish password fill from passkey.
+### 根因
 
-UI Automation was tested and rejected: protected broker contexts do not provide a dependable UIA surface, and UIA adds a fragile cross-integrity dependency. The project permanently prohibits UIA, protected-control inspection, and PIN keystroke injection.
+Google passkey 弹窗在 CredUIBroker 出现**之后**才启动 CTAP 事务。`classify_broker_scene`
+运行时 `webauthn_active=false`，旧逻辑仅凭 `webauthn_ready=true` + 浏览器进程就归类为
+`BrowserPasswordFill`，启用了人脸识别。
 
-## Current Broker Context
+### 修复方案: 三层防线
 
-`Server/src/lib.rs` builds a context from:
+#### 第一层: 枚举事件提前检测
 
-- foreground, owner, and root-owner window titles
-- owner/root-owner process names
-- CredUI flags
-- WebAuthn monitor Ready and Active state
-- private-window markers
+新增事件 2250/2251 监听（`Unlock/src/webauthn_activity.rs`）：
 
-The maintained browser process allowlist is:
+- 2250 = 凭据枚举开始（弹窗之前 ~1-2s）
+- 2251 = 凭据枚举结束
 
-```text
-chrome.exe
-msedge.exe
-brave.exe
-vivaldi.exe
-opera.exe
-opera_gx.exe
-chromium.exe
-360se.exe
-360chrome.exe
+近期枚举（5s TTL）视为 `active=true`，在 classify step ② 被截获 → `Passkey` → 不参与。
+
+#### 第二层: ready-monitor 恢复
+
+枚举事件提供区分能力后，classify step ⑥ 恢复旧行为（`Server/src/lib.rs`）：
+
+```rust
+// ★ 监视器 Ready 且无 active（CTAP + 枚举均无）：必为密码填充
+if context.webauthn_ready {
+    return BrokerScene::BrowserPasswordFill;
+}
 ```
 
-## Decision Priority
+此分支仅在 `active=false`（无 CTAP 也无近期枚举）时到达。
 
-1. WebAuthn Active: classify as passkey and skip.
-2. Explicit passkey/security key/WebAuthn/FIDO2/PIN setup: skip.
-3. System Settings, biometric enrollment, Incognito, or InPrivate: disable unknown fallback.
-4. Explicit password manager/reveal/show/fill-password signal: allow face.
-5. Unknown allowlisted browser: allow only when monitor Ready, not Active, non-private, and `CREDUI_BROWSER_PASSWORD_FILL=1`.
-6. Otherwise return `E_NOTIMPL`.
+#### 第三层: DLL 发 "run" 前复查
 
-Passkey words override password words. Active is checked again after initial classification and before every meaningful pipe/submission step. If a transaction starts mid-recognition, the DLL requests `broker_release`, stops the generic camera path, hides its tile, and re-enumerates Windows credentials.
+`Server/src/CPipeListener.rs` 在 `pipe_write_raw("run")` 紧前面增加 guard 检查，关闭 ~20ms 竞态窗口。
 
-## WebAuthn Monitor
+### 为什么不用关键词/白名单
 
-`Unlock/src/webauthn_activity.rs` uses the Windows Event Log pull subscription model for `Microsoft-Windows-WebAuthN/Operational`.
+- passkey 弹窗标题多变（"登录 - google 账号" vs "通行密钥"）
+- 密码填充标题同样多变（QQ邮箱: "登录qq邮箱"）
+- 确定性信号: 枚举事件在弹窗**之前**发生
 
-- Startup validates the channel, provider metadata, and event IDs 1000-1008.
-- A ten-minute replay restores an unfinished transaction after service restart.
-- Transaction IDs track concurrent starts/completions; duplicates are idempotent.
-- Missing completion expires after ten minutes.
-- Subscription errors clear both Ready and Active before retry/backoff.
-- Logs contain only event ID, active-count transition, and errors.
+---
 
-State is exposed through synchronize-only named events:
+## 2. 自动锁屏误锁
 
-```text
-Global\FaceWinUnlockTauriWebAuthnReady
-Global\FaceWinUnlockTauriWebAuthnActive
+### 根因
+
+旧在场检测只扫 15 帧（~0.5-1.5s），摄像头传感器稳定期未过 → 无脸帧 → 误锁。
+
+### 修复 (`Unlock/src/main.rs`)
+
+1. 替换 15 帧为 10s deadline + `not_face_delay` 超时退避
+2. 新增重试: 第一次失败 → 等 3s → 重新开摄像头做第二轮 (8s deadline)
+3. 与主识别循环逻辑一致
+
+---
+
+## 3. Win+L 后预热延迟
+
+### 根因
+
+`power_resume_requires_run` 被虚假 power event 置为 true，阻止新凭据会话恢复预热。
+
+### 修复 (`Unlock/src/main.rs`)
+
+```rust
+if !power_resume_requires_run || !state.power.is_camera_blocked() {
+    prewarm_suppressed = false;
+    power_resume_requires_run = false;
+}
 ```
 
-The guard cannot be disabled. When it is unhealthy, unknown broker requests fail closed to Windows PIN.
+`is_camera_blocked()` = false 时强制清除抑制。
 
-## Automatic Lock
+---
 
-The UI writes `autoLockEnabled` and `autoLockTimeout` immediately. The Unlock worker reloads them every 30 seconds. The status message “about 30 seconds to take effect” describes this polling delay, not the idle timeout.
+## 相关文件
 
-After the configured idle interval:
-
-1. Skip if the workstation is already locked or the UI owns the camera.
-2. Open the configured camera and check for an authorized face.
-3. Authorized face: do not lock; cool down for `max(60 seconds, autoLockTimeout)`.
-4. No/unknown face: select the active WTS session.
-5. Query its user token and launch the same signed executable with `--lock-workstation-once` on `winsta0\default`.
-6. Confirm the WTS session reports locked; retry bounded failures, then back off.
-
-This indirection is required because a SYSTEM service in Session 0 cannot use `LockWorkStation` to lock the user's interactive desktop.
-
-## Regression Rules
-
-- Do not weaken WebAuthn Active from a veto into a hint.
-- Do not add “no event means password.” Ready plus allowlisted owner plus policy is required.
-- Do not narrow browser support without a demonstrated incompatibility and tests.
-- Do not log titles together with secret request content.
-- Do not lock a disconnected console when an RDP session is active.
-- API/open-desktop errors are unknown/failure, never proof that the workstation locked.
-- Unit tests must cover classification priority, private mode, monitor failure, kill switch, concurrent transactions, replay, expiry, active RDP selection, and lock-flag mapping.
-- Installed validation follows [testing.md](testing.md), including six consecutive #26/#27 loops.
+| 文件 | 改动 |
+|------|------|
+| `Unlock/src/webauthn_activity.rs` | 枚举事件 2250/2251 + 5s TTL |
+| `Server/src/lib.rs` | classify step ⑥: ready-monitor 恢复 |
+| `Server/src/CPipeListener.rs` | "run" 前 guard 复查 |
+| `Unlock/src/main.rs` | auto-lock 在场检测 + prewarm 抑制修复 |
+| `Unlock/src/power_events.rs` | GUID_CONSOLE_DISPLAY_STATE (Modern Standby) |
+| `PasskeyPlugin/PluginManagement/PluginCredentialManager.h` | PurgeRequested.flag |
+| `UI/src-tauri/src/modules/passkey_plugin.rs` | 密钥清理补齐元数据 |
+| `UI/src/views/Dashboard.vue` | faceCount computed + 轮询刷新 |
+| `UI/src/stores/faces.js` | init() 幂等化 |
