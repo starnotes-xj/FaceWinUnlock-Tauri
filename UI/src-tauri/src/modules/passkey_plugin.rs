@@ -15,6 +15,8 @@ const SAMPLE_APP_ID: &str = "Contoso.PasskeyManager";
 const APPX_ALL_USER_STORE_PATH: &str =
     r"SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore";
 const PASSKEY_PLUGIN_REG_PATH: &str = r"Software\FaceWinUnlock\PasskeyManager";
+const APP_LIST_BACKUP_PATH: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\AppListBackup";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn run_powershell(script: &str) -> std::io::Result<Output> {
@@ -239,6 +241,27 @@ fn cleanup_passkey_registry_residue() -> Result<(), String> {
                 return Err(format!(
                     "清理 Passkey Appx CurrentVersion 注册表残留失败 ({entry_path}): {e}"
                 ));
+            }
+        }
+    }
+
+    // 清理开始菜单磁贴备份残留（ListOfEventDrivenBackedUpTiles_*）。
+    // MSIX 卸载时 Windows 应自动清理，但某些版本会残留含我们 AppUserModelId 的项。
+    // 仅删除匹配的值（不删整个子键——同一子键可能含其他应用的磁贴备份）。
+    if let Ok(backup_key) =
+        hkcu.open_subkey_with_flags(APP_LIST_BACKUP_PATH, KEY_READ | KEY_WRITE)
+    {
+        for tile_key_name in backup_key.enum_keys().flatten() {
+            if let Ok(tile_key) =
+                backup_key.open_subkey_with_flags(&tile_key_name, KEY_READ | KEY_WRITE)
+            {
+                for (value_name, _reg_value) in tile_key.enum_values().flatten() {
+                    if value_name.contains(FORMAL_PACKAGE_NAME)
+                        || value_name.contains(SAMPLE_PACKAGE_NAME)
+                    {
+                        let _ = tile_key.delete_value(&value_name);
+                    }
+                }
             }
         }
     }
