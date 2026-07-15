@@ -416,15 +416,19 @@ pub fn classify_broker_context(
         if !browser_password_fill_enabled {
             return BrokerScene::Unknown;
         }
-        // ★ 监视器 Ready 且「无」active（CTAP + 枚举均无近期活动）：
-        //   枚举事件 2250 已为 passkey 弹窗提供 5s 早期 active 窗口，到这一步
-        //   active=false 说明既不是 passkey 事务也不是近期枚举 → 必为密码填充。
-        //   直接走人脸——完全不看标题关键词，彻底摆脱名单依赖。
-        if context.webauthn_ready {
+        // ★ 两层防御体系（v0.5.10 修复 #1 反复回归）：
+        //   第一层（分类阶段）：ready + 显式「填充密码」关键词才参与。
+        //     passkey 弹窗（标题如"登录 - google 账号"）永远不含这些关键词，
+        //     因此 passkey 在第一层就被拦下，不依赖 monitor。
+        //   第二层（debounce）：CP 参与后，发 "run" 前 30ms 轮询
+        //     is_webauthn_guard_active 最多 500ms。monitor 正常工作时捕获
+        //     CTAP 事务 → 拦截。monitor 故障时第一层已保底。
+        //   第三层（枚举事件）：事件 2250 在 passkey 弹窗前 1-2s 触发，
+        //     ENUM_TTL=5s 内 active=true → step ② 拦截。
+        if context.webauthn_ready && title_has(PASSWORD_FILL_KEYWORDS) {
             return BrokerScene::BrowserPasswordFill;
         }
-        // 监视器不可用（启动窗口 / 通道禁用 / 异常）：无法用 active 判断当前是否
-        // passkey，退回标题名单兜底——显式「填充密码」提示仍走人脸，否则保守跳过。
+        // 监视器不可用：退回纯关键词兜底。
         if title_has(PASSWORD_FILL_KEYWORDS) {
             return BrokerScene::BrowserPasswordFill;
         }
@@ -732,9 +736,9 @@ mod shared_credentials_tests {
     }
 
     #[test]
-    fn ready_monitor_with_browser_triggers_password_fill() {
-        // v0.5.10: 枚举事件 2250 为 passkey 提供 5s 早期 active 窗口，
-        // 因此 ready + no keywords + no active = 必为密码填充。
+    fn ready_monitor_requires_fill_keywords_for_browser_participation() {
+        // v0.5.10 两层防御：分类阶段必须标题含「填充密码」关键词才参与。
+        // 单独的 ready + browser 不足以——passkey 弹窗也可能满足这些条件。
         let ready_no_keywords = context(
             "windows 安全中心 登录qq邮箱",
             &["credentialuibroker.exe", "chrome.exe"],
@@ -744,7 +748,7 @@ mod shared_credentials_tests {
         );
         assert_eq!(
             classify_broker_context(&ready_no_keywords, true),
-            BrokerScene::BrowserPasswordFill
+            BrokerScene::MonitorUnavailable
         );
         assert_eq!(classify_broker_context(&ready_no_keywords, false), BrokerScene::Unknown);
 
@@ -804,12 +808,11 @@ mod shared_credentials_tests {
     }
 
     #[test]
-    fn ready_monitor_with_browser_triggers_fill_even_without_keywords() {
-        // v0.5.10: 枚举事件 2250 已为 passkey 弹窗提供 5s 早期 active 窗口，
-        // 到此 active=false 说明既非 passkey 亦非近期枚举 → 必为密码填充，
-        // 不看标题关键词，彻底摆脱名单依赖。
+    fn ready_monitor_with_keywords_participates() {
+        // ready + 显式「填充密码」关键词 → 参与（第一层通过），
+        // 由 debounce（第二层）在发 "run" 前做最终判断。
         let qq = context(
-            "windows 安全中心 登录qq邮箱 - google chrome 登录qq邮箱 - google chrome",
+            "windows 安全中心 chrome 正尝试在 wx.mail.qq.com 上填充您的密码",
             &["credentialuibroker.exe", "chrome.exe"],
             true,
             false,
