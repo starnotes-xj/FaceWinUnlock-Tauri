@@ -528,7 +528,7 @@
                         domain: authForm.accountType === 'domain' ? (authForm.domain || '.') : (authForm.accountType === 'online' ? '' : '.'),
                         faceDetectionThreshold: getFaceDetectionThresholdValue()
                     })
-                }, targetId);
+                }, editFaceData.id);
 
                 if(isEditFaceImage){
                     // 如果信息存储完成，并且修改了图片，删除旧的面容特征
