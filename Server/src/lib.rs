@@ -416,16 +416,15 @@ pub fn classify_broker_context(
         if !browser_password_fill_enabled {
             return BrokerScene::Unknown;
         }
-        // ★ 三层防御体系（v0.5.10 修复 #1）：
-        //   第一层（步骤②）：webauthn_active=true → Passkey（CTAP 事务/枚举事件）
-        //   第二层（步骤⑥）：webauthn_ready + browser → BrowserPasswordFill（参与）
-        //   第三层（debounce）：CP 参与后，发 "run" 前 30ms 轮询
-        //     is_webauthn_guard_active 最多 500ms → 拦截 passkey。
-        //   分类阶段不依赖标题关键词——由 debounce 和枚举事件做最终判断。
-        if context.webauthn_ready {
+        // ★ 参与条件：monitor 就绪 + 标题含「填充密码」关键词。
+        //   Google passkey 弹窗标题有时是「通行密钥」（步骤③截），有时是
+        //   「登录 - google 账号」（无任何关键词）。monitor 间歇性不捕获事件时
+        //   Active/CTAP 都无法检测，debounce 也失效。关键词是唯一的确定性防线。
+        //   QQ邮箱/阿里云/学信网填密码时标题均含「填充」等关键词，不受影响。
+        if context.webauthn_ready && title_has(PASSWORD_FILL_KEYWORDS) {
             return BrokerScene::BrowserPasswordFill;
         }
-        // 监视器不可用：退回标题关键词兜底。
+        // 监视器不可用：纯关键词兜底。
         if title_has(PASSWORD_FILL_KEYWORDS) {
             return BrokerScene::BrowserPasswordFill;
         }
