@@ -32,7 +32,8 @@ use std::{
 };
 
 use opencv::{
-    core::{Mat, Ptr, Size},
+    core::{self, Mat, Ptr, Size},
+    imgproc,
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     prelude::*,
     videoio::{self, VideoCapture},
@@ -1998,6 +1999,10 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
                 let hard_deadline = Instant::now() + Duration::from_secs(10);
                 let mut no_face_since: Option<Instant> = None;
+                const MOTION_THRESHOLD: f64 = 0.03;
+                const MOTION_LOW_LIMIT: u32 = 10;
+                let mut prev_gray: Option<Mat> = None;
+                let mut motion_low_count: u32 = 0;
                 while Instant::now() < hard_deadline {
                     if state.should_exit.load(Ordering::SeqCst)
                         || state.release_requested.load(Ordering::SeqCst)
@@ -2019,6 +2024,31 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                         continue;
                     }
                     let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
+
+                    // 微运动检测：防止照片攻击（在昂贵的 DNN 推理之前运行）
+                    let mut gray = Mat::default();
+                    if let Ok(_) = imgproc::cvt_color(&frame, &mut gray, imgproc::COLOR_BGR2GRAY, 0) {
+                        if let Some(ref prev) = prev_gray {
+                            let mut diff = Mat::default();
+                            if let Ok(_) = opencv::core::absdiff(prev, &gray, &mut diff) {
+                                let motion = opencv::core::mean(&diff, &Mat::default()).unwrap_or_default();
+                                let motion_val = motion[0] as f64;
+                                if motion_val < MOTION_THRESHOLD {
+                                    motion_low_count += 1;
+                                } else {
+                                    motion_low_count = 0;
+                                }
+                            }
+                        }
+                        prev_gray = Some(gray);
+                    }
+
+                    // 连续低运动帧数达阈值 → 疑似照片攻击，跳过昂贵的 DNN 推理
+                    if motion_low_count >= MOTION_LOW_LIMIT {
+                        log_service(&exe_dir, "WARN", "motion check: possible photo attack, skipping frame");
+                        thread::sleep(Duration::from_millis(30));
+                        continue;
+                    }
 
                     let (ref mut m, _) = models.as_mut().expect("models loaded before run");
                     let cam_feat = match detect_and_extract(m, &frame) {

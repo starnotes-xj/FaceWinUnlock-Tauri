@@ -8,31 +8,41 @@ Write-Host "=== 下载 ONNX 模型文件 ===" -ForegroundColor Cyan
 # 1. YuNet 人脸检测模型 (2023-03)
 $yunet = "$ResourceDir\face_detection_yunet_2023mar.onnx"
 if (-not (Test-Path $yunet)) {
-    Write-Host "[1/3] 下载 YuNet 人脸检测模型..." -ForegroundColor Yellow
+    Write-Host "[1/4] 下载 YuNet 人脸检测模型..." -ForegroundColor Yellow
     Invoke-WebRequest -Uri "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx" -OutFile $yunet
     Write-Host "  ✓ YuNet 完成" -ForegroundColor Green
 } else {
-    Write-Host "[1/3] YuNet 已存在, 跳过" -ForegroundColor Gray
+    Write-Host "[1/4] YuNet 已存在, 跳过" -ForegroundColor Gray
 }
 
 # 2. SFace 人脸识别模型 (2021-12)
 $sface = "$ResourceDir\face_recognition_sface_2021dec.onnx"
 if (-not (Test-Path $sface)) {
-    Write-Host "[2/3] 下载 SFace 人脸识别模型..." -ForegroundColor Yellow
+    Write-Host "[2/4] 下载 SFace 人脸识别模型..." -ForegroundColor Yellow
     Invoke-WebRequest -Uri "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx" -OutFile $sface
     Write-Host "  ✓ SFace 完成" -ForegroundColor Green
 } else {
-    Write-Host "[2/3] SFace 已存在, 跳过" -ForegroundColor Gray
+    Write-Host "[2/4] SFace 已存在, 跳过" -ForegroundColor Gray
 }
 
-# 3. 活体检测模型 (ModelScope MiniFASNetV2 → ONNX)
+# 3. 活体检测模型 (ModelScope MiniFASNetV2 → ONNX, 配合关键点静默眨眼检测)
 $liveness = "$ResourceDir\face_liveness.onnx"
 if (-not (Test-Path $liveness)) {
-    Write-Host "[3/3] 下载活体检测模型..." -ForegroundColor Yellow
+    Write-Host "[3/4] 下载活体检测模型..." -ForegroundColor Yellow
     Invoke-WebRequest -Uri "https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/raw/master/resources/anti_spoof_models/2.7_80x80_MiniFASNetV2.onnx" -OutFile $liveness
     Write-Host "  ✓ 活体检测模型完成" -ForegroundColor Green
 } else {
-    Write-Host "[3/3] 活体检测模型已存在, 跳过" -ForegroundColor Gray
+    Write-Host "[3/4] 活体检测模型已存在, 跳过" -ForegroundColor Gray
+}
+
+# 4. 68点人脸关键点模型 (PIPNet, 用于静默眨眼检测)
+$landmark = "$ResourceDir\face_landmark_68.onnx"
+if (-not (Test-Path $landmark)) {
+    Write-Host "[4/4] 下载68点人脸关键点模型..." -ForegroundColor Yellow
+    Invoke-WebRequest -Uri "https://github.com/yakhyo/pipnet-onnx/releases/download/weights/pipnet_r18_300w_celeba_68.onnx" -OutFile $landmark
+    Write-Host "  ✓ 关键点模型完成" -ForegroundColor Green
+} else {
+    Write-Host "[4/4] 关键点模型已存在, 跳过" -ForegroundColor Gray
 }
 
 Write-Host ""

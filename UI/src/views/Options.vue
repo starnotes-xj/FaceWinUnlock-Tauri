@@ -598,16 +598,15 @@
 	const livenessEnabledChange = ()=>{
 		if(config.livenessEnabled){
 			ElMessageBox.confirm(
-				'活体检测准确率低，<span style="color: var(--v7-cinnabar-bright);">误判极高，不建议开启</span><br />' +
-				'当前只影响录入页面的一致性验证，不参与锁屏解锁<br />' +
-				'是否继续开启活体检测？', 
-				'警告', 
+				'启用后将在录入时进行活体检测（被动微运动检测 + 深度学习模型），识别准确率较以往有显著提升。<br />' +
+				'当前只影响录入页面的一致性验证，不参与锁屏解锁。<br />' +
+				'是否开启活体检测？',
+				'开启活体检测',
 				{
 					dangerouslyUseHTMLString: true,
-					confirmButtonText: '我明白风险，继续开启',
-					confirmButtonClass: 'el-button--danger',
+					confirmButtonText: '继续开启',
 					cancelButtonText: '取消',
-					type: 'warning'
+					type: 'info'
 				}
 			).then(() => {
 				// 继续开启活体检测
@@ -845,10 +844,13 @@
 							<div class="option-row">
 								<div class="row-text">
 									<p class="label">一致性验证启用活体检测</p>
-									<p class="sub">仅用于录入页面的人脸一致性验证，不参与锁屏解锁；准确率不高，不推荐开启</p>
+									<p class="sub">仅用于录入页面的人脸一致性验证，不参与锁屏解锁；含被动微运动检测（自动防照片攻击），无需额外操作</p>
 								</div>
 								<el-switch v-model="config.livenessEnabled" @change="livenessEnabledChange"/>
 							</div>
+							<p class="row-help" style="margin: -6px 0 6px; font-size: 12px; color: var(--v7-text-dim);">
+								自动防照片攻击：录制时通过微运动检测识别是否为真人面部，无需用户主动配合
+							</p>
 
 							<!-- 阈值设置 -->
 							<div class="option-row">

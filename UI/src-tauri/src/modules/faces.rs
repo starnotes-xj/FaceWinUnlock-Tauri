@@ -11,6 +11,7 @@ use serde_json::json;
 
 use crate::utils::custom_result::CustomResult;
 use crate::{APP_STATE, ROOT_DIR};
+use super::liveness::{BlinkDetector, MotionDetector, extract_landmarks_pipnet};
 
 /// 缓存参考图的人脸特征，避免每帧重复提取 (#121)
 struct VerificationCache {
@@ -445,6 +446,29 @@ fn get_ref_feature(reference_base64: &str, threshold: f32) -> Result<Mat, String
     Ok(ref_feature)
 }
 
+/// 从帧中裁剪人脸并尝试提取 PIPNet 关键点，送入 BlinkDetector。
+/// 若模型未加载或提取失败则静默跳过。
+fn try_blink_detect(frame: &Mat, faces: &Mat, blink_detector: &mut BlinkDetector) {
+    let x = (*faces.at_2d::<f32>(0, 0).ok()?).max(0.0) as i32;
+    let y = (*faces.at_2d::<f32>(0, 1).ok()?).max(0.0) as i32;
+    let w = (*faces.at_2d::<f32>(0, 2).ok()?).max(1.0) as i32;
+    let h = (*faces.at_2d::<f32>(0, 3).ok()?).max(1.0) as i32;
+    let w = w.min(frame.cols() - x);
+    let h = h.min(frame.rows() - y);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let face_crop = frame.roi(opencv::core::Rect::new(x, y, w, h)).ok()?;
+
+    let landmarks = {
+        let state = crate::APP_STATE.lock().ok()?;
+        let net = state.landmark.as_ref()?;
+        extract_landmarks_pipnet(&net.inner, &face_crop)?
+    };
+
+    let _ = blink_detector.update(&landmarks);
+}
+
 /// 人脸验证（摄像头当前帧 vs 参考图），返回 { display_base64, success, score, message }
 /// reference_base64: 不含 data URI 前缀的 JPEG base64
 #[tauri::command]
@@ -482,6 +506,8 @@ pub fn verify_face(
     let frame =
         rotate_frame(&frame, camera_rotation).map_err(|e| CustomResult::error(Some(e), None))?;
 
+    let mut motion_detector = MotionDetector::new();
+
     // 2. 检测摄像头帧中的人脸
     let cam_faces =
         detect_faces(&frame, threshold).map_err(|e| CustomResult::error(Some(e), None))?;
@@ -500,22 +526,107 @@ pub fn verify_face(
         ));
     }
 
-    // 3. 活体检测（可选）
+    // 3a. 微运动检测（始终运行，接近零开销）
+    let _motion_score = motion_detector.update(&frame).unwrap_or(0.0);
+    if motion_detector.is_likely_photo() {
+        let raw_b64 = mat_to_data_url(&frame).map_err(|e| CustomResult::error(Some(e), None))?;
+        return Ok(CustomResult::success(
+            None,
+            Some(json!({
+                "display_base64": raw_b64,
+                "success": false,
+                "score": 0.0,
+                "message": "疑似照片攻击：未检测到面部微运动"
+            })),
+        ));
+    }
+
+    // 3. 活体检测（多帧投票 + 静默眨眼检测，仅 liveness_enabled 时运行）
     if liveness_enabled {
-        let live_score =
-            liveness_score(&frame, &cam_faces).map_err(|e| CustomResult::error(Some(e), None))?;
-        if (live_score as f64) < liveness_threshold {
+        let mut live_votes: Vec<f32> = Vec::with_capacity(5);
+        let mut blink_detector = BlinkDetector::new();
+
+        // 首帧已有人脸检测结果
+        if let Ok(score) = liveness_score(&frame, &cam_faces) {
+            live_votes.push(score);
+        }
+        // 首帧眨眼检测：尝试提取关键点
+        try_blink_detect(&frame, &cam_faces, &mut blink_detector);
+
+        // 额外读取 4 帧，每帧做活体检测 + 微运动累积 + 眨眼检测
+        for _ in 0..4 {
+            let mut extra_frame = Mat::default();
+            {
+                let mut state = APP_STATE
+                    .lock()
+                    .map_err(|e| CustomResult::error(Some(format!("获取 APP_STATE 失败: {}", e)), None))?;
+                let cam = state
+                    .camera
+                    .as_mut()
+                    .ok_or_else(|| CustomResult::error(Some("摄像头未打开".to_string()), None))?;
+                cam.inner
+                    .read(&mut extra_frame)
+                    .map_err(|e| CustomResult::error(Some(format!("读取额外帧失败: {:?}", e)), None))?;
+            }
+            if extra_frame.empty() {
+                continue;
+            }
+            let extra_frame = rotate_frame(&extra_frame, camera_rotation)
+                .map_err(|e| CustomResult::error(Some(e), None))?;
+
+            // 微运动检测（跨帧累积，始终运行）
+            let _ = motion_detector.update(&extra_frame).unwrap_or(0.0);
+            if motion_detector.is_likely_photo() {
+                let raw_b64 = mat_to_data_url(&extra_frame)
+                    .map_err(|e| CustomResult::error(Some(e), None))?;
+                return Ok(CustomResult::success(
+                    None,
+                    Some(json!({
+                        "display_base64": raw_b64,
+                        "success": false,
+                        "score": 0.0,
+                        "message": "疑似照片攻击：未检测到面部微运动"
+                    })),
+                ));
+            }
+
+            // 对额外帧做人脸检测 + 活体评分 + 眨眼检测
+            if let Ok(extra_faces) = detect_faces(&extra_frame, threshold) {
+                if extra_faces.rows() > 0 {
+                    if let Ok(score) = liveness_score(&extra_frame, &extra_faces) {
+                        live_votes.push(score);
+                    }
+                    try_blink_detect(&extra_frame, &extra_faces, &mut blink_detector);
+                }
+            }
+        }
+
+        // 投票判定：MiniFASNetV2 >= 3/5 live，或 blink detected + >= 2/5 live
+        let live_count = live_votes
+            .iter()
+            .filter(|&&s| (s as f64) >= liveness_threshold)
+            .count();
+        let blink_ok = blink_detector.blink_detected;
+        let total_votes = live_count + if blink_ok { 1 } else { 0 };
+        if total_votes < 3 {
             let mut display = frame.clone();
             let _ = draw_face_box(&mut display, &cam_faces);
             let display_b64 =
                 mat_to_data_url(&display).map_err(|e| CustomResult::error(Some(e), None))?;
+            let avg_score =
+                live_votes.iter().sum::<f32>() / live_votes.len().max(1) as f32;
+            let reason = if blink_ok {
+                "活体检测未通过（多帧投票）"
+            } else {
+                "活体检测未通过（多帧投票，未检测到眨眼）"
+            };
             return Ok(CustomResult::success(
                 None,
                 Some(json!({
                     "display_base64": display_b64,
                     "success": false,
-                    "score": (live_score as f64 * 100.0).round() / 100.0,
-                    "message": "活体检测未通过"
+                    "score": (avg_score as f64 * 100.0).round() / 100.0,
+                    "message": reason
                 })),
             ));
         }
