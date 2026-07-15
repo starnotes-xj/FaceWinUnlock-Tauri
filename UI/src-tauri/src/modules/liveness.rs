@@ -192,7 +192,9 @@ pub fn extract_landmarks_pipnet(
     }
 
     let mut outputs = Vector::<Mat>::new();
-    net.forward(&mut outputs, &out_names).ok()?;
+    if net.forward(&mut outputs, &out_names).is_err() {
+        return None;
+    }
 
     // PIPNet 输出：cls_map, offset_x, offset_y, nb_x, nb_y
     // 测试版简化处理：仅使用 cls_map 热力图的 argmax 位置
@@ -201,19 +203,28 @@ pub fn extract_landmarks_pipnet(
     }
 
     let cls_map = outputs.get(0)?; // 形状 (1, 68, 64, 64)
-    let sizes = cls_map.size().ok()?;
-    let num_landmarks = sizes[1] as i32; // 通常 68
-    let feature_size = sizes[2] as i32; // 通常 64
+    let feature_size = 64i32; // 256/4 stride
+    let num_landmarks = 68i32;
     let stride = 256.0 / feature_size as f32;
 
     // 将 cls_map 展平为 (num_landmarks, feature_size*feature_size) 便于逐行 argmax
-    let cls_2d = cls_map.reshape(1, num_landmarks).ok()?;
+    let cls_2d = match cls_map.reshape(1, num_landmarks) {
+        Ok(m) => m,
+        Err(_) => return None,
+    };
 
     let total = cls_2d.rows();
     let mut landmarks: Vec<f32> = Vec::with_capacity((total as usize) * 2);
 
     for c in 0..total {
-        let row = cls_2d.row(c).ok()?;
+        let row = match cls_2d.row(c) {
+            Ok(r) => r,
+            Err(_) => {
+                landmarks.push(0.0);
+                landmarks.push(0.0);
+                continue;
+            }
+        };
         let mut min_val: f64 = 0.0;
         let mut max_val: f64 = 0.0;
         let mut min_loc = Point::default();
@@ -228,7 +239,6 @@ pub fn extract_landmarks_pipnet(
         )
         .is_err()
         {
-            // 该通道处理失败，填入零
             landmarks.push(0.0);
             landmarks.push(0.0);
             continue;
@@ -246,13 +256,9 @@ pub fn extract_landmarks_pipnet(
     if outputs.len() >= 3 {
         let off_x = outputs.get(1)?;
         let off_y = outputs.get(2)?;
-        let off_x_2d = off_x.reshape(1, num_landmarks).ok();
-        let off_y_2d = off_y.reshape(1, num_landmarks).ok();
-        if let (Some(ox), Some(oy)) = (off_x_2d, off_y_2d) {
+        if let (Ok(ox), Ok(oy)) = (off_x.reshape(1, num_landmarks), off_y.reshape(1, num_landmarks)) {
             for c in 0..total {
-                let row_x = ox.row(c).ok();
-                let row_y = oy.row(c).ok();
-                if let (Some(rx), Some(ry)) = (row_x, row_y) {
+                if let (Ok(rx), Ok(ry)) = (ox.row(c), oy.row(c)) {
                     let idx = (c as f32 * feature_size as f32 * feature_size as f32
                         + landmarks[(c as usize) * 2 + 1] / stride * feature_size as f32
                         + landmarks[(c as usize) * 2] / stride) as i32;

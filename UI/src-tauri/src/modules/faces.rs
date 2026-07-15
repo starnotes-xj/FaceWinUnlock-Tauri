@@ -463,13 +463,13 @@ fn try_blink_detect(frame: &Mat, faces: &Mat, blink_detector: &mut BlinkDetector
         return;
     }
     let Ok(face_crop) = frame.roi(opencv::core::Rect::new(x, y, w, h)) else { return };
-    // roi() 返回 BoxedRef<Mat>，需解引用转为 &Mat
-    let face_crop_mat: &Mat = &*face_crop;
+    // roi() 返回 BoxedRef<Mat>，需 clone 为 Mat 再传引用
+    let Ok(face_crop_mat) = face_crop.try_clone() else { return };
 
     let landmarks = {
         let Ok(state) = crate::APP_STATE.lock() else { return };
         let Some(net) = state.landmark.as_ref() else { return };
-        let Some(lm) = extract_landmarks_pipnet(&net.inner, face_crop_mat) else { return };
+        let Some(lm) = extract_landmarks_pipnet(&net.inner, &face_crop_mat) else { return };
         lm
     };
 
