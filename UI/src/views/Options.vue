@@ -14,11 +14,12 @@
 	import { formatObjectString, hashMessage } from '../utils/function'
 	import { info, error as errorLog, warn } from '@tauri-apps/plugin-log';
 	import { selectCustom } from '../utils/sqlite'
-	import { useRouter } from 'vue-router'
+	import { useRouter, useRoute } from 'vue-router'
 	import { openUrl } from '@tauri-apps/plugin-opener';
 
 	const optionsStore = useOptionsStore();
 	const router = useRouter();
+	const route = useRoute();
 
 	const activeTab = ref('app')
 	const optionTabs = [
@@ -218,6 +219,10 @@
 	// 统一移到 onMounted + nextTick，让首屏先绘制完成，再分批加载各项状态；
 	// Passkey 状态走 PowerShell（首次启动进程 1-3s 最慢），额外延迟错开，进一步避开首屏。
 	onMounted(() => {
+		const tabParam = route.query.tab as string;
+		if (tabParam && optionTabs.some(t => t.id === tabParam)) {
+			activeTab.value = tabParam;
+		}
 		nextTick(() => {
 			invoke("check_scheduled_task", { taskName: 'FaceWinUnlockAutoStart' }).then((result: any) => {
 				config.autoStart = result.data.enable;
