@@ -200,7 +200,7 @@ pub fn extract_landmarks_pipnet(
         return None;
     }
 
-    let cls_map = &outputs[0]; // 形状 (1, 68, 64, 64)
+    let cls_map = outputs.get(0)?; // 形状 (1, 68, 64, 64)
     let sizes = cls_map.size().ok()?;
     let num_landmarks = sizes[1] as i32; // 通常 68
     let feature_size = sizes[2] as i32; // 通常 64
@@ -244,8 +244,8 @@ pub fn extract_landmarks_pipnet(
 
     // 同时提取偏移量做亚像素精修（若可用）
     if outputs.len() >= 3 {
-        let off_x = &outputs[1];
-        let off_y = &outputs[2];
+        let off_x = outputs.get(1)?;
+        let off_y = outputs.get(2)?;
         let off_x_2d = off_x.reshape(1, num_landmarks).ok();
         let off_y_2d = off_y.reshape(1, num_landmarks).ok();
         if let (Some(ox), Some(oy)) = (off_x_2d, off_y_2d) {
