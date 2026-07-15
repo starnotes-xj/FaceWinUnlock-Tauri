@@ -46,14 +46,6 @@ async function refreshDashboardData() {
   } catch (error) {
     console.warn('[Dashboard] 加载今日识别记录失败:', error);
   }
-
-  try {
-    const result: any = await invoke('get_passkey_plugin_status');
-    const status = result?.data || {};
-    passkeyVersion.value = status.package?.version || status.bundled_version || '';
-  } catch {
-    passkeyVersion.value = '';
-  }
 }
 
 // 每 3 秒轮询刷新今日识别统计——Tauri webview 的 visibilitychange 事件不可靠。
@@ -85,6 +77,15 @@ onMounted(async () => {
   }
 
   await refreshDashboardData();
+
+  // Passkey 版本仅首次加载查询（走 PowerShell，避免每 3s 轮询）
+  try {
+    const result: any = await invoke('get_passkey_plugin_status');
+    const status = result?.data || {};
+    passkeyVersion.value = status.package?.version || status.bundled_version || '';
+  } catch {
+    passkeyVersion.value = '';
+  }
 
   let tempCameraList = optionsStore.getOptionValueByKey('cameraList');
   let tempCameraIndex = optionsStore.getOptionValueByKey('camera');
