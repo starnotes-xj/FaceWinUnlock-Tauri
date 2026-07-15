@@ -449,21 +449,26 @@ fn get_ref_feature(reference_base64: &str, threshold: f32) -> Result<Mat, String
 /// 从帧中裁剪人脸并尝试提取 PIPNet 关键点，送入 BlinkDetector。
 /// 若模型未加载或提取失败则静默跳过。
 fn try_blink_detect(frame: &Mat, faces: &Mat, blink_detector: &mut BlinkDetector) {
-    let x = (*faces.at_2d::<f32>(0, 0).ok()?).max(0.0) as i32;
-    let y = (*faces.at_2d::<f32>(0, 1).ok()?).max(0.0) as i32;
-    let w = (*faces.at_2d::<f32>(0, 2).ok()?).max(1.0) as i32;
-    let h = (*faces.at_2d::<f32>(0, 3).ok()?).max(1.0) as i32;
+    let Ok(x_val) = faces.at_2d::<f32>(0, 0) else { return };
+    let x = (*x_val).max(0.0) as i32;
+    let Ok(y_val) = faces.at_2d::<f32>(0, 1) else { return };
+    let y = (*y_val).max(0.0) as i32;
+    let Ok(w_val) = faces.at_2d::<f32>(0, 2) else { return };
+    let w = (*w_val).max(1.0) as i32;
+    let Ok(h_val) = faces.at_2d::<f32>(0, 3) else { return };
+    let h = (*h_val).max(1.0) as i32;
     let w = w.min(frame.cols() - x);
     let h = h.min(frame.rows() - y);
     if w <= 0 || h <= 0 {
         return;
     }
-    let face_crop = frame.roi(opencv::core::Rect::new(x, y, w, h)).ok()?;
+    let Ok(face_crop) = frame.roi(opencv::core::Rect::new(x, y, w, h)) else { return };
 
     let landmarks = {
-        let state = crate::APP_STATE.lock().ok()?;
-        let net = state.landmark.as_ref()?;
-        extract_landmarks_pipnet(&net.inner, &face_crop)?
+        let Ok(state) = crate::APP_STATE.lock() else { return };
+        let Some(net) = state.landmark.as_ref() else { return };
+        let Some(lm) = extract_landmarks_pipnet(&net.inner, &face_crop) else { return };
+        lm
     };
 
     let _ = blink_detector.update(&landmarks);
