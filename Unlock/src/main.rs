@@ -32,7 +32,7 @@ use std::{
 };
 
 use opencv::{
-    core::{self, Mat, Ptr, Size},
+    core::{Mat, Ptr, Size},
     imgproc,
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     prelude::*,
@@ -2027,7 +2027,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
                     // 微运动检测：防止照片攻击（在昂贵的 DNN 推理之前运行）
                     let mut gray = Mat::default();
-                    if let Ok(_) = imgproc::cvt_color(&frame, &mut gray, imgproc::COLOR_BGR2GRAY, 0) {
+                    if let Ok(_) = imgproc::cvt_color(&frame, &mut gray, imgproc::COLOR_BGR2GRAY, 0, opencv::core::AlgorithmHint(0)) {
                         if let Some(ref prev) = prev_gray {
                             let mut diff = Mat::default();
                             if let Ok(_) = opencv::core::absdiff(prev, &gray, &mut diff) {
