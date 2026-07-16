@@ -1,4 +1,4 @@
-# FaceWinUnlock 运行时文件自愈脚本 (resilience.ps1)
+﻿# FaceWinUnlock 运行时文件自愈脚本 (resilience.ps1)
 #
 # 背景 / 根因：
 #   opencv_world4120.dll 与 FaceWinUnlock-Server.exe 是安装目录里仅有的两个
