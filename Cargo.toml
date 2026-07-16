@@ -3,5 +3,6 @@ members = [
     "Server",
     "UI/src-tauri",
     "Unlock",
+    "Launcher",
 ]
 resolver = "2"

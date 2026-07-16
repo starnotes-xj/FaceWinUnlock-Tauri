@@ -135,10 +135,26 @@ function Add-DefenderExclusion {
 
 function Invoke-Heal {
     $restored = @()
+    $ResourcesDir = Join-Path $InstallDir 'resources'
     foreach ($name in $Protected) {
         $dst = Join-Path $InstallDir $name
         if (Test-Path $dst) { continue }
         Write-Log "Heal: 检测到关键文件缺失：$name"
+
+        # 优先尝试从 resources/ 副本复制（快速路径，比解压 zip 更快）
+        $resourcesCopy = Join-Path $ResourcesDir $name
+        if (Test-Path $resourcesCopy) {
+            try {
+                Copy-Item $resourcesCopy $dst -Force
+                $restored += $name
+                Write-Log "Heal: 已从 resources 副本恢复 $name（快速路径）"
+                continue
+            } catch {
+                Write-Log "Heal: 从 resources 副本恢复 $name 失败，尝试 zip 备份：$($_.Exception.Message)"
+            }
+        }
+
+        # 回退：从压缩备份解压恢复
         if (-not (Test-Path $BackupZip)) { Write-Log "Heal: 压缩备份不存在，无法恢复 $name"; continue }
         try {
             $tmp = Join-Path $env:TEMP ('fwu_heal_' + [guid]::NewGuid().ToString('N'))
@@ -148,7 +164,7 @@ function Invoke-Heal {
             if (Test-Path $src) {
                 Copy-Item $src $dst -Force
                 $restored += $name
-                Write-Log "Heal: 已从备份恢复 $name"
+                Write-Log "Heal: 已从压缩备份恢复 $name"
             } else {
                 Write-Log "Heal: 备份内未找到 $name"
             }
