@@ -42,8 +42,21 @@
   nsExec::ExecToStack 'schtasks /Query /TN "FaceWinUnlockHealer"'
   Pop $1
   ${If} $1 != 0
+    ; 第三层回退：NSIS 直接调用 schtasks.exe（不经过 PowerShell，最大程度绕过 HIPS）
+    ; resilience.ps1 失败时会把任务 XML 写入 nsis\healer-task.xml
+    IfFileExists "$INSTDIR\nsis\healer-task.xml" 0 healer_task_fallback_done
+      DetailPrint "自愈计划任务：尝试 NSIS 直接调用 schtasks.exe 注册..."
+      nsExec::ExecToStack 'schtasks /Create /TN "FaceWinUnlockHealer" /XML "$INSTDIR\nsis\healer-task.xml" /F'
+      Pop $2
+      ${If} $2 == 0
+        DetailPrint "自愈计划任务 FaceWinUnlockHealer 通过 NSIS schtasks 注册成功"
+        Delete "$INSTDIR\nsis\healer-task.xml"
+        Goto healer_task_ok
+      ${EndIf}
+    healer_task_fallback_done:
     MessageBox MB_OK|MB_ICONEXCLAMATION "FaceWinUnlock 安装程序$\n$\n警告：自愈计划任务注册失败（可能被安全软件拦截）。$\n$\n安装目录中部分关键文件可能被杀毒软件误删。$\n请将以下目录添加到您的安全软件信任区（白名单）：$\n$INSTDIR$\n$\n添加信任后，自愈机制将正常工作。"
   ${Else}
+    healer_task_ok:
     DetailPrint "自愈计划任务 FaceWinUnlockHealer 注册成功"
   ${EndIf}
 

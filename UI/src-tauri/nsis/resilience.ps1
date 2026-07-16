@@ -131,14 +131,19 @@ function Register-HealerTask {
         # schtasks /Create /XML 需要 UTF-16 LE 编码（与 Rust 侧 add_scheduled_task 一致）
         $utf16 = [System.Text.Encoding]::Unicode.GetBytes($xml)
         [System.IO.File]::WriteAllBytes($xmlPath, $utf16)
-        $result = Start-Process -FilePath 'schtasks.exe' `
-            -ArgumentList '/Create', '/TN', $TaskName, '/XML', "`"$xmlPath`"", '/F' `
-            -WindowStyle Hidden -Wait -NoNewWindow -PassThru
+        # 用 & 调用运算符直接执行 schtasks.exe，避免 Start-Process 的参数转义问题
+        $exitCode = 0
+        & schtasks.exe /Create /TN $TaskName /XML $xmlPath /F 2>&1 | Out-Null
+        $exitCode = $LASTEXITCODE
         Remove-Item $xmlPath -Force -ErrorAction SilentlyContinue
-        if ($result.ExitCode -eq 0) {
+        if ($exitCode -eq 0) {
             Write-Log "Setup: 已通过 schtasks.exe 回退注册自愈计划任务 $TaskName"
         } else {
-            Write-Log "Setup: schtasks.exe 回退也失败（exit code $($result.ExitCode)）。请手动将安装目录加入安全软件信任区。"
+            Write-Log "Setup: schtasks.exe 回退也失败（exit code $exitCode）。"
+            # 留一份 XML 在安装目录，供 NSIS 层第三层回退
+            $fallbackXml = Join-Path $InstallDir 'nsis\healer-task.xml'
+            [System.IO.File]::WriteAllBytes($fallbackXml, $utf16)
+            Write-Log "Setup: 已将任务 XML 写入 $fallbackXml 供 NSIS 层回退"
         }
     } catch {
         Write-Log "Setup: schtasks.exe 回退异常：$($_.Exception.Message)"
