@@ -725,7 +725,7 @@ pub fn repair_ui_auto_start_task() -> Result<CustomResult, CustomResult> {
     let needs_repair = xml.contains("TimeTrigger")
         || xml.contains("SessionStateChangeTrigger")
         || !xml.contains("--silent")
-        || xml.contains("facewinunlock-tauri.exe"); // 旧版本直接指向主 EXE，需迁移到启动器
+        || xml.contains("facewinunlock-tauri.exe"); // 旧版直接指向主 EXE，迁移到启动器
     if !needs_repair {
         return Ok(CustomResult::success(
             Some("UI 自启任务无需修复".to_string()),
@@ -857,12 +857,12 @@ fn stop_unlock_service() {
     // 额外等一拍，确保 supervisor 退出、文件句柄完全释放
     thread::sleep(Duration::from_millis(500));
 }
-// 用指定 backend/target 构建全部四个 OpenCV 模型；任一失败即返回错误。
+// 用指定 backend/target 构建全部三个 OpenCV 模型；任一失败即返回错误。
 // 不写入全局状态，便于在失败时安全回退到其它后端后再统一赋值。
 fn build_opencv_models(
     backend_id: i32,
     target_id: i32,
-) -> Result<(Ptr<FaceDetectorYN>, Ptr<FaceRecognizerSF>, opencv::dnn::Net, opencv::dnn::Net), String> {
+) -> Result<(Ptr<FaceDetectorYN>, Ptr<FaceRecognizerSF>, opencv::dnn::Net), String> {
     let res = ROOT_DIR.join("resources");
     let detector_path = res
         .join("face_detection_yunet_2023mar.onnx")
@@ -874,10 +874,6 @@ fn build_opencv_models(
         .into_owned();
     let liveness_path = res
         .join("face_liveness.onnx")
-        .to_string_lossy()
-        .into_owned();
-    let landmark_path = res
-        .join("face_landmark_68.onnx")
         .to_string_lossy()
         .into_owned();
 
@@ -898,7 +894,7 @@ fn build_opencv_models(
     .map_err(|e| format!("初始化检测器模型失败: {:?}", e))?;
     let det_ms = t0.elapsed().as_millis();
 
-    // recognizer（SFace，最重）与 liveness/landmark 相互独立、全局初始化已完成，**并行加载**——顺序加载 4 个
+    // recognizer（SFace，最重）与 liveness 相互独立、全局初始化已完成，**并行加载**——顺序加载 3 个
     // ONNX 模型是 UI 首次抓拍/一致性验证慢(~4s)的主因；并行后总耗时 ≈ 最慢单个模型（issue #3）。
     let t1 = Instant::now();
     let rec_handle = thread::spawn(move || -> Result<Ptr<FaceRecognizerSF>, String> {
@@ -914,16 +910,6 @@ fn build_opencv_models(
             .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
         Ok(net)
     });
-    // landmark 模型与 recognizer/liveness 无依赖，一并并行加载。
-    let lmk_handle = thread::spawn(move || -> Result<opencv::dnn::Net, String> {
-        let mut net = opencv::dnn::read_net_from_onnx(&landmark_path)
-            .map_err(|e| format!("初始化关键点模型失败: {:?}", e))?;
-        net.set_preferable_backend(backend_id)
-            .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
-        net.set_preferable_target(target_id)
-            .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
-        Ok(net)
-    });
 
     let recognizer = rec_handle
         .join()
@@ -931,12 +917,9 @@ fn build_opencv_models(
     let liveness = live_handle
         .join()
         .map_err(|_| "活体检测加载线程 panic".to_string())??;
-    let landmark = lmk_handle
-        .join()
-        .map_err(|_| "关键点模型加载线程 panic".to_string())??;
 
     info!(
-        "OpenCV 模型加载：detector {}ms(主线程) + recognizer/liveness/landmark 并行 {}ms = 合计 {}ms (backend={}, target={})",
+        "OpenCV 模型加载：detector {}ms(主线程) + recognizer/liveness 并行 {}ms = 合计 {}ms (backend={}, target={})",
         det_ms,
         t1.elapsed().as_millis(),
         t0.elapsed().as_millis(),
@@ -944,7 +927,7 @@ fn build_opencv_models(
         target_id
     );
 
-    Ok((detector, recognizer, liveness, landmark))
+    Ok((detector, recognizer, liveness))
 }
 
 // load_opencv_model 的返回值：告知前端实际生效的推理后端，
@@ -981,7 +964,7 @@ pub fn load_opencv_model(
         .lock()
         .map_err(|e| format!("获取模型加载锁失败 {}", e))?;
 
-    // 四个模型已全部加载则直接返回（保持幂等）。无法得知此前是否回退，
+    // 三个模型已全部加载则直接返回（保持幂等）。无法得知此前是否回退，
     // 按未回退处理，回退提示已在首次加载时给出。
     {
         let app_state = APP_STATE
@@ -990,7 +973,6 @@ pub fn load_opencv_model(
         if app_state.detector.is_some()
             && app_state.recognizer.is_some()
             && app_state.liveness.is_some()
-            && app_state.landmark.is_some()
         {
             return Ok(ModelLoadResult {
                 requested_backend: backend_id,
@@ -1005,19 +987,19 @@ pub fn load_opencv_model(
 
     // Model construction is intentionally outside APP_STATE's critical section.
     // It can take seconds on a cold start, while camera ownership must remain responsive.
-    let (detector, recognizer, liveness, landmark, active_backend, active_target, fell_back, fallback_reason) =
+    let (detector, recognizer, liveness, active_backend, active_target, fell_back, fallback_reason) =
         match build_opencv_models(backend_id, target_id) {
-            Ok((d, r, l, lmk)) => (d, r, l, lmk, backend_id, target_id, false, None),
+            Ok((d, r, l)) => (d, r, l, backend_id, target_id, false, None),
             Err(e) if backend_id != 0 || target_id != 0 => {
                 warn!(
                     "使用推理后端 ({},{}) 加载 OpenCV 模型失败: {}；自动回退到 CPU。\
                      如需使用 Intel NPU，请确认已安装 OpenVINO 运行时及对应的 OpenCV DNN 插件。",
                     backend_id, target_id, e
                 );
-                let (d, r, l, lmk) = build_opencv_models(0, 0).map_err(|cpu_err| {
+                let (d, r, l) = build_opencv_models(0, 0).map_err(|cpu_err| {
                     format!("加载 OpenCV 模型失败（已尝试回退 CPU）：{}", cpu_err)
                 })?;
-                (d, r, l, lmk, 0, 0, true, Some(e))
+                (d, r, l, 0, 0, true, Some(e))
             }
             Err(e) => return Err(e),
         };
@@ -1028,7 +1010,6 @@ pub fn load_opencv_model(
     app_state.detector = Some(OpenCVResource { inner: detector });
     app_state.recognizer = Some(OpenCVResource { inner: recognizer });
     app_state.liveness = Some(OpenCVResource { inner: liveness });
-    app_state.landmark = Some(OpenCVResource { inner: landmark });
 
     Ok(ModelLoadResult {
         requested_backend: backend_id,
@@ -1062,10 +1043,6 @@ pub fn unload_model() -> Result<(), String> {
 
     if app_state.liveness.is_some() {
         app_state.liveness = None;
-    }
-
-    if app_state.landmark.is_some() {
-        app_state.landmark = None;
     }
     Ok(())
 }
