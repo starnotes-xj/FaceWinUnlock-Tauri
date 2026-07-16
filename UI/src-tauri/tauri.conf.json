@@ -48,6 +48,8 @@
       "../resources/face_liveness.onnx": "resources/face_liveness.onnx",
       "../resources/face_recognition_sface_2021dec.onnx": "resources/face_recognition_sface_2021dec.onnx",
       "D:\\OpenCV\\build\\x64\\vc16\\bin\\opencv_world4120.dll": "resources/opencv_world4120.dll",
+      "D:\\OpenCV\\openvino_runtime\\openvino.dll": "openvino.dll",
+      "D:\\OpenCV\\openvino_runtime\\tbb12.dll": "tbb12.dll",
       "D:\\OpenCV\\openvino_runtime\\": "."
     },
     "windows": {

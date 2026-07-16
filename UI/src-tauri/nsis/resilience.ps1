@@ -45,7 +45,7 @@ $LogDir    = Join-Path $InstallDir 'logs'
 $LogFile   = Join-Path $LogDir 'heal.log'
 
 # 受保护的关键文件：安装根目录下、无签名、杀软易误删、且无独立备份。
-$Protected = @('opencv_world4120.dll', 'FaceWinUnlock-Server.exe')
+$Protected = @('opencv_world4120.dll', 'FaceWinUnlock-Server.exe', 'openvino.dll')
 
 function Write-Log([string]$msg) {
     try {

@@ -416,6 +416,15 @@ pub fn classify_broker_context(
         if !browser_password_fill_enabled {
             return BrokerScene::Unknown;
         }
+        // 浏览器登录页（标题含"登录"/"sign in"）且 WebAuthn 监视器 Ready：
+        //   Google/微软账号等登录页会先弹 CredUI 再做 CTAP，此时 active 尚未置起。
+        //   保守跳过人脸，避免登录页误触发面容识别。
+        const LOGIN_AUTH_KEYWORDS: &[&str] = &[
+            "登录 -", "sign in -", "sign-in", "log in -",
+        ];
+        if context.webauthn_ready && title_has(LOGIN_AUTH_KEYWORDS) {
+            return BrokerScene::Passkey;
+        }
         // ★ 监视器 Ready 且无 active（CTAP + 枚举均无）：枚举事件 2250 已为
         //   passkey 弹窗提供 5s 早期 active 窗口。到此 active=false → 必为密码填充。
         if context.webauthn_ready {
