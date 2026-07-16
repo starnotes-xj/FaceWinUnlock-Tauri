@@ -77,6 +77,8 @@
   SetRegView 64
   IfFileExists "$INSTDIR\resources\FaceWinUnlock-Tauri.dll" 0 done_cp_dll
     DetailPrint "正在更新 Credential Provider DLL..."
+    ; 清理旧版安装残留的 .new 文件（之前没重启导致的重命名未完成）
+    Delete /REBOOTOK "$SYSDIR\FaceWinUnlock-Tauri.dll.new"
     ClearErrors
     CopyFiles /SILENT "$INSTDIR\resources\FaceWinUnlock-Tauri.dll" "$SYSDIR\FaceWinUnlock-Tauri.dll"
     ${If} ${Errors}
