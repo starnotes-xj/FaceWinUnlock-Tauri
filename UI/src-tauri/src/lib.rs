@@ -18,7 +18,8 @@ use modules::faces::{
     check_face_from_camera, check_face_from_img, save_face_registration, verify_face,
 };
 use modules::init::{
-    check_admin_privileges, check_camera_status, deploy_core_components, uninstall_init,
+    check_admin_privileges, check_camera_status, cleanup_stale_cp_dll,
+    deploy_core_components, uninstall_init,
 };
 use modules::options::write_to_registry;
 use modules::passkey_plugin::{
@@ -238,6 +239,7 @@ pub fn run() {
                 stop_camera,
                 get_camera,
                 open_directory,
+                cleanup_stale_cp_dll,
                 close_app,
                 check_process_running,
                 delete_process_running,

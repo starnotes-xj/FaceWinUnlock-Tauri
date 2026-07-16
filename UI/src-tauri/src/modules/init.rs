@@ -78,6 +78,38 @@ fn is_elevated() -> bool {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// 清理 System32 下残留的 .new 文件（旧版安装/更新未重启留下的）
+// ──────────────────────────────────────────────────────────────────────────────
+#[tauri::command]
+pub fn cleanup_stale_cp_dll() -> Result<CustomResult, CustomResult> {
+    if !is_elevated() {
+        return Err(CustomResult::error(
+            Some("需要管理员权限才能清理 System32 文件".to_string()),
+            None,
+        ));
+    }
+    let sys32 = system32_dir();
+    let mut cleaned = Vec::new();
+    for name in &["FaceWinUnlock-Tauri.dll.new"] {
+        let path = sys32.join(name);
+        if path.exists() {
+            match std::fs::remove_file(&path) {
+                Ok(_) => cleaned.push(name.to_string()),
+                Err(e) => log::warn!("清理 System32 残留失败: {} - {}", name, e),
+            }
+        }
+    }
+    Ok(CustomResult::success(
+        Some(if cleaned.is_empty() {
+            "没有需要清理的残留文件".to_string()
+        } else {
+            format!("已清理: {}", cleaned.join(", "))
+        }),
+        Some(json!({"cleaned": cleaned})),
+    ))
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // 检查摄像头是否可用
 // ──────────────────────────────────────────────────────────────────────────────
 #[tauri::command]

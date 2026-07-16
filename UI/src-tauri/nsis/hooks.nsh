@@ -91,6 +91,14 @@
     WriteRegStr HKCR "CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}" "" "FaceWinUnlock-Tauri"
     WriteRegStr HKCR "CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}\InprocServer32" "" "$SYSDIR\FaceWinUnlock-Tauri.dll"
     WriteRegStr HKCR "CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}\InprocServer32" "ThreadingModel" "Apartment"
+    ; credentialuibroker.exe 可能已加载旧 DLL 到内存，需重启才生效
+    nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq credentialuibroker.exe" /NH'
+    Pop $2
+    ${If} $2 == 0
+      MessageBox MB_YESNO|MB_ICONINFORMATION "Credential Provider DLL 已更新，但系统进程正在使用旧版本。$\n$\n人脸识别和 Google 登录等功能需重启后生效。$\n$\n是否立即重启？" IDNO cp_no_reboot
+      Reboot
+      cp_no_reboot:
+    ${EndIf}
   done_cp_dll:
 
   ; 让安装后的主程序默认按管理员权限启动。主 EXE 也会嵌入 requireAdministrator manifest，
