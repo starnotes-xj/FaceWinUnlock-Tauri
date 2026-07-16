@@ -115,11 +115,33 @@ function Register-HealerTask {
   </Actions>
 </Task>
 "@
+    # 方法一：Register-ScheduledTask（PowerShell 原生，但可能被火绒 HIPS 拦截）
     try {
-        Register-ScheduledTask -TaskName $TaskName -Xml $xml -Force | Out-Null
-        Write-Log "Setup: 已注册自愈计划任务 $TaskName（开机+登录+每15分钟）"
+        Register-ScheduledTask -TaskName $TaskName -Xml $xml -Force -ErrorAction Stop | Out-Null
+        Write-Log "Setup: 已通过 Register-ScheduledTask 注册自愈计划任务 $TaskName"
+        return
     } catch {
-        Write-Log "Setup: 注册计划任务失败（需管理员权限）：$($_.Exception.Message)"
+        Write-Log "Setup: Register-ScheduledTask 失败（可能被安全软件拦截），尝试 schtasks.exe 回退：$($_.Exception.Message)"
+    }
+
+    # 方法二：schtasks.exe 回退（绕过 PowerShell HIPS，直接在 NSIS 提权进程调用）
+    # 火绒 HIPS 主要拦截 PowerShell cmdlet，对 schtasks.exe 命令行工具通常放行。
+    try {
+        $xmlPath = Join-Path $env:TEMP ('fwu_task_{0}.xml' -f [guid]::NewGuid().ToString('N'))
+        # schtasks /Create /XML 需要 UTF-16 LE 编码（与 Rust 侧 add_scheduled_task 一致）
+        $utf16 = [System.Text.Encoding]::Unicode.GetBytes($xml)
+        [System.IO.File]::WriteAllBytes($xmlPath, $utf16)
+        $result = Start-Process -FilePath 'schtasks.exe' `
+            -ArgumentList '/Create', '/TN', $TaskName, '/XML', "`"$xmlPath`"", '/F' `
+            -WindowStyle Hidden -Wait -NoNewWindow -PassThru
+        Remove-Item $xmlPath -Force -ErrorAction SilentlyContinue
+        if ($result.ExitCode -eq 0) {
+            Write-Log "Setup: 已通过 schtasks.exe 回退注册自愈计划任务 $TaskName"
+        } else {
+            Write-Log "Setup: schtasks.exe 回退也失败（exit code $($result.ExitCode)）。请手动将安装目录加入安全软件信任区。"
+        }
+    } catch {
+        Write-Log "Setup: schtasks.exe 回退异常：$($_.Exception.Message)"
     }
 }
 
