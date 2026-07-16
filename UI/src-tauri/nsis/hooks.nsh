@@ -15,6 +15,18 @@
 !macro NSIS_HOOK_POSTINSTALL
   CreateDirectory "$INSTDIR\logs"
 
+  ; 探测 PowerShell 7+ (pwsh.exe)，优先使用；不存在则回退到 PowerShell 5.1
+  ; pwsh 对 UTF-8 无 BOM 文件也能正确解析，避免中文系统 GBK 乱码
+  StrCpy $R9 "powershell.exe"
+  nsExec::ExecToStack 'pwsh.exe -NoProfile -Command "exit 0"'
+  Pop $0
+  ${If} $0 == 0
+    StrCpy $R9 "pwsh.exe"
+    DetailPrint "检测到 PowerShell 7+，优先使用 pwsh.exe"
+  ${Else}
+    DetailPrint "未检测到 pwsh.exe，使用 Windows PowerShell 5.1"
+  ${EndIf}
+
   ; 运行时文件部署到安装根目录（= 主 EXE 同目录 = Windows DLL 搜索路径起点）。
   ; opencv_world4120.dll 与 FaceWinUnlock-Server.exe 改由 resources/ 子目录打包：
   ; Tauri v2 对「映射到安装根的单文件」打包不稳定，这两个文件曾整体从 NSIS 安装包
@@ -36,7 +48,7 @@
   ; runtime-backup.zip；②注册 FaceWinUnlockHealer 计划任务（开机/登录/每15分钟检测缺失即恢复）；
   ; ③尝试把安装目录加入 Windows Defender 排除。
   DetailPrint "正在配置运行时文件自愈与杀软排除..."
-  nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\nsis\resilience.ps1" -Mode Setup -InstallDir "$INSTDIR"'
+  nsExec::ExecToStack '$R9 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\nsis\resilience.ps1" -Mode Setup -InstallDir "$INSTDIR"'
   Pop $0
   ; 验证自愈计划任务是否注册成功（火绒 HIPS 可能拦截 Register-ScheduledTask）
   nsExec::ExecToStack 'schtasks /Query /TN "FaceWinUnlockHealer"'
@@ -135,7 +147,7 @@
   IfFileExists "$INSTDIR\scripts\uninstall-passkey-plugin.ps1" 0 passkey_uninstall_inline
     ; app 卸载默认保留通行密钥（-PreserveApplicationData），便于重装后免重新注册；
     ; 彻底清除由应用内「彻底卸载」选项 (uninstall_passkey_plugin purge=true) 提供。
-    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\scripts\uninstall-passkey-plugin.ps1" -CertificatePath "$INSTDIR\FaceWinUnlock-Passkey.cer" -PreserveApplicationData'
+    nsExec::ExecToStack '$R9 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\scripts\uninstall-passkey-plugin.ps1" -CertificatePath "$INSTDIR\FaceWinUnlock-Passkey.cer" -PreserveApplicationData'
     Pop $0
     ${If} $0 == 0
       DetailPrint "FaceWinUnlock Passkey 插件已卸载。"
@@ -144,7 +156,7 @@
     ${EndIf}
     Goto passkey_uninstall_done
   passkey_uninstall_inline:
-    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = \"SilentlyContinue\"; try { Get-Process -Name PasskeyManager -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; $cmd = Get-Command Remove-AppxPackage -ErrorAction SilentlyContinue; if ($cmd) { $removeArgs = @{ ErrorAction = \"SilentlyContinue\" }; if ($cmd.Parameters.ContainsKey(\"PreserveApplicationData\")) { $removeArgs[\"PreserveApplicationData\"] = $true; Get-AppxPackage -Name FaceWinUnlock.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage @removeArgs; Get-AppxPackage -Name Contoso.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage @removeArgs } } } catch {}; exit 0"'
+    nsExec::ExecToStack '$R9 -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = \"SilentlyContinue\"; try { Get-Process -Name PasskeyManager -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; $cmd = Get-Command Remove-AppxPackage -ErrorAction SilentlyContinue; if ($cmd) { $removeArgs = @{ ErrorAction = \"SilentlyContinue\" }; if ($cmd.Parameters.ContainsKey(\"PreserveApplicationData\")) { $removeArgs[\"PreserveApplicationData\"] = $true; Get-AppxPackage -Name FaceWinUnlock.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage @removeArgs; Get-AppxPackage -Name Contoso.PasskeyManager -ErrorAction SilentlyContinue | Remove-AppxPackage @removeArgs } } } catch {}; exit 0"'
     Pop $0
     ${If} $0 == 0
       DetailPrint "FaceWinUnlock Passkey 插件已卸载。"
@@ -201,13 +213,13 @@
   Pop $0
   ; 杀软误删自愈计划任务与 Defender 排除（POSTINSTALL 由 resilience.ps1 -Mode Setup 注册）
   IfFileExists "$INSTDIR\nsis\resilience.ps1" 0 resilience_uninstall_fallback
-    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\nsis\resilience.ps1" -Mode Teardown -InstallDir "$INSTDIR"'
+    nsExec::ExecToStack '$R9 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\nsis\resilience.ps1" -Mode Teardown -InstallDir "$INSTDIR"'
     Pop $0
     Goto resilience_uninstall_done
   resilience_uninstall_fallback:
     nsExec::ExecToStack 'schtasks /Delete /TN "FaceWinUnlockHealer" /F'
     Pop $0
-    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Remove-MpPreference -ExclusionPath \"$INSTDIR\" -ErrorAction SilentlyContinue"'
+    nsExec::ExecToStack '$R9 -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Remove-MpPreference -ExclusionPath \"$INSTDIR\" -ErrorAction SilentlyContinue"'
     Pop $0
   resilience_uninstall_done:
 
@@ -218,7 +230,7 @@
 
   ; ─── 4. 开始菜单磁贴备份（HKCU AppListBackup）────────────────────
   IfFileExists "$INSTDIR\nsis\cleanup_tiles.ps1" 0 skip_tile_cleanup
-    nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\nsis\cleanup_tiles.ps1"'
+    nsExec::ExecToStack '$R9 -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\nsis\cleanup_tiles.ps1"'
     Pop $0
   skip_tile_cleanup:
 
