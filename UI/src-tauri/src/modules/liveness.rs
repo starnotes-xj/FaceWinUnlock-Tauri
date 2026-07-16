@@ -202,7 +202,7 @@ pub fn extract_landmarks_pipnet(
         return None;
     }
 
-    let cls_map = outputs.get(0)?; // 形状 (1, 68, 64, 64)
+    let cls_map = outputs.get(0).ok()?; // 形状 (1, 68, 64, 64)
     let feature_size = 64i32; // 256/4 stride
     let num_landmarks = 68i32;
     let stride = 256.0 / feature_size as f32;
@@ -254,8 +254,8 @@ pub fn extract_landmarks_pipnet(
 
     // 同时提取偏移量做亚像素精修（若可用）
     if outputs.len() >= 3 {
-        let off_x = outputs.get(1)?;
-        let off_y = outputs.get(2)?;
+        let off_x = outputs.get(1).ok()?;
+        let off_y = outputs.get(2).ok()?;
         if let (Ok(ox), Ok(oy)) = (off_x.reshape(1, num_landmarks), off_y.reshape(1, num_landmarks)) {
             for c in 0..total {
                 if let (Ok(rx), Ok(ry)) = (ox.row(c), oy.row(c)) {
