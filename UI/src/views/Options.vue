@@ -214,6 +214,15 @@
 		}
 	}
 
+	async function cleanupStaleDll() {
+		try {
+			const result: any = await invoke('cleanup_stale_cp_dll')
+			ElMessage.success(result?.msg || '清理完成')
+		} catch (error) {
+			ElMessage.error(formatObjectString('清理失败：', error))
+		}
+	}
+
 	// 首次打开「软件配置」时，避免在 setup 同步阶段同时 spawn 多个外部进程
 	//（schtasks ×2 + 命名管道 + PowerShell Get-AppxPackage）与首屏渲染竞争造成明显卡顿：
 	// 统一移到 onMounted + nextTick，让首屏先绘制完成，再分批加载各项状态；
@@ -1060,7 +1069,12 @@
 							</p>
 							<el-divider />
 							<div class="danger-item">
-								<span>卸载核心组件和服务</span>
+								<span>清理 System32 旧版 DLL 残留（.new）</span>
+                  <el-button type="warning" size="small" plain @click="cleanupStaleDll">点击清理</el-button>
+                </div>
+                <el-divider />
+                <div class="danger-item">
+                  <span>卸载核心组件和服务</span>
 								<el-button type="danger" size="small" @click="uninstallDll">点击卸载</el-button>
 							</div>
 							<p class="danger-footer">
