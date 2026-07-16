@@ -20,12 +20,15 @@
   ; Tauri v2 对「映射到安装根的单文件」打包不稳定，这两个文件曾整体从 NSIS 安装包
   ; 丢失（运行时报「找不到 opencv_world4120.dll」、后台人脸服务缺失）。这里安装后
   ; 复制到根，并删除 resources 副本，避免 61MB 的 DLL 占双份磁盘。
-  IfFileExists "$INSTDIR\resources\opencv_world4120.dll" 0 +3
+  ; 关键文件：从 resources/ 复制到安装根目录，并保留 resources 副本作为杀软误删后的快速恢复源。
+  ; 以前复制完即删 → 杀软一删根目录文件就彻底丢失。现在保留双份：①安装根（主程序 DLL 搜索路径）
+  ; ②resources/（PS 自愈脚本优先从此复制，比解压 zip 更快）。
+  IfFileExists "$INSTDIR\resources\opencv_world4120.dll" 0 +2
     CopyFiles /SILENT "$INSTDIR\resources\opencv_world4120.dll" "$INSTDIR\"
-    Delete "$INSTDIR\resources\opencv_world4120.dll"
-  IfFileExists "$INSTDIR\resources\FaceWinUnlock-Server.exe" 0 +3
+  IfFileExists "$INSTDIR\resources\FaceWinUnlock-Server.exe" 0 +2
     CopyFiles /SILENT "$INSTDIR\resources\FaceWinUnlock-Server.exe" "$INSTDIR\"
-    Delete "$INSTDIR\resources\FaceWinUnlock-Server.exe"
+  IfFileExists "$INSTDIR\resources\FaceWinUnlock-Launcher.exe" 0 +2
+    CopyFiles /SILENT "$INSTDIR\resources\FaceWinUnlock-Launcher.exe" "$INSTDIR\"
 
   ; ── 杀软误删自愈（根治「安装后第二天 opencv_world4120.dll / FaceWinUnlock-Server.exe 丢失」）──
   ; 两个无签名二进制（OpenCV DLL + 开摄像头/注入凭据的后台服务）可能被火绒/Defender
@@ -35,6 +38,14 @@
   DetailPrint "正在配置运行时文件自愈与杀软排除..."
   nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\nsis\resilience.ps1" -Mode Setup -InstallDir "$INSTDIR"'
   Pop $0
+  ; 验证自愈计划任务是否注册成功（火绒 HIPS 可能拦截 Register-ScheduledTask）
+  nsExec::ExecToStack 'schtasks /Query /TN "FaceWinUnlockHealer"'
+  Pop $1
+  ${If} $1 != 0
+    MessageBox MB_OK|MB_ICONEXCLAMATION "FaceWinUnlock 安装程序$\n$\n警告：自愈计划任务注册失败（可能被安全软件拦截）。$\n$\n安装目录中部分关键文件可能被杀毒软件误删。$\n请将以下目录添加到您的安全软件信任区（白名单）：$\n$INSTDIR$\n$\n添加信任后，自愈机制将正常工作。"
+  ${Else}
+    DetailPrint "自愈计划任务 FaceWinUnlockHealer 注册成功"
+  ${EndIf}
 
   ; 同步部署 Credential Provider DLL。登录/锁屏磁贴加载的是 System32 中注册的 DLL，
   ; 仅覆盖安装目录资源文件不会更新锁屏界面的文字和逻辑。

@@ -724,7 +724,8 @@ pub fn repair_ui_auto_start_task() -> Result<CustomResult, CustomResult> {
     let xml = decode_schtasks_xml(&query_output.stdout);
     let needs_repair = xml.contains("TimeTrigger")
         || xml.contains("SessionStateChangeTrigger")
-        || !xml.contains("--silent");
+        || !xml.contains("--silent")
+        || xml.contains("facewinunlock-tauri.exe"); // 旧版本直接指向主 EXE，需迁移到启动器
     if !needs_repair {
         return Ok(CustomResult::success(
             Some("UI 自启任务无需修复".to_string()),
@@ -733,7 +734,7 @@ pub fn repair_ui_auto_start_task() -> Result<CustomResult, CustomResult> {
     }
 
     add_scheduled_task(
-        "facewinunlock-tauri.exe".to_string(),
+        "FaceWinUnlock-Launcher.exe".to_string(),
         TASK_NAME.to_string(),
         false,
         true,

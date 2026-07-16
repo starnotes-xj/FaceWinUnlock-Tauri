@@ -467,9 +467,9 @@ fn try_blink_detect(frame: &Mat, faces: &Mat, blink_detector: &mut BlinkDetector
     let Ok(face_crop_mat) = face_crop.try_clone() else { return };
 
     let landmarks = {
-        let Ok(state) = crate::APP_STATE.lock() else { return };
-        let Some(net) = state.landmark.as_ref() else { return };
-        let Some(lm) = extract_landmarks_pipnet(&net.inner, &face_crop_mat) else { return };
+        let Ok(mut state) = crate::APP_STATE.lock() else { return };
+        let Some(net) = state.landmark.as_mut() else { return };
+        let Some(lm) = extract_landmarks_pipnet(&mut net.inner, &face_crop_mat) else { return };
         lm
     };
 

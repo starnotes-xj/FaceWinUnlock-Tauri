@@ -329,7 +329,7 @@ jobs:
           cargo clean -p opencv
           # 主构建：Server DLL + Unlock EXE。Passkey 登录走后续构建的官方 Provider MSIX；
           # 已删除的浏览器接管/密钥捕获实验不属于工作区。
-          cargo build --release -p winlogon -p unlock
+          cargo build --release -p winlogon -p unlock -p launcher
           # 保留 .cargo/config.toml；后续 Tauri installer 会在 UI/src-tauri 再次调用 Cargo。
 
       - name: Verify runtime binaries
@@ -337,10 +337,13 @@ jobs:
         run: |
           $dll = "target\release\FaceWinUnlock_Tauri.dll"
           $exe = "target\release\FaceWinUnlock-Server.exe"
+          $launcher = "target\release\FaceWinUnlock-Launcher.exe"
           if (-not (Test-Path $dll)) { throw "Missing: $dll" }
           if (-not (Test-Path $exe)) { throw "Missing: $exe" }
+          if (-not (Test-Path $launcher)) { throw "Missing: $launcher" }
           Write-Host "Server DLL: $((Get-Item $dll).Length) bytes"
           Write-Host "Unlock EXE: $((Get-Item $exe).Length) bytes"
+          Write-Host "Launcher EXE: $((Get-Item $launcher).Length) bytes"
 
       - name: Ensure UWP build tools for Passkey plugin
         shell: pwsh
@@ -520,6 +523,7 @@ jobs:
           # 又被改名落到 resources\FaceWinUnlock-Tauri.dll，正确更新需重跑 deploy_core_components。
           $names = @(
             "FaceWinUnlock-Server.exe",
+            "FaceWinUnlock-Launcher.exe",
             "FaceWinUnlock-Passkey.msix",
             "FaceWinUnlock-Passkey.cer"
           )

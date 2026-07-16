@@ -1,0 +1,27 @@
+[package]
+name = "launcher"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "FaceWinUnlock-Launcher"
+path = "src/main.rs"
+
+# 此启动器不依赖 opencv，仅使用 win32 API 做 DLL 存在性检查 + 自愈 + 启动主程序。
+# 为保持二进制体积最小且无 opencv 导入，这里只引入 windows crate。
+[dependencies]
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
+windows-core = "0.59"
+
+[profile.release]
+opt-level = "s"   # 优化体积
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

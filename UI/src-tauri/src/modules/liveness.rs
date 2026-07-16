@@ -169,7 +169,7 @@ impl BlinkDetector {
 /// 返回 136 个 f32（68 个 (x,y) 坐标对，原点为人脸裁剪图的左上角）。
 /// 若模型缺失或推理失败则返回 `None`，调用方应优雅回退。
 pub fn extract_landmarks_pipnet(
-    net: &dnn::Net,
+    net: &mut dnn::Net,
     face_crop: &Mat,
 ) -> Option<Vec<f32>> {
     // PIPNet 期望 256x256 RGB 输入，归一化至 [0,1]
