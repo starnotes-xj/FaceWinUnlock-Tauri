@@ -374,6 +374,12 @@ pub fn classify_broker_context(
         "填充密码", "填充您的密码", "填充你的密码", "fill password",
         "fill your password", "filling passwords", "autofill password",
     ];
+    // 浏览器登录页标题关键词（非密码填充）。Google/微软等账号登录页会先弹 CredUI
+    // 再启动 CTAP 事务（MakeCredential/GetAssertion），届时 webauthn_active 尚未置起。
+    // 保守跳过人脸，避免登录页误触发面容识别。
+    const LOGIN_AUTH_KEYWORDS: &[&str] = &[
+        "登录 -", "sign in -", "sign-in", "log in -", "log in to",
+    ];
 
     // ① 设置 / PIN / 指纹录入：靠触发进程识别（结构信号）。任何情况都不在此走人脸。
     if has_process(SETTINGS_PROCESSES) {
@@ -413,17 +419,13 @@ pub fn classify_broker_context(
             return BrokerScene::Password;
         }
         // 其余浏览器 CredUI = 密码填充。受 CREDUI_BROWSER_PASSWORD_FILL 开关控制。
-        if !browser_password_fill_enabled {
-            return BrokerScene::Unknown;
-        }
-        // 浏览器登录页（标题含"登录"/"sign in"）且 WebAuthn 监视器 Ready：
-        //   Google/微软账号等登录页会先弹 CredUI 再做 CTAP，此时 active 尚未置起。
-        //   保守跳过人脸，避免登录页误触发面容识别。
-        const LOGIN_AUTH_KEYWORDS: &[&str] = &[
-            "登录 -", "sign in -", "sign-in", "log in -",
-        ];
+        // 登录页（标题含"登录"/"sign in"）且监视器 Ready → 跳过人脸，不受开关影响。
+        // Google/微软账号登录先弹 CredUI 再启 CTAP，此时 active 尚未置起。
         if context.webauthn_ready && title_has(LOGIN_AUTH_KEYWORDS) {
             return BrokerScene::Passkey;
+        }
+        if !browser_password_fill_enabled {
+            return BrokerScene::Unknown;
         }
         // ★ 监视器 Ready 且无 active（CTAP + 枚举均无）：枚举事件 2250 已为
         //   passkey 弹窗提供 5s 早期 active 窗口。到此 active=false → 必为密码填充。
@@ -808,10 +810,10 @@ mod shared_credentials_tests {
     }
 
     #[test]
-    fn ready_monitor_with_browser_triggers_fill_even_without_keywords() {
-        // 旧架构：分类阶段不依赖标题关键词——ready + browser 即参与，
-        // 由 debounce 和枚举事件在后续流程中拦截 passkey。
-        let qq = context(
+    fn login_page_with_ready_monitor_skips_face() {
+        // 登录页 + 监视器 Ready → 即使 active=false（CTAP 未启），标题含"登录 -"
+        // 也应跳过人脸。Google/微软账号登录先弹 CredUI 再启 CTAP 事务。
+        let google_login = context(
             "windows 安全中心 登录 - google 账号 - google chrome",
             &["credentialuibroker.exe", "chrome.exe"],
             true,
@@ -819,8 +821,13 @@ mod shared_credentials_tests {
             false,
         );
         assert_eq!(
-            classify_broker_context(&qq, true),
-            BrokerScene::BrowserPasswordFill
+            classify_broker_context(&google_login, true),
+            BrokerScene::Passkey
+        );
+        // 开关关闭时仍应跳过。
+        assert_eq!(
+            classify_broker_context(&google_login, false),
+            BrokerScene::Passkey
         );
     }
 
