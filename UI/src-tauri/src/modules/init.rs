@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use opencv::videoio::{VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst};
+use serde_json::json;
 use tauri_plugin_log::log;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
