@@ -51,12 +51,21 @@ impl MotionDetector {
         Ok(motion)
     }
 
-    /// 判断是否为静态照片（连续 10+ 帧运动量 < 0.02）。
+    /// 判断是否为静态照片（最近 10 帧中 ≥8 帧运动量 < 0.04）。
+    /// 采用多数投票而非全票通过，容忍手持照片的偶发微小抖动。
+    /// 真人面部持续存在微运动，低运动帧比例不会超过 80%。
     pub fn is_likely_photo(&self) -> bool {
         if self.motion_history.len() < 10 {
             return false;
         }
-        self.motion_history.iter().rev().take(10).all(|&v| v < 0.02)
+        let low_count = self
+            .motion_history
+            .iter()
+            .rev()
+            .take(10)
+            .filter(|&&v| v < 0.04)
+            .count();
+        low_count >= 8
     }
 }
 
@@ -364,11 +373,37 @@ mod tests {
             Mat::new_rows_cols_with_default(50, 50, opencv::core::CV_8UC3, Scalar::all(128.0))
                 .unwrap();
         let mut md = MotionDetector::new();
-        // 连续 12 帧完全相同 → 运动量 ≈ 0
-        for _ in 0..12 {
+        // 连续 10 帧完全相同 → 10/10 < 0.04 → ≥80% → 照片
+        for _ in 0..10 {
             md.update(&frame).unwrap();
         }
-        assert!(md.is_likely_photo(), "连续 12 帧完全相同应被判定为照片");
+        assert!(md.is_likely_photo(), "10/10 低运动帧应被判定为照片");
+    }
+
+    #[test]
+    fn motion_detector_occasional_jitter_not_photo() {
+        let dark = Mat::new_rows_cols_with_default(50, 50, opencv::core::CV_8UC3, Scalar::all(30.0))
+            .unwrap();
+        let bright =
+            Mat::new_rows_cols_with_default(50, 50, opencv::core::CV_8UC3, Scalar::all(200.0))
+                .unwrap();
+        let mut md = MotionDetector::new();
+        // 7 帧静止 + 3 帧抖动 → 7/10 < 0.04 → <80% → 不是照片
+        for _ in 0..3 {
+            md.update(&dark).unwrap();
+        }
+        md.update(&bright).unwrap(); // jitter
+        for _ in 0..3 {
+            md.update(&dark).unwrap();
+        }
+        md.update(&bright).unwrap(); // jitter
+        md.update(&dark).unwrap();
+        md.update(&bright).unwrap(); // jitter
+                                      // 7/10 low = 70% < 80% threshold
+        assert!(
+            !md.is_likely_photo(),
+            "7/10 低运动帧（70%）不应被判为照片（阈值 80%）"
+        );
     }
 
     #[test]
