@@ -862,7 +862,7 @@ fn stop_unlock_service() {
 fn build_opencv_models(
     backend_id: i32,
     target_id: i32,
-) -> Result<(Ptr<FaceDetectorYN>, Ptr<FaceRecognizerSF>, opencv::dnn::Net, opencv::dnn::Net), String> {
+) -> Result<(Ptr<FaceDetectorYN>, Ptr<FaceRecognizerSF>, opencv::dnn::Net, Option<opencv::dnn::Net>), String> {
     let res = ROOT_DIR.join("resources");
     let detector_path = res
         .join("face_detection_yunet_2023mar.onnx")
@@ -931,9 +931,20 @@ fn build_opencv_models(
     let liveness = live_handle
         .join()
         .map_err(|_| "活体检测加载线程 panic".to_string())??;
-    let landmark = lmk_handle
-        .join()
-        .map_err(|_| "关键点模型加载线程 panic".to_string())??;
+    let landmark = match lmk_handle.join() {
+        Ok(Ok(net)) => {
+            info!("关键点模型加载成功");
+            Some(net)
+        }
+        Ok(Err(e)) => {
+            warn!("关键点模型加载失败（活体眨眼检测不可用，微运动检测仍正常工作）: {}", e);
+            None
+        }
+        Err(_) => {
+            warn!("关键点模型加载线程 panic（活体眨眼检测不可用，微运动检测仍正常工作）");
+            None
+        }
+    };
 
     info!(
         "OpenCV 模型加载：detector {}ms(主线程) + recognizer/liveness/landmark 并行 {}ms = 合计 {}ms (backend={}, target={})",
@@ -990,7 +1001,6 @@ pub fn load_opencv_model(
         if app_state.detector.is_some()
             && app_state.recognizer.is_some()
             && app_state.liveness.is_some()
-            && app_state.landmark.is_some()
         {
             return Ok(ModelLoadResult {
                 requested_backend: backend_id,
@@ -1028,7 +1038,7 @@ pub fn load_opencv_model(
     app_state.detector = Some(OpenCVResource { inner: detector });
     app_state.recognizer = Some(OpenCVResource { inner: recognizer });
     app_state.liveness = Some(OpenCVResource { inner: liveness });
-    app_state.landmark = Some(OpenCVResource { inner: landmark });
+    app_state.landmark = landmark.map(|inner| OpenCVResource { inner });
 
     Ok(ModelLoadResult {
         requested_backend: backend_id,
