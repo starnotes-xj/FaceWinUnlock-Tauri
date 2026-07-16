@@ -79,7 +79,7 @@ fn is_elevated() -> bool {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// 清理 System32 下残留的 .new 文件（旧版安装/更新未重启留下的）
+// 清理 System32 下残留的 .new / .bak / .old 文件（旧版热替换/未重启留下的）
 // ──────────────────────────────────────────────────────────────────────────────
 #[tauri::command]
 pub fn cleanup_stale_cp_dll() -> Result<CustomResult, CustomResult> {
@@ -91,12 +91,27 @@ pub fn cleanup_stale_cp_dll() -> Result<CustomResult, CustomResult> {
     }
     let sys32 = system32_dir();
     let mut cleaned = Vec::new();
+    // 精确匹配固定文件名
     for name in &["FaceWinUnlock-Tauri.dll.new"] {
         let path = sys32.join(name);
         if path.exists() {
             match std::fs::remove_file(&path) {
                 Ok(_) => cleaned.push(name.to_string()),
                 Err(e) => log::warn!("清理 System32 残留失败: {} - {}", name, e),
+            }
+        }
+    }
+    // 匹配通配符后缀：.bak / .old（热替换备份）
+    if let Ok(entries) = std::fs::read_dir(&sys32) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("FaceWinUnlock-Tauri.dll.")
+                && (name.ends_with(".bak") || name.ends_with(".old"))
+            {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(_) => cleaned.push(name),
+                    Err(e) => log::warn!("清理 System32 残留失败: {} - {}", name, e),
+                }
             }
         }
     }
