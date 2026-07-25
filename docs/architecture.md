@@ -20,6 +20,11 @@ flowchart LR
 
 The UI owns enrollment, settings, deployment, logs, updates, and Passkey management. It stores application state in SQLite and coordinates camera ownership before enrollment or verification.
 
+When enabled, the enrollment consistency check runs a short, local, passive RGB
+presentation-attack check. It uses model-correct face preprocessing and median
+fusion across a small frame burst; it does not ask the user to blink, turn, or
+perform another challenge. The check is not part of lock-screen recognition.
+
 ### Credential Provider
 
 The DLL runs inside Windows authentication hosts. It advertises a tile only in configured scenarios, requests recognition from Unlock, receives a matched account credential, and serializes it for Windows.
@@ -71,7 +76,7 @@ The Active check is repeated in `SetUsageScenario`, `Advise`, before pipe connec
 - Face records, options, and configured Windows credentials remain local.
 - The generic Credential Provider briefly handles account credentials to log on; it must never log serialization bytes or secret values.
 - Passkey private keys are per-user Software KSP keys. Metadata backup is under `%ProgramData%\facewinunlock-tauri\PasskeyBackup`.
-- Ordinary RGB face recognition is a convenience layer, not equivalent to Windows Hello biometric assurance.
+- Ordinary RGB face recognition and RGB passive liveness are convenience layers, not equivalent to Windows Hello biometric assurance.
 
 ## Removed Routes
 

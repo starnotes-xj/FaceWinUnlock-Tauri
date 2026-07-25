@@ -117,10 +117,7 @@ export default {
     livenessPass: 'Liveness check passed',
     livenessFail: 'Liveness check failed',
     livenessScore: 'Liveness Score',
-    motionDetection: 'Motion Detection',
-    motionPass: 'Motion detection passed',
-    motionFail: 'Possible photo attack: no natural facial micro-motion detected',
-    livenessDesc: 'Passive micro-motion detection (auto photo-proof) + deep learning model assist, no user action required',
+    livenessDesc: 'A local model automatically analyzes a short burst of face texture; no blink, head turn, or mouth movement required',
   },
   options: {
     title: 'Preferences',

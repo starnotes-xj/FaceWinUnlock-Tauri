@@ -56,7 +56,6 @@ pub struct AppState {
     pub detector: Option<OpenCVResource<Ptr<FaceDetectorYN>>>,
     pub recognizer: Option<OpenCVResource<Ptr<FaceRecognizerSF>>>,
     pub liveness: Option<OpenCVResource<opencv::dnn::Net>>,
-    pub landmark: Option<OpenCVResource<opencv::dnn::Net>>,
     pub camera: Option<OpenCVResource<VideoCapture>>,
 }
 
@@ -69,7 +68,6 @@ lazy_static::lazy_static! {
         detector: None,
         recognizer: None,
         liveness: None,
-        landmark: None,
         camera: None,
     });
 

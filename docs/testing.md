@@ -55,6 +55,35 @@ Run these first. Stop the release if any item fails.
 
 Repeat once with NVIDIA Broadcast or another virtual camera. A longer warmup is acceptable, but frames must stabilize and the UI must still release the device on exit.
 
+## Enrollment Passive Liveness And Issue #30
+
+Use the default real-confidence threshold `0.50` on CPU first. Repeat the live
+and attack sets on Windows 10 22H2 as reported in issue #30, then on a current
+Windows 11 machine. Record the physical camera or virtual-camera source, light,
+display/printer used for attacks, and every score.
+
+| Case | Minimum repetitions | Expected result |
+|---|---:|---|
+| Live face, normal indoor light | 10 | Consistency check completes without any action prompt |
+| Live face, deliberately still | 10 | Stillness alone is never classified as a photo |
+| Live face, weak or side light | 10 | No crash/model-contract error; record false rejects |
+| Face near each frame edge | 5 per edge | Reflection-padded crop remains valid |
+| Printed enrolled-face photo | 10 | Rejected by passive liveness |
+| Enrolled-face image on phone/monitor | 10 per display | Rejected; include moved and stationary display |
+| Prerecorded face video | 10 | Record accepts as a security failure |
+| Camera drops one or two detections | 10 | Check recovers when at least three valid samples remain |
+| Missing/corrupt liveness model | 1 | Clear unavailable/error result; never silently pass |
+
+The interaction must not ask for blinking, head movement, mouth movement, or a
+multi-second rPPG wait. A virtual-camera pass is a compatibility result, not
+proof of spoof resistance: virtual-camera injection and high-quality replay
+remain outside the assurance of an ordinary RGB model.
+
+Issue #30 is ready to close only when the live set no longer fails from the
+former `80x80` input mismatch, the packaged model hash matches the documented
+contract, and print/display attacks have been run on real hardware. Unit tests
+cover preprocessing and output semantics but do not replace the attack matrix.
+
 ## Lock, Unlock, And Issue #26
 
 Run each case at least six consecutive times:

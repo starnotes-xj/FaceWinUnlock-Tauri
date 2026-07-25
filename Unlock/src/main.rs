@@ -33,7 +33,6 @@ use std::{
 
 use opencv::{
     core::{Mat, Ptr, Size},
-    imgproc,
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     prelude::*,
     videoio::{self, VideoCapture},
@@ -1999,11 +1998,6 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
                 let hard_deadline = Instant::now() + Duration::from_secs(10);
                 let mut no_face_since: Option<Instant> = None;
-                const MOTION_WINDOW: usize = 30;
-                const MOTION_THRESHOLD: f64 = 0.04;
-                const MOTION_LOW_RATIO: f64 = 0.7; // 70%+ 低运动 → 照片
-                let mut prev_gray: Option<Mat> = None;
-                let mut motion_history: Vec<f64> = Vec::with_capacity(MOTION_WINDOW);
                 while Instant::now() < hard_deadline {
                     if state.should_exit.load(Ordering::SeqCst)
                         || state.release_requested.load(Ordering::SeqCst)
@@ -2025,38 +2019,6 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                         continue;
                     }
                     let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
-
-                    // 微运动检测：防止照片攻击（在昂贵的 DNN 推理之前运行）
-                    // 使用滑动窗口 + 多数投票，容忍手持照片的偶发抖动
-                    let mut gray = Mat::default();
-                    if let Ok(_) = imgproc::cvt_color(&frame, &mut gray, imgproc::COLOR_BGR2GRAY, 0, opencv::core::AlgorithmHint::ALGO_HINT_DEFAULT) {
-                        if let Some(ref prev) = prev_gray {
-                            let mut diff = Mat::default();
-                            if let Ok(_) = opencv::core::absdiff(prev, &gray, &mut diff) {
-                                let motion = opencv::core::mean(&diff, &Mat::default()).unwrap_or_default();
-                                let motion_val = motion[0] as f64;
-                                if motion_history.len() >= MOTION_WINDOW {
-                                    motion_history.remove(0);
-                                }
-                                motion_history.push(motion_val);
-                            }
-                        }
-                        prev_gray = Some(gray);
-                    }
-
-                    // 窗口满后，检查低运动帧占比。≥70% → 照片攻击
-                    if motion_history.len() >= MOTION_WINDOW {
-                        let low_count = motion_history.iter().filter(|&&v| v < MOTION_THRESHOLD).count();
-                        if (low_count as f64) >= (MOTION_WINDOW as f64 * MOTION_LOW_RATIO) {
-                            log_service(&exe_dir, "WARN", &format!(
-                                "motion check: possible photo attack ({}/{}=>{:.0}% low motion), skipping frame",
-                                low_count, MOTION_WINDOW,
-                                (low_count as f64) / (MOTION_WINDOW as f64) * 100.0
-                            ));
-                            thread::sleep(Duration::from_millis(30));
-                            continue;
-                        }
-                    }
 
                     let (ref mut m, _) = models.as_mut().expect("models loaded before run");
                     let cam_feat = match detect_and_extract(m, &frame) {

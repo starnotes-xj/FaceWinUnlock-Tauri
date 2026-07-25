@@ -99,7 +99,9 @@ UI 二进制测试进程带管理员 manifest，普通终端直接运行完整 h
 - [Passkey Provider 约束](docs/passkey-provider-lessons.md)
 - [更新系统](docs/incremental-update-design.md)
 - [OpenCV 打包与 Win10 摄像头兼容](docs/opencv-world-packaging-fix.md)
+- [无感活体检测设计](docs/passive-liveness-design.md)
 
 ## 许可证
 
-项目许可证见 [LICENSE](LICENSE)。Passkey 插件包含微软示例派生代码，其第三方声明见 `PasskeyPlugin/THIRD_PARTY_LICENSE.txt`。
+项目许可证见 [LICENSE](LICENSE)。Passkey 插件及模型的第三方声明分别见
+`PasskeyPlugin/THIRD_PARTY_LICENSE.txt` 和 `UI/resources/THIRD_PARTY_MODELS.md`。

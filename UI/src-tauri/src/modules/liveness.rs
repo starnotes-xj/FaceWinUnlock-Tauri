@@ -1,544 +1,332 @@
 use opencv::{
-    core::{self, Mat, Point, Scalar, Size, Vector, CV_32F},
+    core::{self, Mat, Rect, Scalar, Size, CV_32F},
     dnn,
     imgproc,
     prelude::*,
 };
 
-// ─── MotionDetector ──────────────────────────────────────────────────────────
-
-/// 基于帧间运动量的被动活体检测：检测人脸是否为静态照片。
+/// Contract of `resources/face_liveness.onnx`.
 ///
-/// 通过连续帧的灰度差均值量化运动量，完全静止说明可能是照片翻拍。
-pub struct MotionDetector {
-    prev_gray: Option<Mat>,
-    /// 最近 15 帧的运动量环形缓冲
-    motion_history: Vec<f32>,
+/// The bundled model is facenox/face-antispoof-onnx 98.20. It consumes a
+/// 128x128 RGB image normalized to [0, 1] and returns two raw logits in the
+/// order `[real, spoof]`.
+pub const LIVENESS_INPUT_SIZE: i32 = 128;
+pub const LIVENESS_FACE_EXPANSION: f32 = 1.5;
+
+/// Five successful samples keep the check below a normal camera's perceptible
+/// startup latency while making a single noisy frame unable to decide the
+/// result. Up to seven frames may be read so momentary detector misses do not
+/// reject a real user.
+pub const TARGET_LIVENESS_SAMPLES: usize = 5;
+pub const MIN_LIVENESS_SAMPLES: usize = 3;
+pub const MAX_LIVENESS_CAPTURE_FRAMES: usize = 7;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CropGeometry {
+    source: Rect,
+    top: i32,
+    bottom: i32,
+    left: i32,
+    right: i32,
+    size: i32,
 }
 
-impl MotionDetector {
-    pub fn new() -> Self {
-        Self {
-            prev_gray: None,
-            motion_history: Vec::with_capacity(15),
-        }
+fn crop_geometry(
+    frame_width: i32,
+    frame_height: i32,
+    face_x: f32,
+    face_y: f32,
+    face_width: f32,
+    face_height: f32,
+) -> Result<CropGeometry, String> {
+    if frame_width <= 0 || frame_height <= 0 {
+        return Err("活体检测收到空画面".to_string());
+    }
+    if ![face_x, face_y, face_width, face_height]
+        .iter()
+        .all(|v| v.is_finite())
+        || face_width <= 0.0
+        || face_height <= 0.0
+    {
+        return Err("活体检测收到无效人脸框".to_string());
     }
 
-    /// 输入新帧，返回当前运动量（0.0 = 完全静止，越大运动越剧烈）。
-    pub fn update(&mut self, frame: &Mat) -> Result<f32, String> {
-        let mut gray = Mat::default();
-        imgproc::cvt_color(frame, &mut gray, imgproc::COLOR_BGR2GRAY, 0, opencv::core::AlgorithmHint::ALGO_HINT_DEFAULT)
-            .map_err(|e| format!("灰度转换失败: {:?}", e))?;
+    let center_x = face_x + face_width / 2.0;
+    let center_y = face_y + face_height / 2.0;
+    let expanded_size = face_width.max(face_height) * LIVENESS_FACE_EXPANSION;
+    // Match Python's `int()` truncation in the model's reference preprocessing.
+    let size = expanded_size.max(1.0) as i32;
+    let wanted_x = (center_x - expanded_size / 2.0) as i32;
+    let wanted_y = (center_y - expanded_size / 2.0) as i32;
+    let wanted_right = wanted_x.saturating_add(size);
+    let wanted_bottom = wanted_y.saturating_add(size);
 
-        let motion = if let Some(ref prev) = self.prev_gray {
-            let mut diff = Mat::default();
-            opencv::core::absdiff(prev, &gray, &mut diff)
-                .map_err(|e| format!("帧差计算失败: {:?}", e))?;
-            let mean_val = opencv::core::mean(&diff, &Mat::default())
-                .map_err(|e| format!("均值计算失败: {:?}", e))?;
-            // 灰度图仅第 0 通道有值
-            mean_val[0] as f32
-        } else {
-            0.0
-        };
-
-        if self.motion_history.len() >= 15 {
-            self.motion_history.remove(0);
-        }
-        self.motion_history.push(motion);
-        self.prev_gray = Some(gray);
-
-        Ok(motion)
+    let source_x = wanted_x.clamp(0, frame_width);
+    let source_y = wanted_y.clamp(0, frame_height);
+    let source_right = wanted_right.clamp(0, frame_width);
+    let source_bottom = wanted_bottom.clamp(0, frame_height);
+    let source_width = source_right - source_x;
+    let source_height = source_bottom - source_y;
+    if source_width <= 0 || source_height <= 0 {
+        return Err("活体检测人脸框位于画面外".to_string());
     }
 
-    /// 判断是否为静态照片（最近 10 帧中 ≥8 帧运动量 < 0.04）。
-    /// 采用多数投票而非全票通过，容忍手持照片的偶发微小抖动。
-    /// 真人面部持续存在微运动，低运动帧比例不会超过 80%。
-    pub fn is_likely_photo(&self) -> bool {
-        if self.motion_history.len() < 10 {
-            return false;
-        }
-        let low_count = self
-            .motion_history
-            .iter()
-            .rev()
-            .take(10)
-            .filter(|&&v| v < 0.04)
-            .count();
-        low_count >= 8
-    }
+    Ok(CropGeometry {
+        source: Rect::new(source_x, source_y, source_width, source_height),
+        top: (source_y - wanted_y).max(0),
+        bottom: (wanted_bottom - source_bottom).max(0),
+        left: (source_x - wanted_x).max(0),
+        right: (wanted_right - source_right).max(0),
+        size,
+    })
 }
 
-// ─── EAR (Eye Aspect Ratio) ─────────────────────────────────────────────────
-
-/// 计算单眼 Eye Aspect Ratio（EAR），用于眨眼检测。
-///
-/// `eye_pts` 是 6 个关键点的 (x,y) 坐标平铺：12 个 float。
-/// 68 点模型中左眼为索引 36-41，右眼为 42-47。
-/// 对应关系（0-based 数组）：
-///   index 0 → landmark 36/42（外眼角）
-///   index 1 → landmark 37/43
-///   index 2 → landmark 38/44
-///   index 3 → landmark 39/45（内眼角）
-///   index 4 → landmark 40/46
-///   index 5 → landmark 41/47
-///
-/// EAR = (|p1-p5| + |p2-p4|) / (2 * |p0-p3|)
-pub fn compute_ear(eye_pts: &[f32]) -> f32 {
-    debug_assert!(
-        eye_pts.len() >= 12,
-        "EAR requires 6 landmark points (12 floats)"
-    );
-    // p1 (floats 2,3) ↔ p5 (floats 10,11)
-    let vert1 = ((eye_pts[2] - eye_pts[10]).powi(2) + (eye_pts[3] - eye_pts[11]).powi(2)).sqrt();
-    // p2 (floats 4,5) ↔ p4 (floats 8,9)
-    let vert2 = ((eye_pts[4] - eye_pts[8]).powi(2) + (eye_pts[5] - eye_pts[9]).powi(2)).sqrt();
-    // p0 (floats 0,1) ↔ p3 (floats 6,7)
-    let horiz = ((eye_pts[0] - eye_pts[6]).powi(2) + (eye_pts[1] - eye_pts[7]).powi(2)).sqrt();
-
-    if horiz < 1e-6 {
-        return 0.0;
-    }
-    (vert1 + vert2) / (2.0 * horiz)
-}
-
-// ─── BlinkDetector ──────────────────────────────────────────────────────────
-
-/// 基于眼纵横比（EAR）的眨眼检测活体。
-///
-/// 连续 3+ 帧左右眼平均 EAR < 0.2 判定为一次眨眼。
-/// 超过 150 帧仍未检测到眨眼则认为超时。
-pub struct BlinkDetector {
-    below_threshold_counter: u32,
-    pub blink_detected: bool,
-    frame_count: u32,
-}
-
-impl BlinkDetector {
-    pub fn new() -> Self {
-        Self {
-            below_threshold_counter: 0,
-            blink_detected: false,
-            frame_count: 0,
-        }
+fn expanded_square_face(frame: &Mat, faces: &Mat) -> Result<Mat, String> {
+    if faces.rows() <= 0 {
+        return Err("活体检测未收到人脸".to_string());
     }
 
-    /// 输入 68 个面部关键点（136 floats），返回检测状态：
-    /// - `Some(true)` — 首次检测到眨眼
-    /// - `None` — 仍在观察中
-    /// - `Some(false)` — 超时未眨眼
-    pub fn update(&mut self, landmarks_68: &[f32]) -> Result<Option<bool>, String> {
-        if landmarks_68.len() < 136 {
-            return Err(format!(
-                "需要 68 个关键点 (136 floats)，实际收到 {}",
-                landmarks_68.len()
-            ));
-        }
+    let geometry = crop_geometry(
+        frame.cols(),
+        frame.rows(),
+        *faces
+            .at_2d::<f32>(0, 0)
+            .map_err(|e| format!("读取人脸横坐标失败: {:?}", e))?,
+        *faces
+            .at_2d::<f32>(0, 1)
+            .map_err(|e| format!("读取人脸纵坐标失败: {:?}", e))?,
+        *faces
+            .at_2d::<f32>(0, 2)
+            .map_err(|e| format!("读取人脸宽度失败: {:?}", e))?,
+        *faces
+            .at_2d::<f32>(0, 3)
+            .map_err(|e| format!("读取人脸高度失败: {:?}", e))?,
+    )?;
 
-        // 左眼索引 36-41 → float 偏移 72-84
-        let left_eye = &landmarks_68[72..84];
-        // 右眼索引 42-47 → float 偏移 84-96
-        let right_eye = &landmarks_68[84..96];
+    let source = frame
+        .roi(geometry.source)
+        .map_err(|e| format!("裁剪活体人脸失败: {:?}", e))?
+        .try_clone()
+        .map_err(|e| format!("复制活体人脸失败: {:?}", e))?;
 
-        let left_ear = compute_ear(left_eye);
-        let right_ear = compute_ear(right_eye);
-        let avg_ear = (left_ear + right_ear) / 2.0;
-
-        self.frame_count += 1;
-
-        // 一旦检测到眨眼，后续不再触发
-        if self.blink_detected {
-            return Ok(None);
-        }
-
-        if avg_ear < 0.2 {
-            self.below_threshold_counter += 1;
-            if self.below_threshold_counter >= 3 {
-                self.blink_detected = true;
-                return Ok(Some(true));
-            }
-        } else {
-            self.below_threshold_counter = 0;
-        }
-
-        // 默认超时 150 帧（约 5 秒 @30fps）
-        const TIMEOUT_FRAMES: u32 = 150;
-        if self.frame_count >= TIMEOUT_FRAMES {
-            return Ok(Some(false));
-        }
-
-        Ok(None)
+    if geometry.top == 0
+        && geometry.bottom == 0
+        && geometry.left == 0
+        && geometry.right == 0
+    {
+        return Ok(source);
     }
+
+    let mut padded = Mat::default();
+    core::copy_make_border(
+        &source,
+        &mut padded,
+        geometry.top,
+        geometry.bottom,
+        geometry.left,
+        geometry.right,
+        core::BORDER_REFLECT_101,
+        Scalar::default(),
+    )
+    .map_err(|e| format!("补齐活体人脸边缘失败: {:?}", e))?;
+
+    if padded.cols() != geometry.size || padded.rows() != geometry.size {
+        return Err(format!(
+            "活体人脸裁剪尺寸异常: {}x{}，预期 {}x{}",
+            padded.cols(),
+            padded.rows(),
+            geometry.size,
+            geometry.size
+        ));
+    }
+    Ok(padded)
 }
 
-// ─── PIPNet Landmark Extraction ────────────────────────────────────────────────
+/// Convert the model's `[real, spoof]` logits to a numerically stable real-face
+/// probability. The ONNX graph deliberately does not contain a Softmax node.
+pub fn real_probability_from_logits(real_logit: f32, spoof_logit: f32) -> Result<f32, String> {
+    if !real_logit.is_finite() || !spoof_logit.is_finite() {
+        return Err("活体模型返回了非有限数值".to_string());
+    }
+    let spoof_minus_real = (spoof_logit - real_logit).clamp(-80.0, 80.0);
+    Ok(1.0 / (1.0 + spoof_minus_real.exp()))
+}
 
-/// 使用 PIPNet ONNX 模型从人脸裁剪图中提取 68 个面部关键点。
-///
-/// 返回 136 个 f32（68 个 (x,y) 坐标对，原点为人脸裁剪图的左上角）。
-/// 若模型缺失或推理失败则返回 `None`，调用方应优雅回退。
-pub fn extract_landmarks_pipnet(
+/// Run one passive PAD sample using the exact preprocessing contract of the
+/// bundled model. No blink, head turn, smile, or other user action is required.
+pub fn score_face_liveness(
     net: &mut dnn::Net,
-    face_crop: &Mat,
-) -> Option<Vec<f32>> {
-    // PIPNet 期望 256x256 RGB 输入，归一化至 [0,1]
-    let input_size = Size::new(256, 256);
+    frame: &Mat,
+    faces: &Mat,
+) -> Result<f32, String> {
+    let face_crop = expanded_square_face(frame, faces)?;
+    let interpolation = if face_crop.cols() < LIVENESS_INPUT_SIZE {
+        imgproc::INTER_LANCZOS4
+    } else {
+        imgproc::INTER_AREA
+    };
+    let mut resized = Mat::default();
+    imgproc::resize(
+        &face_crop,
+        &mut resized,
+        Size::new(LIVENESS_INPUT_SIZE, LIVENESS_INPUT_SIZE),
+        0.0,
+        0.0,
+        interpolation,
+    )
+    .map_err(|e| format!("缩放活体人脸失败: {:?}", e))?;
+
     let blob = dnn::blob_from_image(
-        face_crop,
+        &resized,
         1.0 / 255.0,
-        input_size,
-        Scalar::new(0.0, 0.0, 0.0, 0.0),
-        true,  // swapRB: BGR → RGB
+        Size::new(LIVENESS_INPUT_SIZE, LIVENESS_INPUT_SIZE),
+        Scalar::default(),
+        true, // Camera frames are BGR; the model was trained on RGB.
         false,
         CV_32F,
     )
-    .ok()?;
+    .map_err(|e| format!("构建活体模型输入失败: {:?}", e))?;
 
-    // 获取所有输出层名称并执行前向推理
-    let out_names = net.get_unconnected_out_layers_names().ok()?;
-    if out_names.is_empty() {
-        return None;
+    net.set_input(&blob, "", 1.0, Scalar::default())
+        .map_err(|e| format!("设置活体模型输入失败: {:?}", e))?;
+    let output = net
+        .forward_single("")
+        .map_err(|e| format!("活体模型推理失败: {:?}", e))?;
+    let flat = output
+        .reshape(1, 1)
+        .map_err(|e| format!("整理活体模型输出失败: {:?}", e))?;
+    if flat.cols() != 2 {
+        return Err(format!(
+            "活体模型输出契约不匹配: 得到 {} 个值，预期 2 个 [real, spoof] logits",
+            flat.cols()
+        ));
     }
 
-    let mut outputs = Vector::<Mat>::new();
-    if net.forward(&mut outputs, &out_names).is_err() {
-        return None;
-    }
-
-    // PIPNet 输出：cls_map, offset_x, offset_y, nb_x, nb_y
-    // 测试版简化处理：仅使用 cls_map 热力图的 argmax 位置
-    if outputs.len() < 1 {
-        return None;
-    }
-
-    let cls_map = outputs.get(0).ok()?; // 形状 (1, 68, 64, 64)
-    let feature_size = 64i32; // 256/4 stride
-    let num_landmarks = 68i32;
-    let stride = 256.0 / feature_size as f32;
-
-    // 将 cls_map 展平为 (num_landmarks, feature_size*feature_size) 便于逐行 argmax
-    let cls_2d = match cls_map.reshape(1, num_landmarks) {
-        Ok(m) => m,
-        Err(_) => return None,
-    };
-
-    let total = cls_2d.rows();
-    let mut landmarks: Vec<f32> = Vec::with_capacity((total as usize) * 2);
-
-    for c in 0..total {
-        let row = match cls_2d.row(c) {
-            Ok(r) => r,
-            Err(_) => {
-                landmarks.push(0.0);
-                landmarks.push(0.0);
-                continue;
-            }
-        };
-        let mut min_val: f64 = 0.0;
-        let mut max_val: f64 = 0.0;
-        let mut min_loc = Point::default();
-        let mut max_loc = Point::default();
-        if core::min_max_loc(
-            &row,
-            Some(&mut min_val),
-            Some(&mut max_val),
-            Some(&mut min_loc),
-            Some(&mut max_loc),
-            &Mat::default(),
-        )
-        .is_err()
-        {
-            landmarks.push(0.0);
-            landmarks.push(0.0);
-            continue;
-        }
-
-        // max_loc.x 是展平索引 (0 .. feature_size*feature_size)
-        let idx = max_loc.x;
-        let gy = (idx / feature_size) as f32;
-        let gx = (idx % feature_size) as f32;
-        landmarks.push(gx * stride);
-        landmarks.push(gy * stride);
-    }
-
-    // 同时提取偏移量做亚像素精修（若可用）
-    if outputs.len() >= 3 {
-        let off_x = outputs.get(1).ok()?;
-        let off_y = outputs.get(2).ok()?;
-        if let (Ok(ox), Ok(oy)) = (off_x.reshape(1, num_landmarks), off_y.reshape(1, num_landmarks)) {
-            for c in 0..total {
-                if let (Ok(rx), Ok(ry)) = (ox.row(c), oy.row(c)) {
-                    let idx = (c as f32 * feature_size as f32 * feature_size as f32
-                        + landmarks[(c as usize) * 2 + 1] / stride * feature_size as f32
-                        + landmarks[(c as usize) * 2] / stride) as i32;
-                    if idx >= 0 && idx < rx.cols() {
-                        let dx = rx.at::<f32>(idx).map(|v| *v).unwrap_or(0.0);
-                        let dy = ry.at::<f32>(idx).map(|v| *v).unwrap_or(0.0);
-                        landmarks[(c as usize) * 2] += dx * stride;
-                        landmarks[(c as usize) * 2 + 1] += dy * stride;
-                    }
-                }
-            }
-        }
-    }
-
-    Some(landmarks)
+    let real_logit = *flat
+        .at_2d::<f32>(0, 0)
+        .map_err(|e| format!("读取真人 logit 失败: {:?}", e))?;
+    let spoof_logit = *flat
+        .at_2d::<f32>(0, 1)
+        .map_err(|e| format!("读取假体 logit 失败: {:?}", e))?;
+    real_probability_from_logits(real_logit, spoof_logit)
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+/// Median fusion is robust to one or two transient exposure/focus outliers and
+/// does not let a single high-confidence frame override the rest of the burst.
+pub fn median_liveness_score(scores: &[f32]) -> Option<f32> {
+    let mut finite: Vec<f32> = scores
+        .iter()
+        .copied()
+        .filter(|score| score.is_finite())
+        .collect();
+    if finite.is_empty() {
+        return None;
+    }
+    finite.sort_by(|a, b| a.total_cmp(b));
+    let middle = finite.len() / 2;
+    if finite.len() % 2 == 0 {
+        Some((finite[middle - 1] + finite[middle]) / 2.0)
+    } else {
+        Some(finite[middle])
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencv::core::Scalar;
-
-    // ── EAR ──────────────────────────────────────────────────────────────────
 
     #[test]
-    fn ear_open_eye_above_threshold() {
-        // 模拟睁眼：近似水平椭圆
-        let eye: [f32; 12] = [
-            0.0, 0.0, // p0 外眼角
-            -0.8, 1.5, // p1
-            -0.5, 3.0, // p2
-            0.0, 5.0, // p3 内眼角
-            0.5, 3.0, // p4
-            0.8, 1.5, // p5
-        ];
-        let ear = compute_ear(&eye);
-        // vert1 = |p1-p5| = 1.6,  vert2 = |p2-p4| = 1.0,  horiz = |p0-p3| = 5.0
-        // EAR = (1.6 + 1.0) / (2 * 5.0) = 0.26
-        assert!(
-            (ear - 0.26).abs() < 0.01,
-            "睁眼 EAR 应约 0.26，实际 {}",
-            ear
-        );
-        assert!(ear > 0.2, "睁眼 EAR 应高于阈值 0.2");
+    fn logits_are_interpreted_as_real_then_spoof() {
+        let real = real_probability_from_logits(4.0, -1.0).unwrap();
+        let spoof = real_probability_from_logits(-1.0, 4.0).unwrap();
+        assert!(real > 0.99);
+        assert!(spoof < 0.01);
     }
 
     #[test]
-    fn ear_closed_eye_below_threshold() {
-        // 模拟闭眼：所有点几乎在一条水平线上
-        let eye: [f32; 12] = [
-            0.0, 0.0, // p0
-            -0.8, 0.1, // p1
-            -0.5, 0.2, // p2
-            0.0, 0.0, // p3
-            0.5, 0.2, // p4
-            0.8, 0.1, // p5
-        ];
-        let ear = compute_ear(&eye);
-        // vertical 与 horizontal 都接近 0 时保护返回 0.0
-        assert!(ear < 0.2, "闭眼 EAR 应低于阈值 0.2，实际 {}", ear);
+    fn equal_logits_map_to_half_probability() {
+        assert_eq!(real_probability_from_logits(0.0, 0.0).unwrap(), 0.5);
     }
 
     #[test]
-    fn ear_degenerate_horiz_zero_returns_zero() {
-        // 水平距离为零时应返回 0.0 而非除零崩溃
-        let eye: [f32; 12] = [
-            5.0, 5.0, // p0
-            5.0, 6.0, // p1
-            5.0, 7.0, // p2
-            5.0, 5.0, // p3 (= p0)
-            5.0, 7.0, // p4 (= p2)
-            5.0, 6.0, // p5 (= p1)
-        ];
-        let ear = compute_ear(&eye);
-        assert_eq!(ear, 0.0, "水平距离为 0 时应返回 0.0");
-    }
-
-    // ── MotionDetector ──────────────────────────────────────────────────────
-
-    #[test]
-    fn motion_detector_initial_state() {
-        let md = MotionDetector::new();
-        assert!(!md.is_likely_photo());
-        assert!(md.motion_history.is_empty());
-        assert!(md.prev_gray.is_none());
+    fn probability_matches_reference_logit_threshold_conversion() {
+        let configured_probability = 0.7_f32;
+        let logit_difference =
+            (configured_probability / (1.0 - configured_probability)).ln();
+        let actual = real_probability_from_logits(logit_difference, 0.0).unwrap();
+        assert!((actual - configured_probability).abs() < 1e-6);
     }
 
     #[test]
-    fn motion_detector_first_frame_returns_zero() {
-        let frame =
-            Mat::new_rows_cols_with_default(50, 50, opencv::core::CV_8UC3, Scalar::all(128.0))
-                .unwrap();
-        let mut md = MotionDetector::new();
-        let motion = md.update(&frame).unwrap();
-        assert_eq!(motion, 0.0, "首帧 prev_gray 为 None 应返回 0.0");
+    fn non_finite_logits_are_rejected() {
+        assert!(real_probability_from_logits(f32::NAN, 0.0).is_err());
+        assert!(real_probability_from_logits(0.0, f32::INFINITY).is_err());
     }
 
     #[test]
-    fn motion_detector_identical_frames_detected_as_photo() {
-        let frame =
-            Mat::new_rows_cols_with_default(50, 50, opencv::core::CV_8UC3, Scalar::all(128.0))
-                .unwrap();
-        let mut md = MotionDetector::new();
-        // 连续 10 帧完全相同 → 10/10 < 0.04 → ≥80% → 照片
-        for _ in 0..10 {
-            md.update(&frame).unwrap();
-        }
-        assert!(md.is_likely_photo(), "10/10 低运动帧应被判定为照片");
-    }
-
-    #[test]
-    fn motion_detector_occasional_jitter_not_photo() {
-        let dark = Mat::new_rows_cols_with_default(50, 50, opencv::core::CV_8UC3, Scalar::all(30.0))
-            .unwrap();
-        let bright =
-            Mat::new_rows_cols_with_default(50, 50, opencv::core::CV_8UC3, Scalar::all(200.0))
-                .unwrap();
-        let mut md = MotionDetector::new();
-        // 7 帧静止 + 3 帧抖动 → 7/10 < 0.04 → <80% → 不是照片
-        for _ in 0..3 {
-            md.update(&dark).unwrap();
-        }
-        md.update(&bright).unwrap(); // jitter
-        for _ in 0..3 {
-            md.update(&dark).unwrap();
-        }
-        md.update(&bright).unwrap(); // jitter
-        md.update(&dark).unwrap();
-        md.update(&bright).unwrap(); // jitter
-                                      // 7/10 low = 70% < 80% threshold
-        assert!(
-            !md.is_likely_photo(),
-            "7/10 低运动帧（70%）不应被判为照片（阈值 80%）"
-        );
-    }
-
-    #[test]
-    fn motion_detector_history_capped_at_15() {
-        let frame =
-            Mat::new_rows_cols_with_default(50, 50, opencv::core::CV_8UC3, Scalar::all(128.0))
-                .unwrap();
-        let mut md = MotionDetector::new();
-        for _ in 0..20 {
-            md.update(&frame).unwrap();
-        }
-        assert!(
-            md.motion_history.len() <= 15,
-            "history 长度不应超过 15，实际 {}",
-            md.motion_history.len()
-        );
-    }
-
-    #[test]
-    fn motion_detector_not_enough_frames_for_photo() {
-        let frame =
-            Mat::new_rows_cols_with_default(50, 50, opencv::core::CV_8UC3, Scalar::all(128.0))
-                .unwrap();
-        let mut md = MotionDetector::new();
-        for _ in 0..5 {
-            md.update(&frame).unwrap();
-        }
-        // 仅 5 帧，不足 10 帧 → is_likely_photo = false
-        assert!(!md.is_likely_photo());
-    }
-
-    // ── BlinkDetector ───────────────────────────────────────────────────────
-
-    /// 构造一组睁眼参考关键点（左右眼 EAR > 0.2）
-    fn open_eye_landmarks() -> [f32; 136] {
-        let mut lm = [0.0f32; 136];
-        // 左眼 (36-42 → floats 72-84)：开放构型
-        lm[72] = 10.0;
-        lm[73] = 20.0; // p0
-        lm[74] = 8.0;
-        lm[75] = 24.0; // p1
-        lm[76] = 9.0;
-        lm[77] = 28.0; // p2
-        lm[78] = 10.0;
-        lm[79] = 32.0; // p3
-        lm[80] = 11.0;
-        lm[81] = 28.0; // p4
-        lm[82] = 12.0;
-        lm[83] = 24.0; // p5
-                       // 右眼 (42-48 → floats 84-96)：开放构型
-        lm[84] = 20.0;
-        lm[85] = 20.0;
-        lm[86] = 18.0;
-        lm[87] = 24.0;
-        lm[88] = 19.0;
-        lm[89] = 28.0;
-        lm[90] = 20.0;
-        lm[91] = 32.0;
-        lm[92] = 21.0;
-        lm[93] = 28.0;
-        lm[94] = 22.0;
-        lm[95] = 24.0;
-        lm
-    }
-
-    /// 构造一组闭眼参考关键点（左右眼 EAR < 0.2）
-    fn closed_eye_landmarks() -> [f32; 136] {
-        let mut lm = open_eye_landmarks();
-        // 左眼：所有 y 接近 p0.y，EAR → 0
-        lm[75] = 20.5; // p1.y
-        lm[77] = 21.0; // p2.y
-        lm[79] = 20.0; // p3.y
-        lm[81] = 21.0; // p4.y
-        lm[83] = 20.5; // p5.y
-                       // 右眼：同理
-        lm[87] = 20.5;
-        lm[89] = 21.0;
-        lm[91] = 20.0;
-        lm[93] = 21.0;
-        lm[95] = 20.5;
-        lm
-    }
-
-    #[test]
-    fn blink_detector_no_blink_open_eyes() {
-        let mut bd = BlinkDetector::new();
-        let lm = open_eye_landmarks();
-        for _ in 0..10 {
-            assert_eq!(bd.update(&lm).unwrap(), None, "睁眼不应检测到眨眼");
-        }
-    }
-
-    #[test]
-    fn blink_detector_detects_blink() {
-        let mut bd = BlinkDetector::new();
-        // 先送几帧睁眼建立基线
-        let open = open_eye_landmarks();
-        for _ in 0..5 {
-            bd.update(&open).unwrap();
-        }
-        // 连续 3 帧闭眼触发眨眼检测
-        let closed = closed_eye_landmarks();
-        // 第 1-2 帧闭眼：still observing
-        assert_eq!(bd.update(&closed).unwrap(), None, "第1帧闭眼 → None");
-        assert_eq!(bd.update(&closed).unwrap(), None, "第2帧闭眼 → None");
-        // 第 3 帧闭眼：blink detected
+    fn crop_is_square_and_expanded_around_face() {
+        let geometry = crop_geometry(640, 480, 220.0, 140.0, 100.0, 120.0).unwrap();
+        assert_eq!(geometry.size, 180);
+        assert_eq!(geometry.source, Rect::new(180, 110, 180, 180));
         assert_eq!(
-            bd.update(&closed).unwrap(),
-            Some(true),
-            "第3帧闭眼 → Some(true)"
+            (
+                geometry.top,
+                geometry.bottom,
+                geometry.left,
+                geometry.right
+            ),
+            (0, 0, 0, 0)
         );
-        // 后续帧不再重复触发
-        assert_eq!(bd.update(&closed).unwrap(), None, "触发后应返回 None");
     }
 
     #[test]
-    fn blink_detector_timeout() {
-        let mut bd = BlinkDetector::new();
-        let open = open_eye_landmarks();
-        for i in 0..151 {
-            let result = bd.update(&open).unwrap();
-            if result == Some(false) {
-                return; // 超时正常
-            }
-            if i >= 150 {
-                panic!("BlinkDetector 应在 150 帧后超时");
-            }
-        }
+    fn crop_near_edge_uses_reflection_padding() {
+        let geometry = crop_geometry(640, 480, 0.0, 0.0, 100.0, 100.0).unwrap();
+        assert_eq!(geometry.size, 150);
+        assert_eq!(geometry.source, Rect::new(0, 0, 125, 125));
+        assert_eq!(
+            (
+                geometry.top,
+                geometry.bottom,
+                geometry.left,
+                geometry.right
+            ),
+            (25, 0, 25, 0)
+        );
     }
 
     #[test]
-    fn blink_detector_requires_136_floats() {
-        let mut bd = BlinkDetector::new();
-        let short = [0.0f32; 100];
-        let result = bd.update(&short);
-        assert!(result.is_err(), "不足 136 个 float 应返回错误");
+    fn crop_matches_reference_integer_truncation() {
+        let geometry = crop_geometry(640, 480, 0.0, 0.0, 101.0, 99.0).unwrap();
+        assert_eq!(geometry.size, 151);
+        assert_eq!(geometry.source, Rect::new(0, 0, 126, 125));
+        assert_eq!(
+            (
+                geometry.top,
+                geometry.bottom,
+                geometry.left,
+                geometry.right
+            ),
+            (26, 0, 25, 0)
+        );
+    }
+
+    #[test]
+    fn crop_rejects_invalid_face_boxes() {
+        assert!(crop_geometry(640, 480, 10.0, 10.0, 0.0, 100.0).is_err());
+        assert!(crop_geometry(640, 480, f32::NAN, 10.0, 100.0, 100.0).is_err());
+        assert!(crop_geometry(0, 480, 10.0, 10.0, 100.0, 100.0).is_err());
+    }
+
+    #[test]
+    fn median_rejects_single_high_outlier() {
+        let score = median_liveness_score(&[0.08, 0.12, 0.11, 0.09, 0.99]).unwrap();
+        assert!((score - 0.11).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn median_even_sample_count_averages_middle_values() {
+        let score = median_liveness_score(&[0.8, 0.2, 0.6, 0.4]).unwrap();
+        assert!((score - 0.5).abs() < f32::EPSILON);
     }
 }

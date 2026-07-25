@@ -27,7 +27,8 @@
 ## UI Backend
 
 - `modules/init.rs`: administrator checks, component registration, registry defaults, obsolete-value migration cleanup.
-- `modules/faces.rs`: enrollment detection, alignment, feature extraction, liveness and consistency checks.
+- `modules/faces.rs`: enrollment detection, alignment, feature extraction, passive-liveness burst capture and consistency checks.
+- `modules/liveness.rs`: pinned PAD model contract, expanded square preprocessing, Softmax probability and median fusion.
 - `modules/passkey_plugin.rs`: current-user MSIX management, metadata backup/restore, purge and residual-key cleanup.
 - `modules/update_check.rs`: semantic-version and same-version hash checks.
 - `modules/update_download.rs`: manifest validation, SHA-256 diff and staging.

@@ -117,10 +117,7 @@ export default {
     livenessPass: '活体检测通过',
     livenessFail: '活体检测未通过',
     livenessScore: '活体分数',
-    motionDetection: '微运动检测',
-    motionPass: '微运动检测通过',
-    motionFail: '疑似照片攻击：未检测到面部自然微运动',
-    livenessDesc: '含被动微运动检测（自动防照片）+ 深度学习模型辅助，无需用户额外操作',
+    livenessDesc: '本地模型自动分析短时多帧人脸纹理，无需眨眼、转头或张嘴',
   },
   options: {
     title: '首选项',

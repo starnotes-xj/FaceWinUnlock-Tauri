@@ -99,7 +99,9 @@ The elevated UI binary test harness may fail with Windows error 740 in a normal 
 - [Passkey Provider constraints](docs/passkey-provider-lessons.md)
 - [Update system](docs/incremental-update-design.md)
 - [OpenCV packaging and Windows 10 camera compatibility](docs/opencv-world-packaging-fix.md)
+- [Passive liveness design](docs/passive-liveness-design.md)
 
 ## License
 
-See [LICENSE](LICENSE). Third-party notices for the Microsoft-derived Passkey sample are in `PasskeyPlugin/THIRD_PARTY_LICENSE.txt`.
+See [LICENSE](LICENSE). Third-party notices are in
+`PasskeyPlugin/THIRD_PARTY_LICENSE.txt` and `UI/resources/THIRD_PARTY_MODELS.md`.
