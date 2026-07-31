@@ -44,6 +44,8 @@
       "./nsis/cleanup_tiles.ps1": "nsis/cleanup_tiles.ps1",
       "./nsis/resilience.ps1": "nsis/resilience.ps1",
       "../../target/release/FaceWinUnlock_Tauri.dll": "resources/FaceWinUnlock-Tauri.dll",
+      "../resources/anti_spoof_mn3.LICENSE.txt": "resources/anti_spoof_mn3.LICENSE.txt",
+      "../resources/anti_spoof_mn3.onnx": "resources/anti_spoof_mn3.onnx",
       "../resources/face_detection_yunet_2023mar.onnx": "resources/face_detection_yunet_2023mar.onnx",
       "../resources/face_liveness.onnx": "resources/face_liveness.onnx",
       "../resources/face_recognition_sface_2021dec.onnx": "resources/face_recognition_sface_2021dec.onnx",

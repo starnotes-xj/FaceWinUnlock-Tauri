@@ -101,6 +101,33 @@ Also test ordinary display timeout separately from **Sleep**. While the display 
 
 Issue #26 is ready to close only after the active-camera Sleep case, hibernate/resume, face unlock, and manual PIN release all pass repeatedly on an installed build. Unit tests alone are insufficient.
 
+## Passive Liveness And Photo/Replay Attacks
+
+Run this matrix on the installed package with CPU inference first. Use the enrolled user's face and keep distance, angle, brightness, and apparent face size comparable across genuine and attack cases.
+
+| Presentation | Expected result |
+|---|---|
+| Genuine user, normal expression | Unlocks without a requested blink, head turn, or spoken action |
+| Matte printed portrait | Does not release credentials; native PIN/password remains usable |
+| Glossy printed portrait | Does not release credentials |
+| Portrait displayed on a phone | Does not release credentials |
+| Recorded face video on a phone/tablet | Does not release credentials |
+| Genuine user after sleep/resume | Unlocks after camera exposure stabilizes |
+| Face changes between two enrolled users during the decision window | Old samples are discarded; no mixed-identity authorization |
+
+Repeat each case at least ten times in normal indoor light and once in dim light and monitor backlight. A single credential release or Passkey `AUTHORIZED` result for a printed photo or screen replay is a release blocker.
+
+Also verify fail-closed behavior:
+
+1. Rename `resources\anti_spoof_mn3.onnx`, restart the service, and try face unlock.
+2. Restore it, rename `resources\face_liveness.onnx`, restart, and repeat.
+3. Restore both models before continuing.
+4. Expected in both missing-model cases: no credential or Passkey authorization, no worker crash loop, and native PIN/password remains available.
+5. Confirm a genuine decision normally takes at least 350 ms of samples and remains within the product's acceptable unlock latency on CPU.
+6. Confirm logs contain only generic PAD pass/fail/error events, not frames, raw biometric scores, credentials, or WebAuthn request content.
+
+RGB passive PAD reduces common 2D attacks but is not an IR/depth proof. Record the tested camera and display/print media with release evidence.
+
 ## Automatic Lock And Issue #27
 
 “About 30 seconds to take effect” means the UI saves immediately but Unlock reloads the options database every 30 seconds. It does not mean the workstation always locks after 30 seconds.

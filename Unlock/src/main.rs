@@ -12,6 +12,7 @@
 
 #![windows_subsystem = "windows"]
 
+mod liveness;
 mod passkey;
 mod power_events;
 mod webauthn_activity;
@@ -31,9 +32,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use liveness::{LivenessDecision, LivenessStatus, PassiveLiveness};
 use opencv::{
-    core::{Mat, Ptr, Size},
-    imgproc,
+    core::{Mat, Ptr, Rect, Size},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     prelude::*,
     videoio::{self, VideoCapture},
@@ -896,6 +897,12 @@ fn cosine_sim(a: &[u8], b: &[u8]) -> f64 {
 struct Models {
     detector:   Ptr<FaceDetectorYN>,
     recognizer: Ptr<FaceRecognizerSF>,
+    liveness:   PassiveLiveness,
+}
+
+struct FaceObservation {
+    feature:   Mat,
+    face_rect: Rect,
 }
 
 fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<Models> {
@@ -915,7 +922,12 @@ fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<
         inference.backend_id,
         inference.target_id,
     )?;
-    Ok(Models { detector, recognizer })
+    let liveness = PassiveLiveness::load(resources, inference.backend_id, inference.target_id)?;
+    Ok(Models {
+        detector,
+        recognizer,
+        liveness,
+    })
 }
 
 fn load_models_with_fallback(
@@ -1002,8 +1014,9 @@ fn reload_models_if_inference_changed(
     }
 }
 
-/// 检测+提取特征，返回 None 表示无人脸或失败
-fn detect_and_extract(models: &mut Models, frame: &Mat) -> Option<Mat> {
+/// 检测+提取特征，返回 None 表示无人脸或失败。
+/// 同时保留检测框，供被动活体模型裁剪同一张脸，避免识别与活体检查对象不一致。
+fn detect_and_extract(models: &mut Models, frame: &Mat) -> Option<FaceObservation> {
     models.detector.set_input_size(Size::new(frame.cols(), frame.rows())).ok()?;
     let mut faces = Mat::default();
     models.detector.detect(frame, &mut faces).ok()?;
@@ -1016,7 +1029,28 @@ fn detect_and_extract(models: &mut Models, frame: &Mat) -> Option<Mat> {
     models.recognizer.align_crop(frame, &face_row, &mut aligned).ok()?;
     let mut feature = Mat::default();
     models.recognizer.feature(&aligned, &mut feature).ok()?;
-    Some(feature)
+
+    let values = [
+        *face_row.at_2d::<f32>(0, 0).ok()?,
+        *face_row.at_2d::<f32>(0, 1).ok()?,
+        *face_row.at_2d::<f32>(0, 2).ok()?,
+        *face_row.at_2d::<f32>(0, 3).ok()?,
+    ];
+    if values.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let left = (values[0].floor() as i32).clamp(0, frame.cols());
+    let top = (values[1].floor() as i32).clamp(0, frame.rows());
+    let right = ((values[0] + values[2]).ceil() as i32).clamp(left, frame.cols());
+    let bottom = ((values[1] + values[3]).ceil() as i32).clamp(top, frame.rows());
+    if right <= left || bottom <= top {
+        return None;
+    }
+
+    Some(FaceObservation {
+        feature,
+        face_rect: Rect::new(left, top, right - left, bottom - top),
+    })
 }
 
 // ─── Screen brightness ───────────────────────────────────────────────────────
@@ -1999,11 +2033,13 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
                 let hard_deadline = Instant::now() + Duration::from_secs(10);
                 let mut no_face_since: Option<Instant> = None;
-                const MOTION_WINDOW: usize = 30;
-                const MOTION_THRESHOLD: f64 = 0.04;
-                const MOTION_LOW_RATIO: f64 = 0.7; // 70%+ 低运动 → 照片
-                let mut prev_gray: Option<Mat> = None;
-                let mut motion_history: Vec<f64> = Vec::with_capacity(MOTION_WINDOW);
+                let mut liveness_candidate_id: Option<i64> = None;
+                models
+                    .as_mut()
+                    .expect("models loaded before run")
+                    .0
+                    .liveness
+                    .reset();
                 while Instant::now() < hard_deadline {
                     if state.should_exit.load(Ordering::SeqCst)
                         || state.release_requested.load(Ordering::SeqCst)
@@ -2026,40 +2062,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                     }
                     let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
 
-                    // 微运动检测：防止照片攻击（在昂贵的 DNN 推理之前运行）
-                    // 使用滑动窗口 + 多数投票，容忍手持照片的偶发抖动
-                    let mut gray = Mat::default();
-                    if let Ok(_) = imgproc::cvt_color(&frame, &mut gray, imgproc::COLOR_BGR2GRAY, 0, opencv::core::AlgorithmHint::ALGO_HINT_DEFAULT) {
-                        if let Some(ref prev) = prev_gray {
-                            let mut diff = Mat::default();
-                            if let Ok(_) = opencv::core::absdiff(prev, &gray, &mut diff) {
-                                let motion = opencv::core::mean(&diff, &Mat::default()).unwrap_or_default();
-                                let motion_val = motion[0] as f64;
-                                if motion_history.len() >= MOTION_WINDOW {
-                                    motion_history.remove(0);
-                                }
-                                motion_history.push(motion_val);
-                            }
-                        }
-                        prev_gray = Some(gray);
-                    }
-
-                    // 窗口满后，检查低运动帧占比。≥70% → 照片攻击
-                    if motion_history.len() >= MOTION_WINDOW {
-                        let low_count = motion_history.iter().filter(|&&v| v < MOTION_THRESHOLD).count();
-                        if (low_count as f64) >= (MOTION_WINDOW as f64 * MOTION_LOW_RATIO) {
-                            log_service(&exe_dir, "WARN", &format!(
-                                "motion check: possible photo attack ({}/{}=>{:.0}% low motion), skipping frame",
-                                low_count, MOTION_WINDOW,
-                                (low_count as f64) / (MOTION_WINDOW as f64) * 100.0
-                            ));
-                            thread::sleep(Duration::from_millis(30));
-                            continue;
-                        }
-                    }
-
                     let (ref mut m, _) = models.as_mut().expect("models loaded before run");
-                    let cam_feat = match detect_and_extract(m, &frame) {
+                    let observation = match detect_and_extract(m, &frame) {
                         Some(f) => f,
                         None => {
                             let since = no_face_since.get_or_insert_with(Instant::now);
@@ -2073,42 +2077,93 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                     };
                     no_face_since = None;
                     saw_face = true;
-                    let cam_bytes = feature_to_bytes(&cam_feat);
+                    let cam_bytes = feature_to_bytes(&observation.feature);
 
-                    for rec in &records {
+                    let candidate = records.iter().find(|rec| {
                         let score = cosine_sim(&cam_bytes, &rec.feature_bytes);
-                        let threshold = rec.threshold as f64 / 100.0;
-                        if score >= threshold {
-                            if passkey_request_id.is_some() {
-                                log_service(
-                                    &exe_dir,
-                                    "INFO",
-                                    &format!("face matched for passkey authorization: {}", rec.user_name),
-                                );
-                            } else {
-                                *state.matched_creds.lock().unwrap() = Some((
-                                    rec.user_name.clone(),
-                                    rec.user_pwd.clone(),
-                                    rec.domain.clone(),
-                                ));
-                                state.matched_creds_cv.notify_all();
-                                log_service(&exe_dir, "INFO", &format!("face matched for {}", rec.user_name));
-                            }
-                            matched_face_id = Some(rec.id);
-                            // 更新活跃时间：人脸识别成功说明用户在
-                            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-                            state.last_user_active.store(now, Ordering::SeqCst);
-                            if passkey_request_id.is_none() {
-                                state.last_successful_unlock_at.store(now, Ordering::SeqCst);
-                            }
-                            matched = true;
-                            // 仅提交密码凭据（Approach B）——所有场景统一走密码，登录/解锁秒过，
-                            // CredUI 被拒时由 DLL 回退 Windows 原生 PIN。不再加载/注入存储 PIN。
+                        score >= rec.threshold as f64 / 100.0
+                    });
+                    let Some(rec) = candidate else {
+                        if liveness_candidate_id.take().is_some() {
+                            m.liveness.reset();
+                        }
+                        thread::sleep(Duration::from_millis(30));
+                        continue;
+                    };
+
+                    // 活体窗口只能聚合同一身份的帧；候选人变化时丢弃旧窗口。
+                    if liveness_candidate_id != Some(rec.id) {
+                        m.liveness.reset();
+                        liveness_candidate_id = Some(rec.id);
+                    }
+                    let liveness = match m.liveness.observe(&frame, observation.face_rect) {
+                        Ok(observation) => observation,
+                        Err(error) => {
+                            log_service(
+                                &exe_dir,
+                                "ERROR",
+                                &format!(
+                                    "passive liveness inference failed; refusing face authorization: {:?}",
+                                    error
+                                ),
+                            );
+                            break;
+                        }
+                    };
+                    match liveness.status {
+                        LivenessStatus::Collecting => {
+                            thread::sleep(Duration::from_millis(60));
+                            continue;
+                        }
+                        LivenessStatus::Ready(LivenessDecision::Live) => {}
+                        LivenessStatus::Ready(
+                            LivenessDecision::Spoof | LivenessDecision::Inconclusive,
+                        ) => {
+                            log_service(
+                                &exe_dir,
+                                "WARN",
+                                "passive liveness rejected face authorization",
+                            );
                             break;
                         }
                     }
-                    if matched { break; }
-                    thread::sleep(Duration::from_millis(30));
+
+                    if passkey_request_id.is_some() {
+                        log_service(
+                            &exe_dir,
+                            "INFO",
+                            &format!(
+                                "face and passive liveness matched for passkey authorization: {}",
+                                rec.user_name
+                            ),
+                        );
+                    } else {
+                        *state.matched_creds.lock().unwrap() = Some((
+                            rec.user_name.clone(),
+                            rec.user_pwd.clone(),
+                            rec.domain.clone(),
+                        ));
+                        state.matched_creds_cv.notify_all();
+                        log_service(
+                            &exe_dir,
+                            "INFO",
+                            &format!("face and passive liveness matched for {}", rec.user_name),
+                        );
+                    }
+                    matched_face_id = Some(rec.id);
+                    // 更新活跃时间：人脸识别成功且活体通过，说明用户在。
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    state.last_user_active.store(now, Ordering::SeqCst);
+                    if passkey_request_id.is_none() {
+                        state.last_successful_unlock_at.store(now, Ordering::SeqCst);
+                    }
+                    matched = true;
+                    // 仅提交密码凭据（Approach B）——所有场景统一走密码，登录/解锁秒过，
+                    // CredUI 被拒时由 DLL 回退 Windows 原生 PIN。不再加载/注入存储 PIN。
+                    break;
                 }
             } // cap 在这里释放，cam borrow 结束
 
@@ -2594,9 +2649,9 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             }
             let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
 
-            if let Some(feat) = detect_and_extract(models, &frame) {
+            if let Some(observation) = detect_and_extract(models, &frame) {
                 no_face_since = None;
-                let cam_bytes = feature_to_bytes(&feat);
+                let cam_bytes = feature_to_bytes(&observation.feature);
                 for rec in &records {
                     let score = cosine_sim(&cam_bytes, &rec.feature_bytes);
                     let threshold = rec.threshold as f64 / 100.0;
@@ -2676,9 +2731,9 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
                         continue;
                     }
                     let frame = rotate_frame(&frame, camera_rotation).unwrap_or(frame);
-                    if let Some(feat) = detect_and_extract(models, &frame) {
+                    if let Some(observation) = detect_and_extract(models, &frame) {
                         no_face_retry = None;
-                        let cam_bytes = feature_to_bytes(&feat);
+                        let cam_bytes = feature_to_bytes(&observation.feature);
                         for rec in &records {
                             let score = cosine_sim(&cam_bytes, &rec.feature_bytes);
                             let threshold = rec.threshold as f64 / 100.0;

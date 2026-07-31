@@ -30,6 +30,10 @@ Credential Provider APIs do not expose Chromium's prompt message. Broker classif
 
 The scheduled task starts a SYSTEM supervisor and worker. The worker owns camera recognition, lock-screen prewarm, WebAuthn event monitoring, the Passkey face gate, and automatic locking.
 
+Before the worker releases a password credential or grants a Passkey face request, it requires an identity match and a passive presentation-attack-detection (PAD) decision for the same face. The PAD pipeline uses `anti-spoof-mn3` as the primary model and MiniFASNetV2 as an independent secondary model. It aggregates at least six samples over at least 350 ms, requires the candidate identity to stay stable, and does not ask the user to blink, turn, or speak. A spoof, an inconclusive window, a missing/corrupt model, or an inference error fails closed to the normal Windows PIN/password path.
+
+Automatic-lock presence checks intentionally use identity recognition without PAD: that path can only postpone a lock and can never release a credential or authorize a Passkey.
+
 The service does not call `LockWorkStation` from Session 0. It launches a one-shot helper under the active WTS user token on `winsta0\default`, then confirms the session lock flag.
 
 ### Passkey Provider
@@ -69,9 +73,10 @@ The Active check is repeated in `SetUsageScenario`, `Advise`, before pipe connec
 ## Data And Trust
 
 - Face records, options, and configured Windows credentials remain local.
+- Passive PAD inference and its rolling decision window remain local; camera frames and model scores are not written to logs.
 - The generic Credential Provider briefly handles account credentials to log on; it must never log serialization bytes or secret values.
 - Passkey private keys are per-user Software KSP keys. Metadata backup is under `%ProgramData%\facewinunlock-tauri\PasskeyBackup`.
-- Ordinary RGB face recognition is a convenience layer, not equivalent to Windows Hello biometric assurance.
+- RGB recognition with passive PAD materially reduces printed-photo and screen-replay attacks, but remains a convenience layer and is not equivalent to Windows Hello IR/depth biometric assurance.
 
 ## Removed Routes
 

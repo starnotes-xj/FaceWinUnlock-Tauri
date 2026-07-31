@@ -5,7 +5,7 @@
 ## Responsibilities
 
 - Serve the Credential Provider control and credential pipes.
-- Load enabled face records and OpenCV models, open the configured camera, and match faces.
+- Load enabled face records and OpenCV models, open the configured camera, match faces, and require passive dual-model liveness before releasing credentials.
 - Prewarm the lock-screen camera and release it after inactivity or manual PIN unlock.
 - Coordinate camera ownership with the UI through `ui_release`/`ui_done`.
 - Subscribe to `Microsoft-Windows-WebAuthN/Operational` and publish WebAuthn Ready/Active named events.
@@ -23,6 +23,8 @@ The scheduled task starts a SYSTEM supervisor. It starts the worker with `--face
 Camera opening uses the maintained MSMF, DirectShow, then Any fallback order. MSMF hardware transforms are disabled before first open. The UI can temporarily own the device; every successful or failed UI camera session must eventually emit `ui_done`.
 
 No enabled face records means no lock-screen camera prewarm. After a manual PIN unlock, prewarm remains blocked until the old credential session has disconnected and a new session is observed.
+
+Credential and Passkey authorization uses six or more passive PAD samples across at least 350 ms for the same matched identity. There is no blink, head-turn, or spoken challenge. Spoof, inconclusive, and inference-error outcomes fail closed; users can continue with the native Windows PIN/password path.
 
 ## Build And Test
 

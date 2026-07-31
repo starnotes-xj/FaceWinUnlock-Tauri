@@ -14,8 +14,11 @@ FaceWinUnlock_Tauri.dll
 opencv_world4120.dll
 face_detection_yunet_2023mar.onnx
 face_recognition_sface_2021dec.onnx
+anti_spoof_mn3.onnx
 face_liveness.onnx
 ```
+
+`anti_spoof_mn3.onnx` is the mandatory primary passive-PAD model. The download helper verifies its pinned SHA-384 before replacing the local copy. The service treats either PAD model being unavailable or unloadable as an authorization failure rather than bypassing liveness.
 
 ## Camera Backend Order
 

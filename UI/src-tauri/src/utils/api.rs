@@ -162,7 +162,16 @@ pub fn init_model() -> Result<CustomResult, CustomResult> {
     let _ = FaceRecognizerSF::create(resource_path.to_str().unwrap_or(""), "", 0, 0)
         .map_err(|e| CustomResult::error(Some(format!("初始化识别器模型失败: {:?}", e)), None))?;
 
-    // 加载活体检测模型
+    // 加载主、辅两个被动活体检测模型；后台解锁服务要求二者均可用。
+    let _ = opencv::dnn::read_net_from_onnx(
+        ROOT_DIR
+            .join("resources")
+            .join("anti_spoof_mn3.onnx")
+            .to_str()
+            .unwrap(),
+    )
+    .map_err(|e| CustomResult::error(Some(format!("初始化主活体检测模型失败: {:?}", e)), None))?;
+
     let _ = opencv::dnn::read_net_from_onnx(
         ROOT_DIR
             .join("resources")
@@ -857,7 +866,7 @@ fn stop_unlock_service() {
     // 额外等一拍，确保 supervisor 退出、文件句柄完全释放
     thread::sleep(Duration::from_millis(500));
 }
-// 用指定 backend/target 构建全部四个 OpenCV 模型；任一失败即返回错误。
+// 用指定 backend/target 构建全部五个 OpenCV 模型；关键安全模型任一失败即返回错误。
 // 不写入全局状态，便于在失败时安全回退到其它后端后再统一赋值。
 fn build_opencv_models(
     backend_id: i32,
@@ -870,6 +879,10 @@ fn build_opencv_models(
         .into_owned();
     let recognizer_path = res
         .join("face_recognition_sface_2021dec.onnx")
+        .to_string_lossy()
+        .into_owned();
+    let primary_liveness_path = res
+        .join("anti_spoof_mn3.onnx")
         .to_string_lossy()
         .into_owned();
     let liveness_path = res
@@ -898,12 +911,20 @@ fn build_opencv_models(
     .map_err(|e| format!("初始化检测器模型失败: {:?}", e))?;
     let det_ms = t0.elapsed().as_millis();
 
-    // recognizer（SFace，最重）与 liveness/landmark 相互独立、全局初始化已完成，**并行加载**——顺序加载 4 个
-    // ONNX 模型是 UI 首次抓拍/一致性验证慢(~4s)的主因；并行后总耗时 ≈ 最慢单个模型（issue #3）。
+    // recognizer（SFace，最重）与两路 liveness/landmark 相互独立、全局初始化已完成，**并行加载**。
     let t1 = Instant::now();
     let rec_handle = thread::spawn(move || -> Result<Ptr<FaceRecognizerSF>, String> {
         FaceRecognizerSF::create(&recognizer_path, "", backend_id, target_id)
             .map_err(|e| format!("初始化识别器模型失败: {:?}", e))
+    });
+    let primary_live_handle = thread::spawn(move || -> Result<opencv::dnn::Net, String> {
+        let mut net = opencv::dnn::read_net_from_onnx(&primary_liveness_path)
+            .map_err(|e| format!("初始化主活体检测模型失败: {:?}", e))?;
+        net.set_preferable_backend(backend_id)
+            .map_err(|e| format!("设置主活体推理后端失败: {:?}", e))?;
+        net.set_preferable_target(target_id)
+            .map_err(|e| format!("设置主活体推理目标失败: {:?}", e))?;
+        Ok(net)
     });
     let live_handle = thread::spawn(move || -> Result<opencv::dnn::Net, String> {
         let mut net = opencv::dnn::read_net_from_onnx(&liveness_path)
@@ -928,6 +949,9 @@ fn build_opencv_models(
     let recognizer = rec_handle
         .join()
         .map_err(|_| "识别器加载线程 panic".to_string())??;
+    let _primary_liveness = primary_live_handle
+        .join()
+        .map_err(|_| "主活体检测加载线程 panic".to_string())??;
     let liveness = live_handle
         .join()
         .map_err(|_| "活体检测加载线程 panic".to_string())??;
@@ -947,7 +971,7 @@ fn build_opencv_models(
     };
 
     info!(
-        "OpenCV 模型加载：detector {}ms(主线程) + recognizer/liveness/landmark 并行 {}ms = 合计 {}ms (backend={}, target={})",
+        "OpenCV 模型加载：detector {}ms(主线程) + recognizer/dual-liveness/landmark 并行 {}ms = 合计 {}ms (backend={}, target={})",
         det_ms,
         t1.elapsed().as_millis(),
         t0.elapsed().as_millis(),
@@ -992,7 +1016,7 @@ pub fn load_opencv_model(
         .lock()
         .map_err(|e| format!("获取模型加载锁失败 {}", e))?;
 
-    // 四个模型已全部加载则直接返回（保持幂等）。无法得知此前是否回退，
+    // UI 持有的模型已全部加载则直接返回（保持幂等）。后台会独立加载并强制校验主活体模型。
     // 按未回退处理，回退提示已在首次加载时给出。
     {
         let app_state = APP_STATE
