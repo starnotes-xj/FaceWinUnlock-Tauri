@@ -1,5 +1,6 @@
 use std::{
     os::windows::process::CommandExt,
+    path::Path,
     process::Command,
     sync::{LazyLock, Mutex},
     thread,
@@ -8,9 +9,9 @@ use std::{
 
 use crate::{utils::custom_result::CustomResult, OpenCVResource, APP_STATE, GLOBAL_TRAY, ROOT_DIR};
 use opencv::{
-    core::{Mat, MatTraitConst, Ptr, Size},
+    core::{Mat, MatTraitConst, Ptr, Scalar, Size, CV_8UC3},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
-    prelude::NetTrait,
+    prelude::{FaceDetectorYNTrait, FaceRecognizerSFTrait, NetTrait},
     videoio::{self, VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst},
 };
 use serde::{Deserialize, Serialize};
@@ -135,55 +136,6 @@ pub fn test_win_logon(user_name: String, password: String) -> Result<CustomResul
     Ok(CustomResult::success(None, None))
 }
 
-// 初始化模型
-#[tauri::command]
-pub fn init_model() -> Result<CustomResult, CustomResult> {
-    // 加载模型
-    let resource_path = ROOT_DIR
-        .join("resources")
-        .join("face_detection_yunet_2023mar.onnx");
-
-    // 这个不用检查文件是否存在，不存在opencv会报错
-    let _ = FaceDetectorYN::create(
-        resource_path.to_str().unwrap_or(""),
-        "",
-        Size::new(320, 320), // 初始尺寸，后面会动态更新
-        0.9,
-        0.3,
-        5000,
-        0,
-        0,
-    )
-    .map_err(|e| CustomResult::error(Some(format!("初始化检测器模型失败: {:?}", e)), None))?;
-
-    let resource_path = ROOT_DIR
-        .join("resources")
-        .join("face_recognition_sface_2021dec.onnx");
-    let _ = FaceRecognizerSF::create(resource_path.to_str().unwrap_or(""), "", 0, 0)
-        .map_err(|e| CustomResult::error(Some(format!("初始化识别器模型失败: {:?}", e)), None))?;
-
-    // 加载主、辅两个被动活体检测模型；后台解锁服务要求二者均可用。
-    let _ = opencv::dnn::read_net_from_onnx(
-        ROOT_DIR
-            .join("resources")
-            .join("anti_spoof_mn3.onnx")
-            .to_str()
-            .unwrap(),
-    )
-    .map_err(|e| CustomResult::error(Some(format!("初始化主活体检测模型失败: {:?}", e)), None))?;
-
-    let _ = opencv::dnn::read_net_from_onnx(
-        ROOT_DIR
-            .join("resources")
-            .join("face_liveness.onnx")
-            .to_str()
-            .unwrap(),
-    )
-    .map_err(|e| CustomResult::error(Some(format!("初始化活体检测模型失败: {:?}", e)), None))?;
-
-    Ok(CustomResult::success(None, None))
-}
-
 // 获取windows所有摄像头
 #[tauri::command]
 pub fn get_camera() -> Result<CustomResult, CustomResult> {
@@ -276,6 +228,7 @@ pub fn open_camera(
     backend: Option<CameraBackend>,
     camear_index: i32,
 ) -> Result<CustomResult, CustomResult> {
+    crate::modules::faces::reset_liveness_votes();
     // 先请求 Unlock 后台服务让出摄像头：锁屏预热(prewarm) / 自动锁屏在场检测可能正占着摄像头，
     // 不让位会导致 UI open_camera 抢不到、录入采集只出黑帧（用户反馈：无脸时锁屏走开→鼠标触发
     // 识别→PIN 解锁后摄像头常亮期间录入黑屏）。ui_release 让后台立即释放并在兜底窗口内不再预热。
@@ -323,6 +276,7 @@ pub fn open_camera(
 }
 
 fn close_ui_camera() -> Result<(), CustomResult> {
+    crate::modules::faces::reset_liveness_votes();
     {
         let mut app_state = APP_STATE
             .lock()
@@ -785,7 +739,8 @@ pub fn close_app(app_handle: AppHandle) -> Result<CustomResult, CustomResult> {
     Ok(CustomResult::success(None, None))
 }
 
-// 退出前落盘增量更新：将 update_temp\* 复制到安装目录。文件已在下载时校验过 SHA256。
+// 退出前落盘增量更新：将 update_temp 下的根文件及 resources\* 复制到安装目录。
+// 文件已在下载时校验过 SHA256。
 //
 // 核心服务 exe（FaceWinUnlock-Server.exe）正被运行中的服务占用、无法直接覆盖：若本次更新
 // 包含它且服务在运行，先发 "exit" 优雅停掉整个服务树（worker 干净退出码 0 → supervisor 检测到
@@ -797,35 +752,26 @@ fn apply_downloaded_update() {
     if !update_dir.exists() {
         return;
     }
+    if !staged_update_is_complete(&update_dir) {
+        warn!("apply_downloaded_update: 丢弃未完整校验的更新暂存目录");
+        let _ = std::fs::remove_dir_all(&update_dir);
+        return;
+    }
 
-    // 本次更新是否要替换正在运行的核心服务 exe？是则先停服务释放文件锁。
-    let server_running =
-        update_dir.join("FaceWinUnlock-Server.exe").exists() && check_process_running().is_ok();
-    if server_running {
+    // 服务 exe 或任一模型资源更新都要求后台服务退出：前者需要释放文件锁，后者需要
+    // 丢弃已加载的旧模型并在重新启动后加载新资源。
+    let model_resources_updated = staged_model_resources_present(&update_dir);
+    let restart_unlock =
+        update_dir.join("FaceWinUnlock-Server.exe").exists() || model_resources_updated;
+    let unlock_was_running = restart_unlock && check_process_running().is_ok();
+    if unlock_was_running {
         stop_unlock_service();
     }
     let passkey_package_updated = update_dir.join("FaceWinUnlock-Passkey.msix").exists()
         || update_dir.join("FaceWinUnlock-Passkey.cer").exists();
 
-    let entries = match std::fs::read_dir(&update_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let src = entry.path();
-        if !src.is_file() {
-            continue;
-        }
-        let name = match src.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let dst = ROOT_DIR.join(&name);
-        if std::fs::copy(&src, &dst).is_err() {
-            // 仍被占用（极少见）：写出 X.new，下次启动时由 apply_pending_updates 替换
-            let _ = std::fs::copy(&src, ROOT_DIR.join(format!("{name}.new")));
-        }
-    }
+    apply_staged_directory(&update_dir, Path::new(""));
+    apply_staged_directory(&update_dir.join("resources"), Path::new("resources"));
 
     if passkey_package_updated {
         match crate::modules::passkey_plugin::update_bundled_passkey_plugin_preserving_data() {
@@ -840,11 +786,78 @@ fn apply_downloaded_update() {
     let _ = std::fs::remove_dir_all(&update_dir);
 
     // 服务已被我们停掉 → 通过计划任务重新拉起新版本（任务自带 1 分钟 TimeTrigger 兜底重启）。
-    if server_running {
+    if unlock_was_running {
         let _ = Command::new("schtasks")
             .args(&["/Run", "/TN", "FaceWinUnlockServer"])
             .creation_flags(CREATE_NO_WINDOW)
             .status();
+    }
+}
+
+fn staged_update_is_complete(update_dir: &Path) -> bool {
+    use crate::modules::update_download::{UPDATE_READY_CONTENT, UPDATE_READY_MARKER};
+
+    std::fs::read(update_dir.join(UPDATE_READY_MARKER))
+        .is_ok_and(|content| content == UPDATE_READY_CONTENT)
+}
+
+fn staged_model_resources_present(update_dir: &Path) -> bool {
+    std::fs::read_dir(update_dir.join("resources"))
+        .map(|entries| entries.flatten().any(|entry| entry.path().is_file()))
+        .unwrap_or(false)
+}
+
+fn apply_staged_directory(staged_dir: &Path, relative_dir: &Path) {
+    let entries = match std::fs::read_dir(staged_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        if !src.is_file() {
+            continue;
+        }
+        let Some(name) = src.file_name() else {
+            continue;
+        };
+        if name == std::ffi::OsStr::new(crate::modules::update_download::UPDATE_READY_MARKER) {
+            continue;
+        }
+        let dst = ROOT_DIR.join(relative_dir).join(name);
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::copy(&src, &dst).is_err() {
+            // 仍被占用（极少见）：写出 X.new，下次启动时由 apply_pending_updates 替换。
+            let pending_name = format!("{}.new", name.to_string_lossy());
+            let _ = std::fs::copy(&src, dst.with_file_name(pending_name));
+        }
+    }
+}
+
+#[cfg(test)]
+mod staged_update_tests {
+    use super::{staged_model_resources_present, staged_update_is_complete};
+    use crate::modules::update_download::{UPDATE_READY_CONTENT, UPDATE_READY_MARKER};
+
+    #[test]
+    fn requires_valid_completion_marker_and_detects_model_resources() {
+        let directory =
+            std::env::temp_dir().join(format!("facewinunlock-staged-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+
+        assert!(!staged_update_is_complete(&directory));
+        std::fs::write(directory.join(UPDATE_READY_MARKER), b"incomplete").unwrap();
+        assert!(!staged_update_is_complete(&directory));
+        std::fs::write(directory.join(UPDATE_READY_MARKER), UPDATE_READY_CONTENT).unwrap();
+        assert!(staged_update_is_complete(&directory));
+
+        assert!(!staged_model_resources_present(&directory));
+        std::fs::create_dir_all(directory.join("resources")).unwrap();
+        std::fs::write(directory.join("resources").join("model.xml"), b"model").unwrap();
+        assert!(staged_model_resources_present(&directory));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
 
@@ -866,39 +879,102 @@ fn stop_unlock_service() {
     // 额外等一拍，确保 supervisor 退出、文件句柄完全释放
     thread::sleep(Duration::from_millis(500));
 }
-// 用指定 backend/target 构建全部五个 OpenCV 模型；关键安全模型任一失败即返回错误。
+fn model_path_for_backend(
+    resources: &std::path::Path,
+    stem: &str,
+    backend_id: i32,
+    target_id: i32,
+) -> Result<String, String> {
+    let extension = if backend_id == 2 && target_id == 9 {
+        "xml"
+    } else {
+        "onnx"
+    };
+    let path = resources.join(format!("{stem}.{extension}"));
+    if !path.is_file() {
+        return Err(format!("推理模型不存在: {}", path.display()));
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn probe_accelerated_models(
+    detector: &mut Ptr<FaceDetectorYN>,
+    recognizer: &mut Ptr<FaceRecognizerSF>,
+    liveness: &mut opencv::dnn::Net,
+) -> Result<(), String> {
+    let detector_input =
+        Mat::new_rows_cols_with_default(320, 320, CV_8UC3, opencv::core::Scalar::all(0.0))
+            .map_err(|e| format!("创建检测器探测输入失败: {:?}", e))?;
+    detector
+        .set_input_size(Size::new(320, 320))
+        .map_err(|e| format!("设置检测器探测尺寸失败: {:?}", e))?;
+    let mut faces = Mat::default();
+    detector
+        .detect(&detector_input, &mut faces)
+        .map_err(|e| format!("检测器后端前向自检失败: {:?}", e))?;
+
+    let aligned =
+        Mat::new_rows_cols_with_default(112, 112, CV_8UC3, opencv::core::Scalar::all(0.0))
+            .map_err(|e| format!("创建识别器探测输入失败: {:?}", e))?;
+    let mut feature = Mat::default();
+    recognizer
+        .feature(&aligned, &mut feature)
+        .map_err(|e| format!("识别器后端前向自检失败: {:?}", e))?;
+
+    let live_input =
+        Mat::new_rows_cols_with_default(128, 128, CV_8UC3, opencv::core::Scalar::all(0.0))
+            .map_err(|e| format!("创建活体探测输入失败: {:?}", e))?;
+    let blob = opencv::dnn::blob_from_image(
+        &live_input,
+        1.0 / 128.0,
+        Size::new(128, 128),
+        Scalar::new(127.5, 127.5, 127.5, 0.0),
+        true,
+        false,
+        opencv::core::CV_32F,
+    )
+    .map_err(|e| format!("创建活体后端探测输入失败: {:?}", e))?;
+    liveness
+        .set_input(&blob, "", 1.0, Scalar::default())
+        .map_err(|e| format!("设置活体后端探测输入失败: {:?}", e))?;
+    let output = liveness
+        .forward_single("")
+        .map_err(|e| format!("活体模型后端前向自检失败: {:?}", e))?;
+    if output.total() != 2 {
+        return Err(format!(
+            "活体模型后端自检输出数量错误: {}",
+            output.total()
+        ));
+    }
+    Ok(())
+}
+
+// 用指定 backend/target 构建 UI 录入需要的三个 OpenCV 模型。
 // 不写入全局状态，便于在失败时安全回退到其它后端后再统一赋值。
 fn build_opencv_models(
     backend_id: i32,
     target_id: i32,
-) -> Result<(Ptr<FaceDetectorYN>, Ptr<FaceRecognizerSF>, opencv::dnn::Net, Option<opencv::dnn::Net>), String> {
+) -> Result<
+    (
+        Ptr<FaceDetectorYN>,
+        Ptr<FaceRecognizerSF>,
+        opencv::dnn::Net,
+    ),
+    String,
+> {
     let res = ROOT_DIR.join("resources");
-    let detector_path = res
-        .join("face_detection_yunet_2023mar.onnx")
-        .to_string_lossy()
-        .into_owned();
-    let recognizer_path = res
-        .join("face_recognition_sface_2021dec.onnx")
-        .to_string_lossy()
-        .into_owned();
-    let primary_liveness_path = res
-        .join("anti_spoof_mn3.onnx")
-        .to_string_lossy()
-        .into_owned();
-    let liveness_path = res
-        .join("face_liveness.onnx")
-        .to_string_lossy()
-        .into_owned();
-    let landmark_path = res
-        .join("face_landmark_68.onnx")
-        .to_string_lossy()
-        .into_owned();
+    let detector_path =
+        model_path_for_backend(&res, "face_detection_yunet_2023mar", backend_id, target_id)?;
+    let recognizer_path =
+        model_path_for_backend(&res, "face_recognition_sface_2021dec", backend_id, target_id)?;
+    let liveness_path =
+        model_path_for_backend(&res, "face_liveness", backend_id, target_id)?;
 
     let t0 = Instant::now();
 
     // 先在主线程加载 detector：它最小最快，且借此触发 OpenCV DNN 的一次性全局初始化（层工厂注册等），
     // 使随后并行加载 recognizer/liveness 时不会多线程并发触发该全局初始化的竞态（issue #3）。
-    let detector = FaceDetectorYN::create(
+    let mut detector = FaceDetectorYN::create(
         &detector_path,
         "",
         Size::new(320, 320),
@@ -911,23 +987,14 @@ fn build_opencv_models(
     .map_err(|e| format!("初始化检测器模型失败: {:?}", e))?;
     let det_ms = t0.elapsed().as_millis();
 
-    // recognizer（SFace，最重）与两路 liveness/landmark 相互独立、全局初始化已完成，**并行加载**。
+    // recognizer（SFace，最重）与 liveness 相互独立、全局初始化已完成，并行加载。
     let t1 = Instant::now();
     let rec_handle = thread::spawn(move || -> Result<Ptr<FaceRecognizerSF>, String> {
         FaceRecognizerSF::create(&recognizer_path, "", backend_id, target_id)
             .map_err(|e| format!("初始化识别器模型失败: {:?}", e))
     });
-    let primary_live_handle = thread::spawn(move || -> Result<opencv::dnn::Net, String> {
-        let mut net = opencv::dnn::read_net_from_onnx(&primary_liveness_path)
-            .map_err(|e| format!("初始化主活体检测模型失败: {:?}", e))?;
-        net.set_preferable_backend(backend_id)
-            .map_err(|e| format!("设置主活体推理后端失败: {:?}", e))?;
-        net.set_preferable_target(target_id)
-            .map_err(|e| format!("设置主活体推理目标失败: {:?}", e))?;
-        Ok(net)
-    });
     let live_handle = thread::spawn(move || -> Result<opencv::dnn::Net, String> {
-        let mut net = opencv::dnn::read_net_from_onnx(&liveness_path)
+        let mut net = opencv::dnn::read_net(&liveness_path, "", "")
             .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?;
         net.set_preferable_backend(backend_id)
             .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
@@ -935,43 +1002,21 @@ fn build_opencv_models(
             .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
         Ok(net)
     });
-    // landmark 模型与 recognizer/liveness 无依赖，一并并行加载。
-    let lmk_handle = thread::spawn(move || -> Result<opencv::dnn::Net, String> {
-        let mut net = opencv::dnn::read_net_from_onnx(&landmark_path)
-            .map_err(|e| format!("初始化关键点模型失败: {:?}", e))?;
-        net.set_preferable_backend(backend_id)
-            .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
-        net.set_preferable_target(target_id)
-            .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
-        Ok(net)
-    });
-
-    let recognizer = rec_handle
+    let mut recognizer = rec_handle
         .join()
         .map_err(|_| "识别器加载线程 panic".to_string())??;
-    let _primary_liveness = primary_live_handle
-        .join()
-        .map_err(|_| "主活体检测加载线程 panic".to_string())??;
-    let liveness = live_handle
+    let mut liveness = live_handle
         .join()
         .map_err(|_| "活体检测加载线程 panic".to_string())??;
-    let landmark = match lmk_handle.join() {
-        Ok(Ok(net)) => {
-            info!("关键点模型加载成功");
-            Some(net)
-        }
-        Ok(Err(e)) => {
-            warn!("关键点模型加载失败（活体眨眼检测不可用，微运动检测仍正常工作）: {}", e);
-            None
-        }
-        Err(_) => {
-            warn!("关键点模型加载线程 panic（活体眨眼检测不可用，微运动检测仍正常工作）");
-            None
-        }
-    };
+
+    // OpenCV/OpenVINO 可能把真正的设备编译延迟到第一次 forward。非 CPU 后端必须
+    // 在写入全局状态前跑一次自检，否则 NPU 导入失败会在录入循环中才暴露，无法回退。
+    if backend_id != 0 || target_id != 0 {
+        probe_accelerated_models(&mut detector, &mut recognizer, &mut liveness)?;
+    }
 
     info!(
-        "OpenCV 模型加载：detector {}ms(主线程) + recognizer/dual-liveness/landmark 并行 {}ms = 合计 {}ms (backend={}, target={})",
+        "OpenCV 模型加载：detector {}ms(主线程) + recognizer/liveness 并行 {}ms = 合计 {}ms (backend={}, target={})",
         det_ms,
         t1.elapsed().as_millis(),
         t0.elapsed().as_millis(),
@@ -979,7 +1024,7 @@ fn build_opencv_models(
         target_id
     );
 
-    Ok((detector, recognizer, liveness, landmark))
+    Ok((detector, recognizer, liveness))
 }
 
 // load_opencv_model 的返回值：告知前端实际生效的推理后端，
@@ -1025,33 +1070,37 @@ pub fn load_opencv_model(
         if app_state.detector.is_some()
             && app_state.recognizer.is_some()
             && app_state.liveness.is_some()
+            && app_state.model_requested_backend == Some(backend_id)
+            && app_state.model_requested_target == Some(target_id)
         {
+            let active_backend = app_state.model_active_backend.unwrap_or(backend_id);
+            let active_target = app_state.model_active_target.unwrap_or(target_id);
             return Ok(ModelLoadResult {
                 requested_backend: backend_id,
                 requested_target: target_id,
-                active_backend: backend_id,
-                active_target: target_id,
-                fell_back: false,
-                fallback_reason: None,
+                active_backend,
+                active_target,
+                fell_back: active_backend != backend_id || active_target != target_id,
+                fallback_reason: app_state.model_fallback_reason.clone(),
             });
         }
     }
 
     // Model construction is intentionally outside APP_STATE's critical section.
     // It can take seconds on a cold start, while camera ownership must remain responsive.
-    let (detector, recognizer, liveness, landmark, active_backend, active_target, fell_back, fallback_reason) =
+    let (detector, recognizer, liveness, active_backend, active_target, fell_back, fallback_reason) =
         match build_opencv_models(backend_id, target_id) {
-            Ok((d, r, l, lmk)) => (d, r, l, lmk, backend_id, target_id, false, None),
+            Ok((d, r, l)) => (d, r, l, backend_id, target_id, false, None),
             Err(e) if backend_id != 0 || target_id != 0 => {
                 warn!(
                     "使用推理后端 ({},{}) 加载 OpenCV 模型失败: {}；自动回退到 CPU。\
                      如需使用 Intel NPU，请确认已安装 OpenVINO 运行时及对应的 OpenCV DNN 插件。",
                     backend_id, target_id, e
                 );
-                let (d, r, l, lmk) = build_opencv_models(0, 0).map_err(|cpu_err| {
+                let (d, r, l) = build_opencv_models(0, 0).map_err(|cpu_err| {
                     format!("加载 OpenCV 模型失败（已尝试回退 CPU）：{}", cpu_err)
                 })?;
-                (d, r, l, lmk, 0, 0, true, Some(e))
+                (d, r, l, 0, 0, true, Some(e))
             }
             Err(e) => return Err(e),
         };
@@ -1062,7 +1111,11 @@ pub fn load_opencv_model(
     app_state.detector = Some(OpenCVResource { inner: detector });
     app_state.recognizer = Some(OpenCVResource { inner: recognizer });
     app_state.liveness = Some(OpenCVResource { inner: liveness });
-    app_state.landmark = landmark.map(|inner| OpenCVResource { inner });
+    app_state.model_requested_backend = Some(backend_id);
+    app_state.model_requested_target = Some(target_id);
+    app_state.model_active_backend = Some(active_backend);
+    app_state.model_active_target = Some(active_target);
+    app_state.model_fallback_reason = fallback_reason.clone();
 
     Ok(ModelLoadResult {
         requested_backend: backend_id,
@@ -1097,10 +1150,12 @@ pub fn unload_model() -> Result<(), String> {
     if app_state.liveness.is_some() {
         app_state.liveness = None;
     }
+    app_state.model_requested_backend = None;
+    app_state.model_requested_target = None;
+    app_state.model_active_backend = None;
+    app_state.model_active_target = None;
+    app_state.model_fallback_reason = None;
 
-    if app_state.landmark.is_some() {
-        app_state.landmark = None;
-    }
     Ok(())
 }
 

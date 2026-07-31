@@ -34,6 +34,7 @@ The workflow publishes the installer and standalone runtime assets, then writes 
 4. Returns only missing/changed files and total bytes.
 5. Downloads to `<install dir>\update_temp`.
 6. Revalidates downloaded size and hash before staging.
+7. Writes a completion marker only after every selected file passes validation; any failed or interrupted batch is discarded and never applied.
 
 The updater accepts asset URLs only from this repository's immutable release-tag path.
 
@@ -41,13 +42,18 @@ The updater accepts asset URLs only from this repository's immutable release-tag
 
 The UI asks before downloading and before restart. On application shutdown, staged files are copied into place. Locked files use the existing replacement/next-start path. The installer remains the fallback for changes that cannot be represented as managed-file replacement.
 
-The differential manifest currently covers the files that can be safely replaced in the install root:
+The differential manifest currently covers the files that can be safely replaced:
 
-- Unlock service executable
-- Passkey MSIX
-- Passkey certificate
+- Install-root executables and Passkey assets
+- `resources/*.onnx` inference models
+- `resources/*.xml` and `resources/*.bin` OpenVINO IR models
+- The model license under `resources`
 
-The Credential Provider DLL is deployed to System32 and requires `deploy_core_components`; it is therefore updated through the full installer. The NSIS setup executable is published as a release asset and is the full-update/download fallback, but it is not a differential replacement entry.
+Manifest paths are limited to a file in the install root or one `resources/<filename>` level. Nested directories, traversal, and NTFS alternate-data-stream paths are rejected. Staging preserves this relative path. If a target is locked, its `.new` replacement is stored beside it and applied on the next launch; startup checks both the install root and `resources`.
+
+Replacing any managed model resource stops and restarts the Unlock service when it was running, so repaired ONNX/IR files take effect without waiting for a Windows restart.
+
+The Credential Provider DLL is deployed to System32 and requires `deploy_core_components`; OpenCV/OpenVINO runtime layout changes also require installer deployment. Those files are therefore updated through the full installer. The NSIS setup executable is published as a release asset and is the full-update/download fallback, but it is not a differential replacement entry.
 
 ## Recovery And Safety
 

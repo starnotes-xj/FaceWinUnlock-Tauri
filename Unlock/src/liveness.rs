@@ -88,8 +88,13 @@ enum FrameVote {
 
 impl PassiveLiveness {
     pub fn load(resources: &Path, backend_id: i32, target_id: i32) -> Result<Self> {
-        let primary_path = resources.join("anti_spoof_mn3.onnx");
-        let secondary_path = resources.join("face_liveness.onnx");
+        let extension = if backend_id == 2 && target_id == 9 {
+            "xml"
+        } else {
+            "onnx"
+        };
+        let primary_path = resources.join(format!("anti_spoof_mn3.{extension}"));
+        let secondary_path = resources.join(format!("face_liveness.{extension}"));
 
         let (primary, primary_contract) =
             load_model(&primary_path, backend_id, target_id, ExpectedModel::Primary)?;
@@ -205,7 +210,7 @@ fn load_model(
         .to_str()
         .ok_or_else(|| cv_error("model path is not valid UTF-8"))?;
 
-    let mut net = dnn::read_net_from_onnx(path_str)?;
+    let mut net = dnn::read_net(path_str, "", "")?;
     net.set_preferable_backend(backend_id)?;
     net.set_preferable_target(target_id)?;
 

@@ -85,8 +85,6 @@ invoke('get_install_dir').then((res)=>{
     } catch (error) { warn(formatObjectString("自动检测摄像头失败：", error)); }
   }
 }).then(()=>{
-  return invoke("init_model");
-}).then(()=>{
   return facesStore.init();
 }).then(async ()=>{
   let is_initialized = optionsStore.getOptionByKey('is_initialized');

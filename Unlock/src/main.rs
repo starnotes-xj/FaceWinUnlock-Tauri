@@ -34,7 +34,7 @@ use std::{
 
 use liveness::{LivenessDecision, LivenessStatus, PassiveLiveness};
 use opencv::{
-    core::{Mat, Ptr, Rect, Size},
+    core::{Mat, Ptr, Rect, Scalar, Size, CV_8UC3},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     prelude::*,
     videoio::{self, VideoCapture},
@@ -905,9 +905,47 @@ struct FaceObservation {
     face_rect: Rect,
 }
 
+fn model_path_for_inference(
+    resources: &Path,
+    stem: &str,
+    inference: InferenceBackend,
+) -> PathBuf {
+    let extension = if inference.backend_id == 2 && inference.target_id == 9 {
+        "xml"
+    } else {
+        "onnx"
+    };
+    resources.join(format!("{stem}.{extension}"))
+}
+
+fn probe_identity_models(
+    detector: &mut Ptr<FaceDetectorYN>,
+    recognizer: &mut Ptr<FaceRecognizerSF>,
+) -> opencv::Result<()> {
+    let detector_input = Mat::new_rows_cols_with_default(
+        320,
+        320,
+        CV_8UC3,
+        Scalar::all(0.0),
+    )?;
+    detector.set_input_size(Size::new(320, 320))?;
+    let mut faces = Mat::default();
+    detector.detect(&detector_input, &mut faces)?;
+
+    let aligned =
+        Mat::new_rows_cols_with_default(112, 112, CV_8UC3, Scalar::all(0.0))?;
+    let mut feature = Mat::default();
+    recognizer.feature(&aligned, &mut feature)?;
+    Ok(())
+}
+
 fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<Models> {
-    let detector = FaceDetectorYN::create(
-        resources.join("face_detection_yunet_2023mar.onnx").to_str().unwrap_or(""),
+    let detector_path =
+        model_path_for_inference(resources, "face_detection_yunet_2023mar", inference);
+    let recognizer_path =
+        model_path_for_inference(resources, "face_recognition_sface_2021dec", inference);
+    let mut detector = FaceDetectorYN::create(
+        detector_path.to_str().unwrap_or(""),
         "",
         Size::new(320, 320),
         0.9,
@@ -916,13 +954,18 @@ fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<
         inference.backend_id,
         inference.target_id,
     )?;
-    let recognizer = FaceRecognizerSF::create(
-        resources.join("face_recognition_sface_2021dec.onnx").to_str().unwrap_or(""),
+    let mut recognizer = FaceRecognizerSF::create(
+        recognizer_path.to_str().unwrap_or(""),
         "",
         inference.backend_id,
         inference.target_id,
     )?;
     let liveness = PassiveLiveness::load(resources, inference.backend_id, inference.target_id)?;
+    if inference != CPU_INFERENCE {
+        // OpenCV/OpenVINO often defers device compilation until first inference.
+        // Probe before accepting the backend so a broken NPU path can fall back to CPU.
+        probe_identity_models(&mut detector, &mut recognizer)?;
+    }
     Ok(Models {
         detector,
         recognizer,

@@ -120,7 +120,7 @@ export default {
     motionDetection: 'Motion Detection',
     motionPass: 'Motion detection passed',
     motionFail: 'Possible photo attack: no natural facial micro-motion detected',
-    livenessDesc: 'Passive micro-motion detection (auto photo-proof) + deep learning model assist, no user action required',
+    livenessDesc: 'Five-frame passive model voting (automatic photo defense), with no blink, turn, or spoken action',
   },
   options: {
     title: 'Preferences',

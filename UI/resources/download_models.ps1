@@ -67,14 +67,24 @@ if (-not $livenessValid) {
     Write-Host "[4/5] MiniFASNetV2 已存在且校验通过, 跳过" -ForegroundColor Gray
 }
 
-# 5. 68点人脸关键点模型 (PIPNet, 用于静默眨眼检测)
-$landmark = "$ResourceDir\face_landmark_68.onnx"
-if (-not (Test-Path $landmark)) {
-    Write-Host "[5/5] 下载68点人脸关键点模型..." -ForegroundColor Yellow
-    Invoke-WebRequest -Uri "https://github.com/yakhyo/pipnet-onnx/releases/download/weights/pipnet_r18_300w_celeba_68.onnx" -OutFile $landmark
-    Write-Host "  ✓ 关键点模型完成" -ForegroundColor Green
+# 5. 为 Intel NPU 生成 OpenVINO IR。OpenCV 直接导入部分 ONNX 算子会失败，
+# 预转换的 IR 可绕过 OpenCV ONNX importer；固定使用 OpenVINO 2024.6 生成发布资产。
+$ovc = Get-Command ovc -ErrorAction SilentlyContinue
+if ($null -eq $ovc) {
+    Write-Host "[5/5] 未找到 ovc，保留仓库内已有 OpenVINO IR（重建请安装 openvino==2024.6.0）" -ForegroundColor Gray
 } else {
-    Write-Host "[5/5] 关键点模型已存在, 跳过" -ForegroundColor Gray
+    foreach ($model in @($yunet, $sface, $antiSpoof, $liveness)) {
+        $xml = [System.IO.Path]::ChangeExtension($model, ".xml")
+        $bin = [System.IO.Path]::ChangeExtension($model, ".bin")
+        if (-not (Test-Path $xml) -or -not (Test-Path $bin) -or
+            (Get-Item $xml).LastWriteTimeUtc -lt (Get-Item $model).LastWriteTimeUtc) {
+            & $ovc.Source $model --output_model $xml --compress_to_fp16 True
+            if ($LASTEXITCODE -ne 0) {
+                throw "OpenVINO IR 转换失败: $model"
+            }
+        }
+    }
+    Write-Host "[5/5] OpenVINO IR 已生成" -ForegroundColor Green
 }
 
 Write-Host ""

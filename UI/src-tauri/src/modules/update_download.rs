@@ -24,10 +24,12 @@ const MANIFEST_URL: &str =
     "https://github.com/starnotes-xj/FaceWinUnlock-Tauri/releases/latest/download/update_manifest.json";
 
 const USER_AGENT: &str = "FaceWinUnlock-Tauri-UpdateDownload";
+pub(crate) const UPDATE_READY_MARKER: &str = ".complete";
+pub(crate) const UPDATE_READY_CONTENT: &[u8] = b"facewinunlock-update-v1";
 
 #[derive(Deserialize, Clone)]
 pub(crate) struct ManifestFile {
-    /// 安装目录下的文件名（如 `FaceWinUnlock-Server.exe`）
+    /// 安装目录下的相对路径（根文件或 `resources/<file>`）
     path: String,
     /// 期望的 SHA256（小写 hex）
     sha256: String,
@@ -90,24 +92,33 @@ fn apply_update_inner() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
 
-    for name in &diff.files_to_update {
-        let mf = manifest
-            .files
-            .iter()
-            .find(|x| &x.path == name)
-            .ok_or_else(|| format!("manifest 缺少文件项: {name}"))?;
-        let dest = tmp_dir.join(validated_manifest_path(&mf.path)?);
-        download_file(&mf.url, &dest, mf.size)?;
+    let download_result = (|| -> Result<(), String> {
+        for name in &diff.files_to_update {
+            let mf = manifest
+                .files
+                .iter()
+                .find(|x| &x.path == name)
+                .ok_or_else(|| format!("manifest 缺少文件项: {name}"))?;
+            let dest = tmp_dir.join(validated_manifest_path(&mf.path)?);
+            download_file(&mf.url, &dest, mf.size)?;
 
-        // 下载后立即校验 SHA256；损坏/不完整直接整体失败，避免把坏文件替换进安装目录。
-        let got = sha256_file(&dest)?;
-        if got != mf.sha256.to_lowercase() {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            return Err(format!(
-                "{} 下载校验失败（期望 {}，实际 {}）",
-                mf.path, mf.sha256, got
-            ));
+            // 下载后立即校验 SHA256；损坏/不完整直接整体失败，避免把坏文件替换进安装目录。
+            let got = sha256_file(&dest)?;
+            if got != mf.sha256.to_lowercase() {
+                return Err(format!(
+                    "{} 下载校验失败（期望 {}，实际 {}）",
+                    mf.path, mf.sha256, got
+                ));
+            }
         }
+        // 只有全部文件校验成功后才写完成标记；崩溃或网络/磁盘失败留下的半批文件
+        // 不会在应用退出时进入活动安装。
+        std::fs::write(tmp_dir.join(UPDATE_READY_MARKER), UPDATE_READY_CONTENT)
+            .map_err(|e| format!("写入更新完成标记失败: {e}"))
+    })();
+    if let Err(error) = download_result {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(error);
     }
 
     Ok(tmp_dir.to_string_lossy().to_string())
@@ -190,11 +201,32 @@ fn validate_manifest(manifest: &UpdateManifest) -> Result<(), String> {
 
 fn validated_manifest_path(raw: &str) -> Result<PathBuf, String> {
     let path = Path::new(raw);
-    let mut components = path.components();
-    let is_single_file =
-        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
-    if raw.trim().is_empty() || path.is_absolute() || !is_single_file {
+    if raw.trim().is_empty() || path.is_absolute() {
         return Err(format!("更新清单包含不安全路径: {raw}"));
+    }
+
+    let components: Vec<_> = path.components().collect();
+    let file_name = match components.as_slice() {
+        [Component::Normal(file_name)] => file_name,
+        [Component::Normal(parent), Component::Normal(file_name)]
+            if parent
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("resources")) =>
+        {
+            file_name
+        }
+        _ => return Err(format!("更新清单包含不安全路径: {raw}")),
+    };
+    let safe_file_name = file_name.to_str().is_some_and(|name| {
+        !name.is_empty()
+            && name != "."
+            && name != ".."
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    });
+    if !safe_file_name {
+        return Err(format!("更新清单包含不安全文件名: {raw}"));
     }
     Ok(path.to_path_buf())
 }
@@ -280,10 +312,13 @@ mod tests {
             "/evil.exe",
             "bin/../evil.exe",
             "tools/helper.exe",
+            "resources/nested/model.xml",
+            "resources/model.xml:stream",
         ] {
             assert!(validated_manifest_path(path).is_err(), "{path}");
         }
         assert!(validated_manifest_path("FaceWinUnlock-Server.exe").is_ok());
+        assert!(validated_manifest_path("resources/anti_spoof_mn3.onnx").is_ok());
     }
 
     #[test]
@@ -294,6 +329,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("same.exe"), b"same").unwrap();
         std::fs::write(root.join("changed.exe"), b"old").unwrap();
+        std::fs::create_dir_all(root.join("resources")).unwrap();
 
         let manifest = UpdateManifest {
             version: "9.9.9".to_string(),
@@ -301,15 +337,20 @@ mod tests {
                 manifest_file("same.exe", b"same"),
                 manifest_file("changed.exe", b"new"),
                 manifest_file("missing.exe", b"missing"),
+                manifest_file("resources/model.xml", b"model"),
             ],
         };
 
         let diff = compute_diff_at(&root, &manifest).unwrap();
         assert_eq!(
             diff.files_to_update,
-            vec!["changed.exe".to_string(), "missing.exe".to_string()]
+            vec![
+                "changed.exe".to_string(),
+                "missing.exe".to_string(),
+                "resources/model.xml".to_string()
+            ]
         );
-        assert_eq!(diff.total_size_mb, 10.0 / 1_048_576.0);
+        assert_eq!(diff.total_size_mb, 15.0 / 1_048_576.0);
 
         std::fs::remove_dir_all(root).unwrap();
     }

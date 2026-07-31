@@ -598,8 +598,8 @@
 	const livenessEnabledChange = ()=>{
 		if(config.livenessEnabled){
 			ElMessageBox.confirm(
-				'启用后将在录入时进行活体检测（被动微运动检测 + 深度学习模型），识别准确率较以往有显著提升。<br />' +
-				'当前只影响录入页面的一致性验证，不参与锁屏解锁。<br />' +
+				'启用后将在录入一致性验证时进行五帧被动活体检测，无需眨眼或转头。<br />' +
+				'此开关只控制录入页面；锁屏解锁始终执行独立的双模型被动活体检测。<br />' +
 				'是否开启活体检测？',
 				'开启活体检测',
 				{
@@ -844,12 +844,12 @@
 							<div class="option-row">
 								<div class="row-text">
 									<p class="label">一致性验证启用活体检测</p>
-									<p class="sub">仅用于录入页面的人脸一致性验证，不参与锁屏解锁；含被动微运动检测（自动防照片攻击），无需额外操作</p>
+									<p class="sub">仅控制录入页面的一致性验证；锁屏解锁始终启用独立双模型防照片检测</p>
 								</div>
 								<el-switch v-model="config.livenessEnabled" @change="livenessEnabledChange"/>
 							</div>
 							<p class="row-help" style="margin: -6px 0 6px; font-size: 12px; color: var(--v7-text-dim);">
-								自动防照片攻击：录制时通过微运动检测识别是否为真人面部，无需用户主动配合
+								自动防照片攻击：连续五帧被动模型投票，无需眨眼、转头或说话
 							</p>
 
 							<!-- 阈值设置 -->

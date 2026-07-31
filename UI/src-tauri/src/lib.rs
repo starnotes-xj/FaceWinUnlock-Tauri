@@ -37,7 +37,7 @@ use tauri_plugin_log::{Target, TargetKind};
 use utils::api::{
     add_scheduled_task, check_process_running, check_scheduled_task, check_trigger_via_xml,
     close_app, delete_process_running, disable_scheduled_task, get_cache_dir, get_camera,
-    get_install_dir, get_now_username, get_uuid_v4, init_model, is_silent_launch,
+    get_install_dir, get_now_username, get_uuid_v4, is_silent_launch,
     load_opencv_model, open_camera, open_directory, prepare_camera_for_ui,
     repair_ui_auto_start_task,
     repair_unlock_scheduled_task, restart_unlock_service, run_scheduled_task, stop_camera,
@@ -56,7 +56,11 @@ pub struct AppState {
     pub detector: Option<OpenCVResource<Ptr<FaceDetectorYN>>>,
     pub recognizer: Option<OpenCVResource<Ptr<FaceRecognizerSF>>>,
     pub liveness: Option<OpenCVResource<opencv::dnn::Net>>,
-    pub landmark: Option<OpenCVResource<opencv::dnn::Net>>,
+    pub model_requested_backend: Option<i32>,
+    pub model_requested_target: Option<i32>,
+    pub model_active_backend: Option<i32>,
+    pub model_active_target: Option<i32>,
+    pub model_fallback_reason: Option<String>,
     pub camera: Option<OpenCVResource<VideoCapture>>,
 }
 
@@ -69,7 +73,11 @@ lazy_static::lazy_static! {
         detector: None,
         recognizer: None,
         liveness: None,
-        landmark: None,
+        model_requested_backend: None,
+        model_requested_target: None,
+        model_active_backend: None,
+        model_active_target: None,
+        model_fallback_reason: None,
         camera: None,
     });
 
@@ -94,8 +102,8 @@ lazy_static::lazy_static! {
 /// 应用上次退出时因文件占用而延迟的增量更新（`X.new` → `X`），best-effort。
 /// 由 `close_app` 在替换被占用文件时写出 `X.new`；此处在启动早期尝试改名替换。
 /// 目标仍被占用（如运行中的核心服务持有 `FaceWinUnlock-Server.exe`）时静默跳过，下次启动再试。
-fn apply_pending_updates() {
-    let entries = match std::fs::read_dir(*ROOT_DIR) {
+fn apply_pending_updates_in(directory: &Path) {
+    let entries = match std::fs::read_dir(directory) {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -104,9 +112,42 @@ fn apply_pending_updates() {
         if path.extension().and_then(|e| e.to_str()) == Some("new") {
             // FaceWinUnlock-Server.exe.new → FaceWinUnlock-Server.exe
             let target = path.with_extension("");
-            // Windows 下 fs::rename 会替换已存在目标；目标被占用则失败，跳过留待下次。
-            let _ = std::fs::rename(&path, &target);
+            // Windows 的 rename 不会覆盖已存在目标。直接覆盖复制；目标仍被占用时
+            // copy 失败并保留 .new，待下次启动继续尝试。
+            if std::fs::copy(&path, &target).is_ok() {
+                let _ = std::fs::remove_file(&path);
+            }
         }
+    }
+}
+
+fn apply_pending_updates() {
+    apply_pending_updates_in(*ROOT_DIR);
+    apply_pending_updates_in(&ROOT_DIR.join("resources"));
+}
+
+#[cfg(test)]
+mod pending_update_tests {
+    use super::apply_pending_updates_in;
+
+    #[test]
+    fn pending_update_overwrites_existing_resource() {
+        let directory = std::env::temp_dir().join(format!(
+            "facewinunlock-pending-update-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let target = directory.join("model.xml");
+        let pending = directory.join("model.xml.new");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&pending, b"new").unwrap();
+
+        apply_pending_updates_in(&directory);
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!pending.exists());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
 
@@ -234,7 +275,6 @@ pub fn run() {
                 is_silent_launch,
                 get_now_username,
                 test_win_logon,
-                init_model,
                 open_camera,
                 prepare_camera_for_ui,
                 stop_camera,

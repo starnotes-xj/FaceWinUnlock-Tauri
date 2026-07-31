@@ -32,6 +32,8 @@ The scheduled task starts a SYSTEM supervisor and worker. The worker owns camera
 
 Before the worker releases a password credential or grants a Passkey face request, it requires an identity match and a passive presentation-attack-detection (PAD) decision for the same face. The PAD pipeline uses `anti-spoof-mn3` as the primary model and MiniFASNetV2 as an independent secondary model. It aggregates at least six samples over at least 350 ms, requires the candidate identity to stay stable, and does not ask the user to blink, turn, or speak. A spoof, an inconclusive window, a missing/corrupt model, or an inference error fails closed to the normal Windows PIN/password path.
 
+CPU and OpenCL load the canonical ONNX assets. Intel NPU loads OpenVINO 2024.6 IR assets (`.xml` + `.bin`) so OpenCV does not have to import unsupported ONNX operators. Every accelerated backend performs a real detector, recognizer, and PAD forward pass before it becomes active; deferred device-compilation failures fall back to CPU.
+
 Automatic-lock presence checks intentionally use identity recognition without PAD: that path can only postpone a lock and can never release a credential or authorize a Passkey.
 
 The service does not call `LockWorkStation` from Session 0. It launches a one-shot helper under the active WTS user token on `winsta0\default`, then confirms the session lock flag.

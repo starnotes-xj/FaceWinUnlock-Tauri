@@ -1,4 +1,7 @@
-use std::sync::Mutex;
+use std::{
+    collections::VecDeque,
+    sync::{LazyLock, Mutex},
+};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -11,7 +14,9 @@ use serde_json::json;
 
 use crate::utils::custom_result::CustomResult;
 use crate::{APP_STATE, ROOT_DIR};
-use super::liveness::{BlinkDetector, MotionDetector, extract_landmarks_pipnet};
+
+const LIVENESS_WINDOW_SIZE: usize = 5;
+const LIVENESS_FACE_EXPAND_SCALE: f32 = 1.35;
 
 /// 缓存参考图的人脸特征，避免每帧重复提取 (#121)
 struct VerificationCache {
@@ -20,8 +25,50 @@ struct VerificationCache {
     #[allow(dead_code)] // 缓存时的检测阈值，保留备查
     threshold: f32,
 }
-static VERIFY_CACHE: std::sync::LazyLock<Mutex<Option<VerificationCache>>> =
-    std::sync::LazyLock::new(|| Mutex::new(None));
+static VERIFY_CACHE: LazyLock<Mutex<Option<VerificationCache>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[derive(Default)]
+struct LivenessVoteWindow {
+    reference_key: String,
+    scores: VecDeque<f32>,
+}
+
+impl LivenessVoteWindow {
+    fn record(&mut self, reference_key: &str, score: f32) {
+        if self.reference_key != reference_key {
+            self.reference_key.clear();
+            self.reference_key.push_str(reference_key);
+            self.scores.clear();
+        }
+        if self.scores.len() == LIVENESS_WINDOW_SIZE {
+            self.scores.pop_front();
+        }
+        self.scores.push_back(score);
+    }
+
+    fn result(&self, threshold: f64) -> Option<(usize, f32)> {
+        if self.scores.len() < LIVENESS_WINDOW_SIZE {
+            return None;
+        }
+        let live_count = self
+            .scores
+            .iter()
+            .filter(|&&score| (score as f64) >= threshold)
+            .count();
+        let average = self.scores.iter().sum::<f32>() / self.scores.len() as f32;
+        Some((live_count, average))
+    }
+}
+
+static LIVENESS_VOTES: LazyLock<Mutex<LivenessVoteWindow>> =
+    LazyLock::new(|| Mutex::new(LivenessVoteWindow::default()));
+
+pub(crate) fn reset_liveness_votes() {
+    if let Ok(mut votes) = LIVENESS_VOTES.lock() {
+        *votes = LivenessVoteWindow::default();
+    }
+}
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
@@ -195,27 +242,78 @@ fn cosine_similarity(feat1: &Mat, feat2: &Mat) -> Result<f64, String> {
         .map_err(|e| format!("特征比对失败: {:?}", e))
 }
 
-/// 活体检测，返回真实人脸置信度（0.0 ~ 1.0）
-fn liveness_score(frame: &Mat, faces: &Mat) -> Result<f32, String> {
-    let x = (*faces.at_2d::<f32>(0, 0).map_err(|e| e.to_string())?).max(0.0) as i32;
-    let y = (*faces.at_2d::<f32>(0, 1).map_err(|e| e.to_string())?).max(0.0) as i32;
-    let w = (*faces.at_2d::<f32>(0, 2).map_err(|e| e.to_string())?).max(1.0) as i32;
-    let h = (*faces.at_2d::<f32>(0, 3).map_err(|e| e.to_string())?).max(1.0) as i32;
-    let w = w.min(frame.cols() - x);
-    let h = h.min(frame.rows() - y);
-    if w <= 0 || h <= 0 {
-        return Ok(0.0);
+fn expanded_face_rect(frame: &Mat, faces: &Mat) -> Result<Rect, String> {
+    if frame.empty() || frame.cols() <= 0 || frame.rows() <= 0 {
+        return Err("活体检测帧为空".to_string());
     }
 
+    let x = *faces.at_2d::<f32>(0, 0).map_err(|e| e.to_string())?;
+    let y = *faces.at_2d::<f32>(0, 1).map_err(|e| e.to_string())?;
+    let width = (*faces.at_2d::<f32>(0, 2).map_err(|e| e.to_string())?).max(1.0);
+    let height = (*faces.at_2d::<f32>(0, 3).map_err(|e| e.to_string())?).max(1.0);
+
+    let center_x = x + width * 0.5;
+    let center_y = y + height * 0.5;
+    let expanded_width = width * LIVENESS_FACE_EXPAND_SCALE;
+    let expanded_height = height * LIVENESS_FACE_EXPAND_SCALE;
+    let left = (center_x - expanded_width * 0.5).floor().max(0.0) as i32;
+    let top = (center_y - expanded_height * 0.5).floor().max(0.0) as i32;
+    let right = (center_x + expanded_width * 0.5)
+        .ceil()
+        .min(frame.cols() as f32) as i32;
+    let bottom = (center_y + expanded_height * 0.5)
+        .ceil()
+        .min(frame.rows() as f32) as i32;
+
+    if right <= left || bottom <= top {
+        return Err("活体检测人脸区域无效".to_string());
+    }
+    Ok(Rect::new(left, top, right - left, bottom - top))
+}
+
+fn softmax2(logits: [f32; 2]) -> Result<[f32; 2], String> {
+    if !logits.iter().all(|value| value.is_finite()) {
+        return Err("活体模型输出包含非有限值".to_string());
+    }
+    let max = logits[0].max(logits[1]);
+    let exp0 = (logits[0] - max).exp();
+    let exp1 = (logits[1] - max).exp();
+    let sum = exp0 + exp1;
+    if !sum.is_finite() || sum <= f32::EPSILON {
+        return Err("活体模型输出无法归一化".to_string());
+    }
+    Ok([exp0 / sum, exp1 / sum])
+}
+
+fn secondary_live_score(output: &Mat) -> Result<f32, String> {
+    let flat = output
+        .reshape(1, 1)
+        .map_err(|e| format!("活体模型输出 reshape 失败: {:?}", e))?;
+    if flat.total() != 2 {
+        return Err(format!(
+            "活体模型应输出两个 logits，实际 {} 个",
+            flat.total()
+        ));
+    }
+    let logits = [
+        *flat.at::<f32>(0).map_err(|e| e.to_string())?,
+        *flat.at::<f32>(1).map_err(|e| e.to_string())?,
+    ];
+    Ok(softmax2(logits)?[1])
+}
+
+/// MiniFASNetV2 被动活体检测，返回真人类别置信度（0.0 ~ 1.0）。
+fn liveness_score(frame: &Mat, faces: &Mat) -> Result<f32, String> {
+    let crop_rect = expanded_face_rect(frame, faces)?;
     let face_crop = frame
-        .roi(Rect::new(x, y, w, h))
+        .roi(crop_rect)
         .map_err(|e| format!("裁剪人脸失败: {:?}", e))?;
 
     let blob = opencv::dnn::blob_from_image(
         &face_crop,
-        1.0 / 255.0,
-        Size::new(80, 80),
-        Scalar::new(0.5 * 255.0, 0.5 * 255.0, 0.5 * 255.0, 0.0),
+        1.0 / 128.0,
+        Size::new(128, 128),
+        Scalar::new(127.5, 127.5, 127.5, 0.0),
         true,
         false,
         opencv::core::CV_32F,
@@ -234,19 +332,11 @@ fn liveness_score(frame: &Mat, faces: &Mat) -> Result<f32, String> {
         .set_input(&blob, "", 1.0, Scalar::default())
         .map_err(|e| format!("设置 liveness 输入失败: {:?}", e))?;
 
-    // forward_single 是返回 Mat 的变体（区别于填充 OutputArray 的 forward）
     let output = net
         .inner
         .forward_single("")
         .map_err(|e| format!("liveness 前向推理失败: {:?}", e))?;
-
-    let flat = output
-        .reshape(1, 1)
-        .map_err(|e| format!("reshape 失败: {:?}", e))?;
-    let cols = flat.cols();
-    let idx = if cols >= 2 { 1 } else { 0 };
-    let score = *flat.at::<f32>(idx).map_err(|e| e.to_string())?;
-    Ok(score.clamp(0.0, 1.0))
+    secondary_live_score(&output)
 }
 
 // ─── 共用：从给定帧检测人脸并返回带框/原始 base64 ────────────────────────────
@@ -397,15 +487,18 @@ pub fn save_face_registration(
     ))
 }
 
-/// 从参考图提取特征向量（带缓存），避免每帧重复解码+检测+特征提取 (#121)
-fn get_ref_feature(reference_base64: &str, threshold: f32) -> Result<Mat, String> {
-    // 用 base64 长度+前16字符做简易哈希，检测参考图变化
-    let hash_key = format!(
+fn reference_cache_key(reference_base64: &str, threshold: f32) -> String {
+    format!(
         "{}:{}:{}",
         reference_base64.len(),
         threshold,
         &reference_base64[..reference_base64.len().min(64)]
-    );
+    )
+}
+
+/// 从参考图提取特征向量（带缓存），避免每帧重复解码+检测+特征提取 (#121)
+fn get_ref_feature(reference_base64: &str, threshold: f32) -> Result<Mat, String> {
+    let hash_key = reference_cache_key(reference_base64, threshold);
 
     {
         let cache = VERIFY_CACHE.lock().map_err(|e| e.to_string())?;
@@ -446,36 +539,6 @@ fn get_ref_feature(reference_base64: &str, threshold: f32) -> Result<Mat, String
     Ok(ref_feature)
 }
 
-/// 从帧中裁剪人脸并尝试提取 PIPNet 关键点，送入 BlinkDetector。
-/// 若模型未加载或提取失败则静默跳过。
-fn try_blink_detect(frame: &Mat, faces: &Mat, blink_detector: &mut BlinkDetector) {
-    let Ok(x_val) = faces.at_2d::<f32>(0, 0) else { return };
-    let x = (*x_val).max(0.0) as i32;
-    let Ok(y_val) = faces.at_2d::<f32>(0, 1) else { return };
-    let y = (*y_val).max(0.0) as i32;
-    let Ok(w_val) = faces.at_2d::<f32>(0, 2) else { return };
-    let w = (*w_val).max(1.0) as i32;
-    let Ok(h_val) = faces.at_2d::<f32>(0, 3) else { return };
-    let h = (*h_val).max(1.0) as i32;
-    let w = w.min(frame.cols() - x);
-    let h = h.min(frame.rows() - y);
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    let Ok(face_crop) = frame.roi(opencv::core::Rect::new(x, y, w, h)) else { return };
-    // roi() 返回 BoxedRef<Mat>，需 clone 为 Mat 再传引用
-    let Ok(face_crop_mat) = face_crop.try_clone() else { return };
-
-    let landmarks = {
-        let Ok(mut state) = crate::APP_STATE.lock() else { return };
-        let Some(net) = state.landmark.as_mut() else { return };
-        let Some(lm) = extract_landmarks_pipnet(&mut net.inner, &face_crop_mat) else { return };
-        lm
-    };
-
-    let _ = blink_detector.update(&landmarks);
-}
-
 /// 人脸验证（摄像头当前帧 vs 参考图），返回 { display_base64, success, score, message }
 /// reference_base64: 不含 data URI 前缀的 JPEG base64
 #[tauri::command]
@@ -513,8 +576,6 @@ pub fn verify_face(
     let frame =
         rotate_frame(&frame, camera_rotation).map_err(|e| CustomResult::error(Some(e), None))?;
 
-    let mut motion_detector = MotionDetector::new();
-
     // 2. 检测摄像头帧中的人脸
     let cam_faces =
         detect_faces(&frame, threshold).map_err(|e| CustomResult::error(Some(e), None))?;
@@ -533,110 +594,65 @@ pub fn verify_face(
         ));
     }
 
-    // 3a. 微运动检测（始终运行，接近零开销）
-    let _motion_score = motion_detector.update(&frame).unwrap_or(0.0);
-    if motion_detector.is_likely_photo() {
-        let raw_b64 = mat_to_data_url(&frame).map_err(|e| CustomResult::error(Some(e), None))?;
-        return Ok(CustomResult::success(
-            None,
-            Some(json!({
-                "display_base64": raw_b64,
-                "success": false,
-                "score": 0.0,
-                "message": "疑似照片攻击：未检测到面部微运动"
-            })),
-        ));
-    }
-
-    // 3. 活体检测（多帧投票 + 静默眨眼检测，仅 liveness_enabled 时运行）
+    // 3. 活体检测。前端会连续调用本命令，因此每次只推理当前帧，并跨调用维护五帧
+    // 滚动投票；避免旧实现单次调用再阻塞读取四帧造成约五倍 CPU/GPU 负载。
     if liveness_enabled {
-        let mut live_votes: Vec<f32> = Vec::with_capacity(5);
-        let mut blink_detector = BlinkDetector::new();
-
-        // 首帧已有人脸检测结果
-        if let Ok(score) = liveness_score(&frame, &cam_faces) {
-            live_votes.push(score);
-        }
-        // 首帧眨眼检测：尝试提取关键点
-        try_blink_detect(&frame, &cam_faces, &mut blink_detector);
-
-        // 额外读取 4 帧，每帧做活体检测 + 微运动累积 + 眨眼检测
-        for _ in 0..4 {
-            let mut extra_frame = Mat::default();
-            {
-                let mut state = APP_STATE
-                    .lock()
-                    .map_err(|e| CustomResult::error(Some(format!("获取 APP_STATE 失败: {}", e)), None))?;
-                let cam = state
-                    .camera
-                    .as_mut()
-                    .ok_or_else(|| CustomResult::error(Some("摄像头未打开".to_string()), None))?;
-                cam.inner
-                    .read(&mut extra_frame)
-                    .map_err(|e| CustomResult::error(Some(format!("读取额外帧失败: {:?}", e)), None))?;
-            }
-            if extra_frame.empty() {
-                continue;
-            }
-            let extra_frame = rotate_frame(&extra_frame, camera_rotation)
-                .map_err(|e| CustomResult::error(Some(e), None))?;
-
-            // 微运动检测（跨帧累积，始终运行）
-            let _ = motion_detector.update(&extra_frame).unwrap_or(0.0);
-            if motion_detector.is_likely_photo() {
-                let raw_b64 = mat_to_data_url(&extra_frame)
-                    .map_err(|e| CustomResult::error(Some(e), None))?;
+        let score = match liveness_score(&frame, &cam_faces) {
+            Ok(score) => score,
+            Err(error) => {
+                let raw_b64 =
+                    mat_to_data_url(&frame).map_err(|e| CustomResult::error(Some(e), None))?;
                 return Ok(CustomResult::success(
                     None,
                     Some(json!({
                         "display_base64": raw_b64,
                         "success": false,
                         "score": 0.0,
-                        "message": "疑似照片攻击：未检测到面部微运动"
+                        "message": format!("活体检测暂不可用：{}", error)
                     })),
                 ));
             }
+        };
+        let reference_key = reference_cache_key(&reference_base64, threshold);
+        let (collected, vote_result) = {
+            let mut votes = LIVENESS_VOTES.lock().map_err(|error| {
+                CustomResult::error(Some(format!("获取活体投票状态失败: {}", error)), None)
+            })?;
+            votes.record(&reference_key, score);
+            (votes.scores.len(), votes.result(liveness_threshold))
+        };
 
-            // 对额外帧做人脸检测 + 活体评分 + 眨眼检测
-            if let Ok(extra_faces) = detect_faces(&extra_frame, threshold) {
-                if extra_faces.rows() > 0 {
-                    if let Ok(score) = liveness_score(&extra_frame, &extra_faces) {
-                        live_votes.push(score);
-                    }
-                    try_blink_detect(&extra_frame, &extra_faces, &mut blink_detector);
-                }
-            }
-        }
+        let Some((live_count, average)) = vote_result else {
+            let raw_b64 =
+                mat_to_data_url(&frame).map_err(|e| CustomResult::error(Some(e), None))?;
+            return Ok(CustomResult::success(
+                None,
+                Some(json!({
+                    "display_base64": raw_b64,
+                    "success": false,
+                    "score": (score as f64 * 100.0).round() / 100.0,
+                    "message": format!("正在进行无感活体检测（{collected}/{LIVENESS_WINDOW_SIZE}）")
+                })),
+            ));
+        };
 
-        // 投票判定：MiniFASNetV2 >= 3/5 live，或 blink detected + >= 2/5 live
-        let live_count = live_votes
-            .iter()
-            .filter(|&&s| (s as f64) >= liveness_threshold)
-            .count();
-        let blink_ok = blink_detector.blink_detected;
-        let total_votes = live_count + if blink_ok { 1 } else { 0 };
-        if total_votes < 3 {
+        if live_count < 3 {
             let mut display = frame.clone();
             let _ = draw_face_box(&mut display, &cam_faces);
             let display_b64 =
                 mat_to_data_url(&display).map_err(|e| CustomResult::error(Some(e), None))?;
-            let avg_score =
-                live_votes.iter().sum::<f32>() / live_votes.len().max(1) as f32;
-            let reason = if blink_ok {
-                "活体检测未通过（多帧投票）"
-            } else {
-                "活体检测未通过（多帧投票，未检测到眨眼）"
-            };
             return Ok(CustomResult::success(
                 None,
                 Some(json!({
                     "display_base64": display_b64,
                     "success": false,
-                    "score": (avg_score as f64 * 100.0).round() / 100.0,
-                    "message": reason
+                    "score": (average as f64 * 100.0).round() / 100.0,
+                    "message": "活体检测未通过（五帧滚动投票）"
                 })),
             ));
         }
+    } else {
+        reset_liveness_votes();
     }
 
     // 4. 提取摄像头人脸特征
@@ -699,6 +715,27 @@ mod tests {
         let small = Mat::new_rows_cols_with_default(480, 640, CV_8UC3, Scalar::all(0.0)).unwrap();
         let out = resize_longest(&small, 1024).unwrap();
         assert_eq!((out.cols(), out.rows()), (640, 480));
+    }
+
+    #[test]
+    fn liveness_softmax_is_stable_for_large_logits() {
+        let probabilities = softmax2([1200.0, 1190.0]).unwrap();
+        assert!(probabilities[0] > 0.999);
+        assert!(probabilities[1] < 0.001);
+        assert!((probabilities[0] + probabilities[1] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn liveness_vote_window_resets_for_new_reference() {
+        let mut votes = LivenessVoteWindow::default();
+        for _ in 0..LIVENESS_WINDOW_SIZE {
+            votes.record("first", 0.9);
+        }
+        assert_eq!(votes.result(0.5).unwrap().0, LIVENESS_WINDOW_SIZE);
+
+        votes.record("second", 0.1);
+        assert!(votes.result(0.5).is_none());
+        assert_eq!(votes.scores.len(), 1);
     }
 
     // #20c：中文路径下 std::fs::read + imdecode 能成功解码（imread 底层 fopen 通常打不开）

@@ -128,6 +128,23 @@ Also verify fail-closed behavior:
 
 RGB passive PAD reduces common 2D attacks but is not an IR/depth proof. Record the tested camera and display/print media with release evidence.
 
+### Enrollment consistency and inference backends
+
+1. Enable liveness for enrollment consistency, capture a genuine face, and enter verification.
+2. Expected: the UI reports passive sampling for the first four frames, then passes without requesting a blink, turn, or spoken action.
+3. Monitor Task Manager while repeating verification on a low-end CPU. Each UI command must consume one camera frame and one liveness inference, not synchronously capture four extra frames.
+4. Start the management UI without opening the face-enrollment page. Expected: it does not parse or initialize any OpenCV model.
+5. Select Intel NPU on a supported Core Ultra system with the packaged OpenVINO runtime. Confirm the log reports `(backend=2, target=9)` and does not contain an ONNX importer error.
+6. Temporarily rename one NPU `.xml` or `.bin` asset and reload the backend. Expected: UI and Unlock report a CPU fallback; enrollment and native Windows PIN/password remain usable.
+
+### Differential model update
+
+1. On a disposable installed copy, rename one file under `resources` (test one `.onnx` and one OpenVINO `.xml`/`.bin` pair).
+2. Check for updates against a release that publishes the current `update_manifest.json`.
+3. Expected: the missing or changed resource paths appear in the differential download, retain their `resources/<filename>` paths, and pass size and SHA-256 validation.
+4. Download, close the UI, and restart it. Expected: the resources are restored beside the other model files, including when a locked target first had to be staged as `.new`.
+5. Re-run CPU enrollment verification and, on supported hardware, Intel NPU verification. Expected: both backends load the restored assets and the Unlock service remains healthy.
+
 ## Automatic Lock And Issue #27
 
 “About 30 seconds to take effect” means the UI saves immediately but Unlock reloads the options database every 30 seconds. It does not mean the workstation always locks after 30 seconds.

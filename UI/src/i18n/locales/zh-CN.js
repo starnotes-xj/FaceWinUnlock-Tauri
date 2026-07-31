@@ -120,7 +120,7 @@ export default {
     motionDetection: '微运动检测',
     motionPass: '微运动检测通过',
     motionFail: '疑似照片攻击：未检测到面部自然微运动',
-    livenessDesc: '含被动微运动检测（自动防照片）+ 深度学习模型辅助，无需用户额外操作',
+    livenessDesc: '连续五帧被动模型投票（自动防照片），无需眨眼、转头或说话',
   },
   options: {
     title: '首选项',

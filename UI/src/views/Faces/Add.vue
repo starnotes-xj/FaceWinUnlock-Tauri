@@ -307,8 +307,9 @@
                 }
             }
 
-            // 帧间延迟：验证模式33ms（~30fps），录入模式50ms（~20fps）（#121）
-            const frameDelay = verificationMode.value ? 33 : 50;
+            // 管理界面不需要视频级推理帧率。限制为约 10–12fps，避免低端设备持续满载；
+            // 活体滚动窗口仍可在约半秒内收齐五帧，且不要求用户做动作。
+            const frameDelay = verificationMode.value ? 100 : 80;
             await new Promise(resolve => setTimeout(resolve, frameDelay));
 
             // 继续下一帧
