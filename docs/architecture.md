@@ -45,7 +45,7 @@ The optional MSIX is available only on Windows 11 24H2+. It creates and owns the
 
 | Name | Participants | Purpose |
 |---|---|---|
-| `MansonWindowsUnlockRustServer` | Credential Provider to Unlock | `prepare` and `run` recognition control |
+| `MansonWindowsUnlockRustServer` | Credential Provider to Unlock | `prepare` and `run` recognition control; ambiguous broker scenes connect only after explicit input |
 | `MansonWindowsUnlockRustUnlock` | Unlock, Credential Provider, UI | credentials, release and camera coordination, health/exit control |
 | `FaceWinUnlockPasskeyFaceAuth` | Passkey plugin to Unlock | one face authorization request |
 | `Global\FaceWinUnlockTauriWebAuthnReady` | Unlock to Credential Provider | monitor is healthy and contract-validated |
@@ -55,12 +55,36 @@ The optional MSIX is available only on Windows 11 24H2+. It creates and owns the
 
 1. Active WebAuthn transaction: skip the generic Credential Provider.
 2. Explicit passkey, security-key, WebAuthn, FIDO2, or PIN-setup signal: skip.
-3. Settings/biometric enrollment/private browser: disable unknown fallback.
-4. Explicit password manager, reveal/show password, or fill-password signal: allow face.
-5. Unknown request: allow only for Chrome, Edge, Brave, Opera/Opera GX, Vivaldi, Chromium, or 360; monitor Ready; monitor not Active; non-private; `CREDUI_BROWSER_PASSWORD_FILL=1`.
-6. Everything else: return `E_NOTIMPL` to Windows.
+3. Browser login/authentication title with no serialized password credentials and the V2 CredUI
+   flag: skip the generic Provider during Advise even before Active is published. Legacy 0x200
+   password-fill requests remain eligible for the generic Provider.
+4. Settings/biometric enrollment/private browser: disable unknown fallback.
+5. Explicit password manager, reveal/show password, or fill-password signal: allow face.
+6. Browser-owned Windows Hello PIN wording is treated as password fill only when the
+   browser is allowlisted, the monitor is Ready and not Active, and
+   `CREDUI_BROWSER_PASSWORD_FILL=1`; if the monitor is unavailable, the same wording
+   fails closed to Windows PIN.
+7. Unknown request: allow only for Chrome, Edge, Brave, Opera/Opera GX, Vivaldi, Chromium, or 360; monitor Ready; monitor not Active; non-private; `CREDUI_BROWSER_PASSWORD_FILL=1`.
+8. Everything else: return `E_NOTIMPL` to Windows.
 
 The Active check is repeated in `SetUsageScenario`, `Advise`, before pipe connection, before `prepare`, during recognition, and before credential submission. This closes the race where a WebAuthn transaction begins after initial enumeration.
+
+For an explicitly identified password broker scene, the Credential Provider connects early and
+sends `prepare` to warm the camera, but the first `run` still requires user mouse/keyboard input.
+This preserves the fast Win+L-style camera path without allowing an opened dialog to authorize by
+itself. Login-title prompts without serialized password credentials in V2 mode never start the
+generic Provider; after the user confirms, the native browser/Passkey flow issues the single face
+authorization. Legacy-mode (`0x200`) login-title password-fill prompts remain input-gated, but
+retain mouse-movement activation for repeated fills. An ambiguous browser prompt must not connect
+to Unlock,
+prewarm the camera, or start face recognition merely because the prompt opened. After explicit
+input, the normal `prepare`/guard/`run` sequence resumes. Login and lock-screen scenes also
+continue to require user input before recognition. A browser that fills a saved
+password directly in the page without opening Windows Security never calls the Credential
+Provider; that path must be protected by the browser's own "Use Windows Hello when filling
+passwords" setting and cannot be observed through UI Automation or input injection.
+If a broker dialog is cancelled after `prepare`, teardown sends `release` from a background thread
+to stop any in-flight camera open without blocking the host UI thread.
 
 ## Camera Lifecycle
 

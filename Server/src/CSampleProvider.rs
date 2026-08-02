@@ -23,6 +23,9 @@ struct ProviderInner {
     pub shared_creds: Arc<Mutex<SharedCredentials>>,
     pub auth_package_id: u32,
     pub credential: Option<ICredentialProviderCredential>,
+    /// Serialization metadata is non-sensitive and distinguishes a browser
+    /// password-fill request from a login-title Passkey prompt during Advise.
+    pub serialization_size: u32,
 }
 
 impl SampleProvider {
@@ -55,6 +58,7 @@ impl SampleProvider {
                 shared_creds: shared,
                 auth_package_id: auth_id,
                 credential: None,
+                serialization_size: 0,
             }),
         }
     }
@@ -91,6 +95,7 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
         let mut inner = self.inner.lock().unwrap();
         inner.usage_scenario = cpus;
         inner.dwflags = dwflags;
+        inner.serialization_size = 0;
 
         // 读取 UNLOCK_SCENE 注册表（逗号分隔的场景 ID，如 "1,2"）
         // CPUS_LOGON=1, CPUS_UNLOCK_WORKSTATION=2, CPUS_CREDUI=4
@@ -152,11 +157,13 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
     fn SetSerialization(&self, pcpcs: *const CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION) -> windows_core::Result<()> {
         unsafe {
             if let Some(cs) = pcpcs.as_ref() {
+                self.inner.lock().unwrap().serialization_size = cs.cbSerialization;
                 info!(
                     "SampleProvider::SetSerialization - authPkg={} clsidCP={:?} cbSer={}",
                     cs.ulAuthenticationPackage, cs.clsidCredentialProvider, cs.cbSerialization
                 );
             } else {
+                self.inner.lock().unwrap().serialization_size = 0;
                 info!("SampleProvider::SetSerialization - pcpcs=null");
             }
         }
@@ -172,12 +179,17 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
         let is_broker = inner.usage_scenario.0 == 4
             && crate::current_process_exe_name() == "credentialuibroker.exe";
 
+        let mut broker_auto_run = false;
+        let mut broker_accepts_all_input = false;
         if is_broker {
             // credentialuibroker.exe 可能复用同一 Provider 实例而不重新走
             // SetUsageScenario。每次 Advise 都视为新的 broker 会话边界，再清一次
             // 缓存状态，防止第二次查看密码沿用上次 fallback / credential 对象。
             SampleProvider::reset_broker_session_state(&mut inner);
-            let scene = crate::classify_broker_scene(inner.dwflags);
+            let (scene, auto_run) = crate::classify_broker_scene_with_serialization(
+                inner.dwflags,
+                inner.serialization_size > 0,
+            );
             if !scene.uses_face() {
                 info!(
                     "SampleProvider::Advise - broker 场景复查为 {:?}，停止参与",
@@ -185,6 +197,19 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
                 );
                 inner.is_scenario_supported = false;
                 return Err(E_NOTIMPL.into());
+            }
+            broker_auto_run = auto_run;
+            broker_accepts_all_input = crate::broker_accepts_all_input(
+                inner.dwflags,
+                scene,
+                inner.serialization_size > 0,
+                broker_auto_run,
+            );
+            if !broker_auto_run {
+                info!(
+                    "SampleProvider::Advise - broker 场景 {:?} 保留用户输入门控，等待明确选择",
+                    scene
+                );
             }
         }
 
@@ -196,14 +221,16 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             if let Some(events) = &inner.events {
                 // 主场景（登录/解锁）：允许 stop_and_join 时通知 Unlock EXE 释放摄像头 (#117)
                 let is_primary = inner.usage_scenario.0 == 1 || inner.usage_scenario.0 == 2;
-                // Broker 仅在分类器明确允许密码验证时启动；WebAuthn 状态还会在
-                // CPipeListener 发送 prepare/run 前继续复查，关闭订阅延迟竞态。
+                // Broker 仅在分类器允许密码候选时启动；歧义浏览器场景仍由用户输入
+                // 门控，WebAuthn 状态还会在 CPipeListener 的 prepare/run 前继续复查。
                 inner.listener = Some(CPipeListener::start(
                     events.clone(),
                     upadvisecontext,
                     inner.shared_creds.clone(),
                     is_primary,
                     is_broker,
+                    broker_auto_run,
+                    broker_accepts_all_input,
                 ));
             }
         }

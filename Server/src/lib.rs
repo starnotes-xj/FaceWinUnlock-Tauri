@@ -127,7 +127,7 @@ pub fn read_facewinunlock_registry(key_name: &str) -> windows::core::Result<Stri
 ///
 /// Credential Provider DLL 会被不同宿主加载；CREDUI 场景尤其需要区分：
 /// - consent.exe: UAC 系统提权，保留人脸解锁
-/// - credentialuibroker.exe: 应用层/浏览器 PIN/WebAuthn passkey，先人脸，失败后回退 PIN
+/// - credentialuibroker.exe: 应用层/浏览器密码验证可走人脸；WebAuthn/passkey 仍交还 Windows
 ///
 /// `std::env::current_exe()` 在 Windows 上返回宿主进程主模块路径（不是本 DLL），
 /// 正好可作为 CREDUI 调用来源判据。
@@ -314,14 +314,34 @@ pub fn is_webauthn_guard_active() -> bool {
 }
 
 pub fn classify_broker_scene(dwflags: u32) -> BrokerScene {
+    classify_broker_scene_with_auto_run(dwflags).0
+}
+
+pub fn classify_broker_scene_with_auto_run(dwflags: u32) -> (BrokerScene, bool) {
+    // SetUsageScenario runs before SetSerialization. Keep login-title prompts in the
+    // password-fill candidate path provisionally; Advise reclassifies them after the
+    // serialization metadata is available.
+    classify_broker_scene_with_serialization(dwflags, true)
+}
+
+/// Reclassify a broker after `SetSerialization` has supplied metadata about the
+/// credential request. A login-title prompt with no password serialization is a
+/// Passkey candidate only when the V2 CredUI flag is also present; this preserves
+/// repeated password-fill prompts that arrive with the legacy 0x200 flags.
+pub fn classify_broker_scene_with_serialization(
+    dwflags: u32,
+    serialized_credentials: bool,
+) -> (BrokerScene, bool) {
     let context = broker_context(dwflags);
-    let scene = classify_broker_context(
+    let scene = classify_broker_context_with_serialization(
         &context,
         registry_bool("CREDUI_BROWSER_PASSWORD_FILL", true),
+        serialized_credentials,
     );
     info!(
-        "classify_broker_scene - scene={:?}, flags=0x{:X}, titles={:?}, owners={:?}, webauthn_ready={}, webauthn_active={}, private={}",
+        "classify_broker_scene - scene={:?}, serialized_credentials={}, flags=0x{:X}, titles={:?}, owners={:?}, webauthn_ready={}, webauthn_active={}, private={}",
         scene,
+        serialized_credentials,
         context.dwflags,
         context.titles,
         context.owner_processes,
@@ -329,12 +349,24 @@ pub fn classify_broker_scene(dwflags: u32) -> BrokerScene {
         context.webauthn_active,
         context.private_browser,
     );
-    scene
+    let auto_run = broker_auto_run_allowed_for_context(&context, scene);
+    (scene, auto_run)
 }
 
 pub fn classify_broker_context(
     context: &BrokerContext,
     browser_password_fill_enabled: bool,
+) -> BrokerScene {
+    // This helper is also used before SetSerialization. Treat login-title browser
+    // prompts as password candidates until the provider can inspect serialization
+    // metadata in Advise.
+    classify_broker_context_with_serialization(context, browser_password_fill_enabled, true)
+}
+
+pub fn classify_broker_context_with_serialization(
+    context: &BrokerContext,
+    browser_password_fill_enabled: bool,
+    serialized_credentials: bool,
 ) -> BrokerScene {
     let titles = context.titles.to_lowercase();
     let has_process = |names: &[&str]| {
@@ -353,8 +385,9 @@ pub fn classify_broker_context(
     ];
     const SETTINGS_PROCESSES: &[&str] = &["systemsettings.exe", "bioenrollmenthost.exe"];
 
-    // 标题关键词仅在「WebAuthn 监视器不可用」的兜底路径使用；监视器 Ready 的正常路径
-    // 完全不依赖它们，改由 webauthn_active（进行中的 CTAP 事务）+ owner 进程判定。
+    // 通用 passkey/PIN/password 标题主要用于监视器不可用时的兜底；Ready 路径优先使用
+    // webauthn_active（进行中的 CTAP 事务）+ owner 进程判定，但登录/认证标题仍保留为
+    // CTAP 尚未发布 Active 时的早期 Passkey 保护。
     const PASSKEY_KEYWORDS: &[&str] = &[
         "通行密钥", "passkey", "安全密钥", "security key", "保存通行密钥",
         "创建通行密钥", "save passkey", "save a passkey", "create passkey",
@@ -374,6 +407,17 @@ pub fn classify_broker_context(
         "填充密码", "填充您的密码", "填充你的密码", "fill password",
         "fill your password", "filling passwords", "autofill password",
     ];
+    // 浏览器登录页标题关键词（非密码填充）。Google/微软等账号登录页会先弹 CredUI
+    // 再启动 CTAP 事务（MakeCredential/GetAssertion），届时 webauthn_active 尚未置起。
+    // Ready 时保守交还 Windows，避免通用 Provider 先做人脸，随后 Passkey 插件又做人脸一次。
+    const LOGIN_AUTH_KEYWORDS: &[&str] = &[
+        "登录 -", "sign in -", "sign-in", "log in -", "log in to",
+    ];
+    // CREDUIWIN_USE_V2 is the rejuvenated Windows Security experience used by
+    // the Passkey/security-key confirmation path. A repeated password-fill
+    // request can omit serialization, but its observed 0x200 flags do not carry
+    // this bit and must remain eligible for the password-fill route.
+    const CREDUIWIN_USE_V2: u32 = 0x40;
 
     // ① 设置 / PIN / 指纹录入：靠触发进程识别（结构信号）。任何情况都不在此走人脸。
     if has_process(SETTINGS_PROCESSES) {
@@ -401,23 +445,34 @@ pub fn classify_broker_context(
         return BrokerScene::PrivateBrowser;
     }
 
-    // ⑤ 非浏览器进程但标题是 PIN 设置：兜底跳过。
-    if title_has(PIN_KEYWORDS) {
-        return BrokerScene::PinOrSettings;
-    }
-
-    // ⑥ 触发进程是浏览器：到此 active=false（passkey 已在 ②③ 排除）。
+    // ⑤ 触发进程是浏览器：到此 active=false（passkey 已在 ②③ 排除）。
+    //
+    // 浏览器密码管理器可能会把自己的用户验证弹窗命名为 “Windows Hello PIN”。
+    // 这不是 PIN 设置页，也不是 passkey；如果先用 PIN_KEYWORDS 兜底，会把密码填充
+    // 错分成 PinOrSettings，Credential Provider 随后返回 E_NOTIMPL，用户只能手动输 PIN。
     if has_process(BROWSER_PROCESSES) {
         // 查看已保存密码 / 密码管理器重新验证：明确的凭据查看，始终走人脸。
         if title_has(PASSWORD_KEYWORDS) {
             return BrokerScene::Password;
         }
         // 其余浏览器 CredUI = 密码填充。受 CREDUI_BROWSER_PASSWORD_FILL 开关控制。
+        // 登录页可能在 WebAuthn Active 事件出现前创建 CredUI。SetUsageScenario 阶段
+        // 尚未拿到序列化元数据，先保留密码候选；Advise 阶段若没有序列化凭据，才
+        // 交还原生 Windows/Passkey，避免通用 Provider 与插件各做人脸一次。蓝奏云等
+        // 密码填充请求通常带有序列化凭据，即使标题含“登录 -”也继续走人脸。
+        if context.webauthn_ready
+            && title_has(LOGIN_AUTH_KEYWORDS)
+            && !serialized_credentials
+            && (context.dwflags & CREDUIWIN_USE_V2) != 0
+        {
+            return BrokerScene::Passkey;
+        }
         if !browser_password_fill_enabled {
             return BrokerScene::Unknown;
         }
         // ★ 监视器 Ready 且无 active（CTAP + 枚举均无）：枚举事件 2250 已为
-        //   passkey 弹窗提供 5s 早期 active 窗口。到此 active=false → 必为密码填充。
+        //   passkey 弹窗提供 5s 早期 active 窗口。此处只能判定为浏览器密码候选；
+        //   是否允许无输入自动 run 还要由显式密码/PIN标题单独决定。
         if context.webauthn_ready {
             return BrokerScene::BrowserPasswordFill;
         }
@@ -425,7 +480,17 @@ pub fn classify_broker_context(
         if title_has(PASSWORD_FILL_KEYWORDS) {
             return BrokerScene::BrowserPasswordFill;
         }
+        // 监视器不可用时无法证明这是密码填充；带 PIN 标题的未知浏览器场景必须
+        // fail-closed，避免把真实的 Windows Hello / passkey 提示误触发成人脸。
+        if title_has(PIN_KEYWORDS) {
+            return BrokerScene::PinOrSettings;
+        }
         return BrokerScene::MonitorUnavailable;
+    }
+
+    // ⑥ 非浏览器进程但标题是 PIN 设置：兜底跳过。
+    if title_has(PIN_KEYWORDS) {
+        return BrokerScene::PinOrSettings;
     }
 
     // ⑦ 非浏览器 App 的查看密码兜底。
@@ -433,6 +498,74 @@ pub fn classify_broker_context(
         return BrokerScene::Password;
     }
     BrokerScene::Unknown
+}
+
+/// Decide whether a face request may start automatically for a broker scene.
+///
+/// Ready + browser is intentionally enough to classify an unknown browser prompt as
+/// `BrowserPasswordFill`, but it is not enough to start recognition without user input:
+/// Chrome can use the same generic "Windows Security / Login" window while waiting for
+/// the user to confirm a security-key operation. Only an explicit password/PIN signal
+/// gets the no-extra-click path; ambiguous browser prompts remain input-gated.
+fn broker_auto_run_allowed_for_context(context: &BrokerContext, scene: BrokerScene) -> bool {
+    if scene == BrokerScene::Password {
+        return true;
+    }
+    if scene != BrokerScene::BrowserPasswordFill {
+        return false;
+    }
+
+    let titles = context.titles.to_lowercase();
+    const EXPLICIT_PASSWORD_KEYWORDS: &[&str] = &[
+        "密码管理工具", "password manager", "保存的密码", "已保存密码",
+        "saved password", "saved passwords", "查看密码", "显示密码",
+        "view password", "show password", "reveal password",
+        "填充密码", "填充您的密码", "填充你的密码", "fill password",
+        "fill your password", "filling passwords", "autofill password",
+        "windows hello pin", "pin (windows hello)", "设置 pin", "设置pin",
+        "更改 pin", "更改pin", "set up a pin", "setup pin", "change your pin",
+    ];
+    EXPLICIT_PASSWORD_KEYWORDS.iter().any(|keyword| titles.contains(keyword))
+}
+
+/// Decide whether a browser broker may treat mouse movement as user activity.
+///
+/// Passkey/security-key confirmation stays input-gated and is filtered out by
+/// the classifier. Serialized password fills and the observed legacy 0x200
+/// repeated-fill form retain the 0.5.10 mouse-movement behavior.
+pub fn broker_accepts_all_input(
+    dwflags: u32,
+    scene: BrokerScene,
+    serialized_credentials: bool,
+    auto_run: bool,
+) -> bool {
+    let context = broker_context(dwflags);
+    broker_accepts_all_input_for_context(&context, scene, serialized_credentials, auto_run)
+}
+
+pub fn broker_accepts_all_input_for_context(
+    context: &BrokerContext,
+    scene: BrokerScene,
+    serialized_credentials: bool,
+    auto_run: bool,
+) -> bool {
+    if scene == BrokerScene::Password || auto_run || serialized_credentials {
+        return true;
+    }
+    if scene != BrokerScene::BrowserPasswordFill {
+        return false;
+    }
+
+    const CREDUIWIN_USE_V2: u32 = 0x40;
+    let titles = context.titles.to_lowercase();
+    let login_title = ["登录 -", "sign in -", "sign-in", "log in -", "log in to"]
+        .iter()
+        .any(|keyword| titles.contains(keyword));
+
+    context.webauthn_ready
+        && !context.webauthn_active
+        && (context.dwflags & CREDUIWIN_USE_V2) == 0
+        && login_title
 }
 
 // 定义凭据提供程序的GUID，用于系统识别
@@ -640,7 +773,11 @@ pub unsafe extern "system" fn DllMain(
 
 #[cfg(test)]
 mod shared_credentials_tests {
-    use super::{classify_broker_context, BrokerContext, BrokerScene, SharedCredentials};
+    use super::{
+        broker_accepts_all_input_for_context, broker_auto_run_allowed_for_context,
+        classify_broker_context,
+        classify_broker_context_with_serialization, BrokerContext, BrokerScene, SharedCredentials,
+    };
 
     fn context(
         titles: &str,
@@ -772,6 +909,144 @@ mod shared_credentials_tests {
     }
 
     #[test]
+    fn browser_windows_hello_pin_prompt_is_password_fill_when_monitor_ready() {
+        // Chrome/Edge 的密码管理器会复用 Windows Hello PIN 文案做本地验证。
+        // 只要 WebAuthn monitor 已 Ready 且没有 active CTAP，就应继续走人脸，
+        // 而不是把浏览器密码填充误判成 PIN 设置场景。
+        let context = context(
+            "windows 安全中心 windows hello pin - google chrome",
+            &["credentialuibroker.exe", "chrome.exe"],
+            true,
+            false,
+            false,
+        );
+        let scene = classify_broker_context(&context, true);
+        assert_eq!(scene, BrokerScene::BrowserPasswordFill);
+        assert!(broker_auto_run_allowed_for_context(&context, scene));
+    }
+
+    #[test]
+    fn browser_login_with_ready_monitor_skips_generic_face() {
+        let context = context(
+            "windows 安全中心 登录 - google 账号 - google chrome",
+            &["credentialuibroker.exe", "chrome.exe"],
+            true,
+            false,
+            false,
+        );
+        let scene = classify_broker_context_with_serialization(&context, true, false);
+        assert_eq!(scene, BrokerScene::Passkey);
+        assert_eq!(
+            classify_broker_context_with_serialization(&context, true, true),
+            BrokerScene::BrowserPasswordFill
+        );
+    }
+
+    #[test]
+    fn login_title_with_serialized_password_stays_password_fill() {
+        let context = context(
+            "windows 安全中心 登录 - google 账号 - google chrome",
+            &["credentialuibroker.exe", "chrome.exe"],
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            classify_broker_context(&context, true),
+            BrokerScene::BrowserPasswordFill
+        );
+        assert_eq!(
+            classify_broker_context_with_serialization(&context, true, true),
+            BrokerScene::BrowserPasswordFill
+        );
+        assert!(!broker_auto_run_allowed_for_context(
+            &context,
+            BrokerScene::BrowserPasswordFill,
+        ));
+        assert!(broker_accepts_all_input_for_context(
+            &context,
+            BrokerScene::BrowserPasswordFill,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn repeated_login_title_without_serialization_and_legacy_flags_stays_password_fill() {
+        let mut context = context(
+            "windows 安全中心 登录 - google chrome 登录 - google chrome",
+            &["credentialuibroker.exe", "chrome.exe"],
+            true,
+            false,
+            false,
+        );
+        context.dwflags = 0x200;
+        assert_eq!(
+            classify_broker_context_with_serialization(&context, true, false),
+            BrokerScene::BrowserPasswordFill
+        );
+        assert!(broker_accepts_all_input_for_context(
+            &context,
+            BrokerScene::BrowserPasswordFill,
+            false,
+            false,
+        ));
+
+        context.dwflags = 0x250;
+        assert!(!broker_accepts_all_input_for_context(
+            &context,
+            BrokerScene::Passkey,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn ready_monitor_with_non_login_browser_prompt_stays_password_fill() {
+        let context = context(
+            "windows 安全中心 chrome password verification",
+            &["credentialuibroker.exe", "chrome.exe"],
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            classify_broker_context(&context, true),
+            BrokerScene::BrowserPasswordFill
+        );
+    }
+
+    #[test]
+    fn browser_pin_prompt_fails_closed_when_monitor_is_unavailable() {
+        let context = context(
+            "windows security windows hello pin - google chrome",
+            &["credentialuibroker.exe", "chrome.exe"],
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            classify_broker_context(&context, true),
+            BrokerScene::PinOrSettings
+        );
+    }
+
+    #[test]
+    fn active_webauthn_still_overrides_browser_pin_prompt() {
+        let context = context(
+            "windows security windows hello pin - google chrome",
+            &["credentialuibroker.exe", "chrome.exe"],
+            true,
+            true,
+            false,
+        );
+        assert_eq!(
+            classify_broker_context(&context, true),
+            BrokerScene::Passkey
+        );
+    }
+
+    #[test]
     fn settings_pin_and_private_windows_fail_closed() {
         let settings = context(
             "windows 安全中心 password",
@@ -795,23 +1070,6 @@ mod shared_credentials_tests {
         assert_eq!(
             classify_broker_context(&private, true),
             BrokerScene::PrivateBrowser
-        );
-    }
-
-    #[test]
-    fn ready_monitor_with_browser_triggers_fill_even_without_keywords() {
-        // 旧架构：分类阶段不依赖标题关键词——ready + browser 即参与，
-        // 由 debounce 和枚举事件在后续流程中拦截 passkey。
-        let qq = context(
-            "windows 安全中心 登录 - google 账号 - google chrome",
-            &["credentialuibroker.exe", "chrome.exe"],
-            true,
-            false,
-            false,
-        );
-        assert_eq!(
-            classify_broker_context(&qq, true),
-            BrokerScene::BrowserPasswordFill
         );
     }
 

@@ -10,7 +10,8 @@ use windows::Win32::UI::{
     WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, MSG, PM_NOREMOVE, PeekMessageW,
         PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-        WH_KEYBOARD_LL, WH_MOUSE_LL, WM_QUIT,
+        WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_QUIT,
+        WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_XBUTTONDOWN,
     },
 };
 
@@ -180,10 +181,39 @@ static INPUT_HOOKS_ARMED: AtomicBool = AtomicBool::new(false);
 static INPUT_RUN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static INPUT_RUN_SOURCE: AtomicU8 = AtomicU8::new(0);
 static INPUT_HOOK_REF_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// 允许鼠标移动直接唤起识别的主场景引用数。歧义 CREDUI 场景只接受点击/按键，
+/// 防止用户在“确认使用安全密钥”窗口中移动鼠标就触发通用人脸。
+static INPUT_ALL_EVENTS_REF_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// 专用输入钩子线程的线程 ID（0 = 未运行）。uninstall 用它 PostThreadMessage(WM_QUIT)。
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 const INPUT_SOURCE_MOUSE: u8 = 1;
 const INPUT_SOURCE_KEYBOARD: u8 = 2;
+
+fn mouse_action_is_discrete(message: u32) -> bool {
+    matches!(
+        message,
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+    )
+}
+
+/// 模糊的浏览器/安全密钥 CREDUI 会话在用户明确点击或按键前不应连接
+/// Unlock 管道。连接本身会让 Unlock 看到 credential client，从而可能在
+/// 仍未收到 `run` 时打开摄像头预热。
+fn defer_broker_connection(
+    is_primary_scenario: bool,
+    broker_fallback_to_pin: bool,
+    broker_auto_run: bool,
+    broker_prepare_on_connect: bool,
+) -> bool {
+    broker_fallback_to_pin
+        && !broker_auto_run
+        && !broker_prepare_on_connect
+        && !is_primary_scenario
+}
+
+fn keyboard_action_is_down(message: u32) -> bool {
+    matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN)
+}
 
 /// 当前 broker CredUI 会话已回退 PIN。
 ///
@@ -224,7 +254,13 @@ pub fn reset_broker_pin_fallback() {
 }
 
 unsafe extern "system" fn mouse_hook_fn(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && INPUT_HOOKS_ARMED.load(Ordering::SeqCst) {
+    let mouse_message = wparam.0 as u32;
+    let discrete_action = mouse_action_is_discrete(mouse_message);
+    let accepts_mouse_move = INPUT_ALL_EVENTS_REF_COUNT.load(Ordering::SeqCst) > 0;
+    if code >= 0
+        && INPUT_HOOKS_ARMED.load(Ordering::SeqCst)
+        && (accepts_mouse_move || discrete_action)
+    {
         INPUT_RUN_SOURCE.store(INPUT_SOURCE_MOUSE, Ordering::SeqCst);
         INPUT_RUN_REQUESTED.store(true, Ordering::SeqCst);
     }
@@ -234,7 +270,11 @@ unsafe extern "system" fn mouse_hook_fn(code: i32, wparam: WPARAM, lparam: LPARA
 }
 
 unsafe extern "system" fn keyboard_hook_fn(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && INPUT_HOOKS_ARMED.load(Ordering::SeqCst) {
+    let key_message = wparam.0 as u32;
+    if code >= 0
+        && INPUT_HOOKS_ARMED.load(Ordering::SeqCst)
+        && keyboard_action_is_down(key_message)
+    {
         INPUT_RUN_SOURCE.store(INPUT_SOURCE_KEYBOARD, Ordering::SeqCst);
         INPUT_RUN_REQUESTED.store(true, Ordering::SeqCst);
     }
@@ -344,18 +384,25 @@ pub struct CPipeListener {
     creds_thread: Option<JoinHandle<()>>,
     /// 保存凭据线程当前持有的管道句柄原始值（isize），用于 stop_and_join 时关闭句柄打断 ReadFile
     creds_pipe_raw: Arc<AtomicIsize>,
-    /// 是否安装了鼠标/键盘 Hook。所有已启用场景都可用 Hook 触发 run，CREDUI 额外保留自动 run 兜底。
+    /// 是否安装了鼠标/键盘 Hook。登录/解锁和歧义 CREDUI 场景依赖 Hook；
+    /// 明确的密码场景会自动 run，Hook 仍作为会话重试/兼容兜底。
     use_input_hooks: bool,
+    accepts_all_input: bool,
     /// 是否主场景（登录/解锁）。仅主场景在 stop_and_join 中向 Unlock EXE 发 release 释放摄像头；
     /// CREDUI/broker 场景不发——既符合文档约定（锁屏可能仍需 Unlock EXE），也避免在
     /// CredentialUIBroker.exe 的 UI 线程 teardown 路径上执行阻塞管道连接而拖慢/冻结关闭。
     is_primary_scenario: bool,
+    /// Broker 对话框取消/关闭时释放已开始的 prepare/预热。成功识别时
+    /// `is_unlocked` 会阻止这条路径，避免释放刚刚提交的凭据会话。
+    release_on_stop: bool,
 }
 
 impl CPipeListener {
     /// 启动管道监听：
     ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，先发送 "prepare"；
-    ///     所有已启用场景都可由 DLL 低级输入 Hook 捕获鼠标/键盘事件后发送 "run"
+    ///     登录/解锁由 DLL 低级输入 Hook 捕获鼠标/键盘事件后发送 "run"，
+    ///     明确的 CREDUI 密码场景在守卫复查后自动发送一次 "run"；
+    ///     歧义浏览器/安全密钥场景等待用户输入
     ///   - Creds 线程：阻塞等待凭据推送，收到后设置动画为 Success
     pub fn start(
         events: ICredentialProviderEvents,
@@ -363,18 +410,41 @@ impl CPipeListener {
         shared_creds: Arc<Mutex<SharedCredentials>>,
         is_primary_scenario: bool,
         broker_fallback_to_pin: bool,
+        broker_auto_run: bool,
+        broker_accepts_all_input: bool,
     ) -> Arc<Mutex<Self>> {
         let is_unlocked    = Arc::new(AtomicBool::new(false));
         let stop_flag      = Arc::new(AtomicBool::new(false));
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
         let use_input_hooks = true;
-        // 所有场景（登录/解锁/CREDUI）统一由鼠标/键盘输入 Hook 触发 "run"，不自动开始识别。
-        // 不启用 auto_run 的原因：① 锁屏后人未走开即被自动解锁，削弱锁屏安全意义（且
-        //   UNLOCK_GRACE_PERIOD 常为 0，锁了立刻就识别）；② 开机时可能在 explorer/系统就绪
-        //   前就提交凭据登录，导致转圈卡死；③ 摄像头常开耗电。用户走到机前本就会动一下
-        //   鼠标/键盘，这一下正好表达解锁意图、再秒级识别——成本极低且更安全稳定。
-        let auto_run_on_connect = false;
+        // 登录/解锁仍由鼠标/键盘输入 Hook 触发 "run"，避免锁屏后人未走开就自动解锁。
+        // 只有明确的密码场景自动启动一次：打开 Windows 安全窗口的那次点击通常发生在
+        // Provider 初始化之前，继续等待输入会把唯一的用户动作丢掉。歧义浏览器场景（尤其
+        // 安全密钥确认窗口）必须保留用户输入门控，不能因窗口出现就直接启动人脸。
+        let auto_run_on_connect = broker_auto_run
+            && broker_fallback_to_pin
+            && !is_primary_scenario;
+        let broker_prepare_on_connect = broker_fallback_to_pin
+            && !is_primary_scenario
+            && broker_accepts_all_input;
+        let defer_broker_connection_until_input = defer_broker_connection(
+            is_primary_scenario,
+            broker_fallback_to_pin,
+            broker_auto_run,
+            broker_prepare_on_connect,
+        );
+        let broker_action_started = Arc::new(AtomicBool::new(!defer_broker_connection_until_input));
+        let accepts_all_input = is_primary_scenario || broker_accepts_all_input;
+        let release_on_stop = broker_fallback_to_pin && !is_primary_scenario;
+        if accepts_all_input {
+            INPUT_ALL_EVENTS_REF_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+        if auto_run_on_connect {
+            info!("CREDUI 密码场景已启用自动人脸启动，不等待额外鼠标/键盘输入");
+        } else if broker_prepare_on_connect {
+            info!("CREDUI 密码填充场景已提前连接并预热摄像头，等待鼠标/键盘触发识别");
+        }
         if use_input_hooks {
             install_input_hooks();
         }
@@ -387,6 +457,7 @@ impl CPipeListener {
             let is_unlocked_for_client = is_unlocked.clone();
             let shared_creds_for_client = shared_creds.clone();
             let creds_pipe_raw_for_client = creds_pipe_raw.clone();
+            let broker_action_started_for_client = broker_action_started.clone();
             let send_events_for_client = SendableEvents(events.clone(), advise_context);
             let broker_timeout = broker_fallback_timeout();
             thread::spawn(move || {
@@ -405,6 +476,42 @@ impl CPipeListener {
                 }
 
                 info!("CPipeListener::start - 进入管道Client线程");
+
+                // 模糊浏览器/安全密钥场景在用户明确操作前不连接任何 Unlock 管道。
+                // 即使上一次会话已经加载过人脸记录，只有 credential client 存在时
+                // Unlock 才会进入预热分支；延迟连接可从源头阻止提前点亮摄像头。
+                let mut deferred_input_source = None;
+                if defer_broker_connection_until_input {
+                    if interruptible_sleep(Duration::from_millis(250), &stop_flag) {
+                        return;
+                    }
+                    INPUT_HOOKS_ARMED.store(true, Ordering::SeqCst);
+                    info!("CREDUI/UAC 模糊场景已就绪，仅等待明确鼠标点击/键盘按键后连接 Unlock");
+                    loop {
+                        if stop_flag.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        if crate::is_webauthn_guard_active() {
+                            trigger_broker_pin_fallback(
+                                &shared_creds_for_client,
+                                &stop_flag,
+                                &creds_pipe_raw_for_client,
+                                &send_events_for_client,
+                                "WebAuthn transaction active before explicit input",
+                                BrokerReleaseMode::WebAuthnGuard,
+                            );
+                            return;
+                        }
+                        if INPUT_RUN_REQUESTED.swap(false, Ordering::SeqCst) {
+                            deferred_input_source = Some(INPUT_RUN_SOURCE.swap(0, Ordering::SeqCst));
+                            broker_action_started_for_client.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                        if interruptible_sleep(Duration::from_millis(20), &stop_flag) {
+                            return;
+                        }
+                    }
+                }
 
                 let mut first_connect = true;
 
@@ -466,7 +573,7 @@ impl CPipeListener {
                     }
                     info!("向管道写入数据成功：prepare");
 
-                    let mut hooks_armed = !use_input_hooks;
+                    let mut hooks_armed = !use_input_hooks || deferred_input_source.is_some();
                     let arm_after = Instant::now() + Duration::from_millis(250);
                     let min_run_interval = if auto_run_on_connect {
                         Duration::from_millis(2500)
@@ -534,13 +641,20 @@ impl CPipeListener {
                             INPUT_RUN_SOURCE.store(0, Ordering::SeqCst);
                             INPUT_HOOKS_ARMED.store(true, Ordering::SeqCst);
                             hooks_armed = true;
-                            info!("{} 输入 Hook 已就绪，等待鼠标/键盘触发识别", scenario_label);
+                            if auto_run_on_connect {
+                                info!("{} 输入 Hook 已就绪，CREDUI 自动识别已安排", scenario_label);
+                            } else {
+                                info!("{} 输入 Hook 已就绪，等待鼠标/键盘触发识别", scenario_label);
+                            }
                         }
 
+                        let pending_input_source = deferred_input_source.take();
                         let input_requested = use_input_hooks
-                            && INPUT_RUN_REQUESTED.swap(false, Ordering::SeqCst);
+                            && (pending_input_source.is_some()
+                                || INPUT_RUN_REQUESTED.swap(false, Ordering::SeqCst));
                         let input_source = if input_requested {
-                            INPUT_RUN_SOURCE.swap(0, Ordering::SeqCst)
+                            pending_input_source
+                                .unwrap_or_else(|| INPUT_RUN_SOURCE.swap(0, Ordering::SeqCst))
                         } else {
                             0
                         };
@@ -550,12 +664,15 @@ impl CPipeListener {
                             && (input_requested || auto_requested);
 
                         if should_send_run {
-                            // ★ WebAuthn 守卫复查 + 实时 debounce（v0.5.10-rc5 修复）：
+                            // ★ WebAuthn 守卫复查 + 实时 debounce：
                             //   passkey CredUI 打开时 CTAP 事务可能尚未启动。500ms 实测
-                            //   仍有 1-2/5 漏过 → 延长至 800ms。密码填充场景无 CTAP 事务，
-                            //   这 500ms 纯轮询开销（每 30ms 一次 OpenEventW），对用户无感。
+                            //   仍有 1-2/5 漏过，因此使用 800ms。密码填充场景无 CTAP 事务，
+                            //   这段时间只是每 30ms 一次 OpenEventW 轮询，对用户无感。
                             if broker_fallback_to_pin {
-                                let debounce = Duration::from_millis(500);
+                                // Keep the broker guard at the empirically validated 800 ms
+                                // window: WebAuthn/CTAP activity can be published after the
+                                // CredUI broker connects, and auto-run must not race that event.
+                                let debounce = Duration::from_millis(800);
                                 let deadline = Instant::now() + debounce;
                                 loop {
                                     if crate::is_webauthn_guard_active() {
@@ -602,7 +719,7 @@ impl CPipeListener {
                                 };
                                 info!("检测到{}{}输入，已发送 run", scenario_label, source_name);
                             } else {
-                                info!("登录/解锁主场景已自动发送 run");
+                                info!("{}场景已自动发送 run", scenario_label);
                             }
                         }
 
@@ -649,11 +766,22 @@ impl CPipeListener {
             let is_unlocked    = is_unlocked.clone();
             let stop_flag      = stop_flag.clone();
             let creds_pipe_raw = creds_pipe_raw.clone();
+            let broker_action_started_for_creds = broker_action_started.clone();
             let send_events    = SendableEvents(events, advise_context);
             thread::spawn(move || {
                 let _dll_ref = DllRefGuard; // 退出时 dll_release，分离安全
 
                 info!("CPipeListener::start - 进入凭据Client线程");
+
+                if defer_broker_connection_until_input {
+                    while !broker_action_started_for_creds.load(Ordering::SeqCst)
+                        && !stop_flag.load(Ordering::SeqCst)
+                    {
+                        if interruptible_sleep(Duration::from_millis(20), &stop_flag) {
+                            break;
+                        }
+                    }
+                }
 
                 loop {
                     if stop_flag.load(Ordering::SeqCst) { break; }
@@ -767,7 +895,9 @@ impl CPipeListener {
             creds_thread:  Some(creds_thread),
             creds_pipe_raw,
             use_input_hooks,
+            accepts_all_input,
             is_primary_scenario,
+            release_on_stop,
         }))
     }
 
@@ -787,6 +917,14 @@ impl CPipeListener {
         info!("CPipeListener::stop_and_join - 开始（信号 stop + 取消同步 I/O + 分离）");
         self.stop_flag.store(true, Ordering::SeqCst);
         if self.use_input_hooks {
+            if self.accepts_all_input {
+                let _ = INPUT_ALL_EVENTS_REF_COUNT.fetch_update(
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    |count| (count > 0).then_some(count - 1),
+                );
+                self.accepts_all_input = false;
+            }
             uninstall_input_hooks();
             self.use_input_hooks = false;
         }
@@ -811,9 +949,17 @@ impl CPipeListener {
             .creds_pipe_raw
             .swap(INVALID_HANDLE_VALUE.0 as isize, Ordering::SeqCst);
 
-        // 仅主场景（登录/解锁）且面容未成功（手动 PIN/密码解锁）时通知 Unlock EXE 释放
-        // 摄像头 (#117)。CREDUI/broker 不发（锁屏可能仍需 Unlock EXE）。
-        let need_release = self.is_primary_scenario && !self.is_unlocked.load(Ordering::SeqCst);
+        // 主场景手动 PIN/密码，以及 broker 对话框取消/关闭时通知 Unlock EXE 释放摄像头
+        // (#117)。成功识别时 is_unlocked=true，不会误释放刚提交的凭据会话。Broker 取消
+        // 可能发生在 prepare 已触发摄像头打开之后；若不 release，后台打开操作完成后仍
+        // 会点亮摄像头（日志表现为 credential client disconnected 后才 camera pre-warmed）。
+        let need_release = (self.is_primary_scenario || self.release_on_stop)
+            && !self.is_unlocked.load(Ordering::SeqCst);
+        let release_reason = if self.release_on_stop {
+            "broker dialog cancelled or closed"
+        } else {
+            "manual verification or dialog cancel"
+        };
 
         // teardown 线程：release 与 CloseHandle 都是潜在阻塞的管道操作，一律不在宿主
         // UI 线程做。顺序刻意 release 在前：release 送达后 Unlock EXE 停止识别并断开
@@ -824,7 +970,7 @@ impl CPipeListener {
         thread::spawn(move || {
             let _dll_ref = DllRefGuard;
             if need_release {
-                request_unlock_release("manual verification or dialog cancel");
+                request_unlock_release(release_reason);
             }
             if raw != INVALID_HANDLE_VALUE.0 as isize {
                 unsafe {
@@ -846,5 +992,36 @@ impl Drop for CPipeListener {
         if self.use_input_hooks {
             uninstall_input_hooks();
         }
+    }
+}
+
+#[cfg(test)]
+mod input_filter_tests {
+    use super::{defer_broker_connection, keyboard_action_is_down, mouse_action_is_discrete};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_SYSKEYDOWN, WM_KEYUP,
+    };
+
+    #[test]
+    fn ambiguous_broker_ignores_mouse_movement_and_wheel() {
+        assert!(!mouse_action_is_discrete(WM_MOUSEMOVE));
+        assert!(!mouse_action_is_discrete(WM_MOUSEWHEEL));
+        assert!(mouse_action_is_discrete(WM_LBUTTONDOWN));
+    }
+
+    #[test]
+    fn keyboard_filter_accepts_key_down_only() {
+        assert!(keyboard_action_is_down(WM_KEYDOWN));
+        assert!(keyboard_action_is_down(WM_SYSKEYDOWN));
+        assert!(!keyboard_action_is_down(WM_KEYUP));
+    }
+
+    #[test]
+    fn ambiguous_broker_defers_unlock_connection_until_input() {
+        assert!(defer_broker_connection(false, true, false, false));
+        assert!(!defer_broker_connection(false, true, true, false));
+        assert!(!defer_broker_connection(false, true, false, true));
+        assert!(!defer_broker_connection(false, false, false, false));
+        assert!(!defer_broker_connection(true, true, false, false));
     }
 }

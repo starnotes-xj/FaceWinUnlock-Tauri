@@ -150,13 +150,21 @@ Useful success log lines include a lock request sent to an interactive session a
 ## Browser Password Matrix
 
 Test Chrome and Edge first, then at least one of Brave, Opera/Opera GX, Vivaldi, Chromium, or 360.
+Before testing website autofill, confirm the browser's built-in Windows authentication
+setting (Chrome: **Use Windows Hello when filling passwords**) is enabled. The setting is
+profile scoped. If autofill succeeds without any `CPUS_CREDUI`/`credentialuibroker.exe` entry in
+`facewinunlock.log`, the browser filled the page directly and the Credential Provider was
+never invoked; this is not a provider classification failure.
 
 | Scenario | Expected generic Provider behavior |
 |---|---|
 | Reveal/show saved password | Face starts and succeeds |
-| Website saved-password fill | Face starts and succeeds |
+| Website saved-password fill with explicit password/PIN prompt | Face starts automatically and succeeds; no extra click is required |
+| Repeat the same website password fill twice | Both attempts start face recognition and fill successfully; both scenes may prewarm after `prepare`, but each `run` still requires mouse/keyboard input; the second may arrive with legacy `0x200` flags and no serialization |
+| Generic browser login/security-key confirmation | No camera prewarm or face before user choice; cancelling closes/releases the camera; after explicit input, the normal guard runs and WebAuthn/native flow remains in control |
 | Explicit password manager verification | Face starts and succeeds |
-| Google Passkey or webauthn.io | Generic Provider skips; Windows/plugin flow remains usable |
+| Google account login / Passkey / security-key confirmation without serialized password credentials | Generic Provider skips; no generic camera request before confirmation; after confirmation, Windows/plugin flow performs exactly one Passkey face authorization |
+| webauthn.io Passkey | Generic Provider skips; Windows/plugin flow remains usable |
 | Hardware security key | Generic Provider skips |
 | Set/change Windows PIN | Generic Provider skips |
 | Incognito/InPrivate unknown prompt | Falls back to Windows PIN |
