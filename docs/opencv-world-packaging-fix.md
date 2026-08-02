@@ -15,7 +15,13 @@ opencv_world4120.dll
 face_detection_yunet_2023mar.onnx
 face_recognition_sface_2021dec.onnx
 face_liveness.onnx
+anti_spoof_mn3.onnx
+face_liveness_mini_fasnet_v2.onnx
 ```
+
+For Intel NPU packages, the matching `.xml` and `.bin` files for all five
+models must be present as well. Missing either login PAD model is a release
+failure: Unlock must fail closed instead of releasing a face credential.
 
 ## Camera Backend Order
 

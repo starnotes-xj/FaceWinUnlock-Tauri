@@ -6,6 +6,7 @@
 
 - Serve the Credential Provider control and credential pipes.
 - Load enabled face records and OpenCV models, open the configured camera, and match faces.
+- Require a live decision from both login PAD models before releasing a Windows credential or Passkey authorization.
 - Prewarm the lock-screen camera and release it after inactivity or manual PIN unlock.
 - Coordinate camera ownership with the UI through `ui_release`/`ui_done`.
 - Subscribe to `Microsoft-Windows-WebAuthN/Operational` and publish WebAuthn Ready/Active named events.

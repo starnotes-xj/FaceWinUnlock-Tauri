@@ -21,9 +21,10 @@ flowchart LR
 The UI owns enrollment, settings, deployment, logs, updates, and Passkey management. It stores application state in SQLite and coordinates camera ownership before enrollment or verification.
 
 When enabled, the enrollment consistency check runs a short, local, passive RGB
-presentation-attack check. It uses model-correct face preprocessing and median
-fusion across a small frame burst; it does not ask the user to blink, turn, or
-perform another challenge. The check is not part of lock-screen recognition.
+presentation-attack check. The Unlock worker applies a separate two-model PAD
+gate to every face match before releasing a credential or authorizing the
+FaceWinUnlock Passkey. Both paths use a short frame window and never ask the
+user to blink, turn, or perform another challenge.
 
 ### Credential Provider
 
@@ -33,7 +34,11 @@ Credential Provider APIs do not expose Chromium's prompt message. Broker classif
 
 ### Unlock Service
 
-The scheduled task starts a SYSTEM supervisor and worker. The worker owns camera recognition, lock-screen prewarm, WebAuthn event monitoring, the Passkey face gate, and automatic locking.
+The scheduled task starts a SYSTEM supervisor and worker. The worker owns camera recognition,
+the two-model passive-liveness gate, lock-screen prewarm, WebAuthn event monitoring,
+the Passkey face gate, and automatic locking. A face similarity match is not
+released until the liveness window returns `Live`; spoof, inconclusive, load, and
+inference failures fail closed.
 
 The service does not call `LockWorkStation` from Session 0. It launches a one-shot helper under the active WTS user token on `winsta0\default`, then confirms the session lock flag.
 

@@ -2,10 +2,17 @@
 
 ## Scope
 
-Passive presentation-attack detection (PAD) runs only during the enrollment
-consistency check. It does not run in the lock-screen Unlock service. The check
-is deliberately passive: the user is never asked to blink, turn, open their
-mouth, or wait through a challenge.
+Passive presentation-attack detection (PAD) runs in both places where FaceWinUnlock
+can release or accept a face credential:
+
+- the UI enrollment consistency check; and
+- the Unlock service's single recognition loop used by Win+L, browser password
+  verification, and the Passkey face-authorization pipe.
+
+Both paths are deliberately passive: the user is never asked to blink, turn,
+open their mouth, or complete an interactive challenge. A face match alone is
+never sufficient to release credentials; a model error, incomplete window, or
+spoof decision fails closed.
 
 This is an RGB-camera convenience control. It reduces ordinary print and screen
 replay risk, but it is not equivalent to Windows Hello and cannot guarantee
@@ -38,6 +45,20 @@ votes and making consistency verification fail whenever liveness was enabled.
 The download script uses the immutable upstream commit and verifies the hash so
 the binary cannot silently drift away from this preprocessing contract.
 
+## Login Model Contract
+
+The Unlock service keeps its login PAD models separate from the enrollment model
+because the preprocessing contracts are different:
+
+| File | Role | Contract |
+|---|---|---|
+| `anti_spoof_mn3.onnx` | primary login PAD | Open Model Zoo probability output |
+| `face_liveness_mini_fasnet_v2.onnx` | secondary login PAD | MiniFASNetV2 two-score output |
+
+The corresponding OpenVINO `.xml`/`.bin` files are packaged for the NPU path.
+The service loads both models before recognition; it does not silently continue
+with only one model.
+
 ## Runtime Pipeline
 
 1. Detect the face with YuNet.
@@ -57,11 +78,26 @@ Median fusion prevents one focus or exposure outlier from deciding the result.
 The small retry budget tolerates momentary detector loss without adding an
 explicit user-visible wait.
 
+## Login Runtime Pipeline
+
+1. `Unlock` detects and recognizes the same face rectangle used for PAD.
+2. Once an enrolled identity matches, the service collects six observations over
+   at least 350 ms. The window is reset if the candidate identity changes.
+3. Each frame is scored by both login models. At least four live votes, no spoof
+   votes, and positive model margins are required.
+4. `Live` is the only decision that reaches the credential or Passkey face gate.
+   `Spoof`, `Inconclusive`, model load failure, and inference failure release
+   nothing and are logged without frames, scores, passwords, or PINs.
+
+This gate is shared by Win+L, Chrome password verification, and Passkey login;
+the browser/WebAuthn classifier still decides whether the generic provider is
+allowed to start, while PAD decides whether a matched face may authorize.
+
 ## Alternatives Rejected
 
 - Full-frame pixel motion cannot distinguish a live but still person from
-  camera noise, exposure changes, or a moved photograph. It also created a
-  lock-screen false-rejection path and was removed.
+  camera noise, exposure changes, or a moved photograph. It is not used as the
+  login authorization decision.
 - Blink detection needs a reliable open-closed-open sequence and a much longer
   observation window. A five-frame window is unlikely to contain a natural
   blink, while accepting closed frames alone can accept a closed-eye photo.
@@ -76,4 +112,7 @@ explicit user-visible wait.
 PAD quality must be measured on target cameras, lighting, and attack media.
 Do not tune the default threshold from a few hand-picked examples. Record live
 false rejects and attack accepts separately and retain camera/OS/backend
-metadata with every result.
+metadata with every result. The release candidate must repeat the attack matrix
+through Win+L, Chrome password verification, and Passkey login, and confirm the
+log contains `face and passive liveness matched` only after a live subject passes
+the full window.

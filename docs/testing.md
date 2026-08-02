@@ -147,6 +147,24 @@ Issue #26 is ready to close only after the active-camera Sleep case, hibernate/r
 
 Useful success log lines include a lock request sent to an interactive session and workstation lock confirmation. `cannot read active-session idle time` must skip locking rather than treat the session as idle. API errors, helper nonzero exit, or missing WTS confirmation are failures. Issue #27 is ready to close only after real SYSTEM scheduled-task testing passes.
 
+## Login Passive-Liveness Attack Matrix
+
+This matrix is separate from enrollment testing. Use the same enrolled identity
+and run every case through the actual credential path, not the UI preview.
+
+| Path | Live subject | Printed/photo replay | Expected log evidence |
+|---|---|---|---|
+| `Win+L` face unlock | Unlocks after the short PAD window | No credential is released | `face and passive liveness matched` only for live subject |
+| Chrome saved-password reveal | Password fills after PAD passes | Windows verification remains open or fails closed | No `face matched` without the passive-liveness suffix |
+| Chrome website password fill | Fill succeeds after PAD passes | No password is submitted | `passive liveness rejected face authorization` or timeout |
+| FaceWinUnlock Passkey | Plugin receives one `AUTHORIZED` decision | Plugin receives `REJECTED`/`TIMEOUT` | `face and passive liveness matched for passkey authorization` only for live subject |
+
+For each path repeat a printed photo, a phone/monitor image, and a prerecorded
+video at least ten times. Move the mouse only when the scenario normally needs
+user input; movement must not bypass the PAD window. Temporarily remove or
+corrupt either login model once and verify the service fails closed without
+releasing a password or Passkey decision.
+
 ## Browser Password Matrix
 
 Test Chrome and Edge first, then at least one of Brave, Opera/Opera GX, Vivaldi, Chromium, or 360.
