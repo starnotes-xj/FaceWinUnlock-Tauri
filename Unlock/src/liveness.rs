@@ -313,7 +313,9 @@ fn prepare_nchw_tensor(face_bgr: &Mat, means: &[f32; 3], scales: &[f32; 3]) -> R
     )?;
 
     let mut rgb = Mat::default();
-    imgproc::cvt_color(&resized, &mut rgb, imgproc::COLOR_BGR2RGB, 0)?;
+    // Use the generated default-argument wrapper so this remains compatible
+    // with OpenCV 4.11 and 4.12 bindings (the latter adds AlgorithmHint).
+    imgproc::cvt_color_def(&resized, &mut rgb, imgproc::COLOR_BGR2RGB)?;
 
     let mut rgb_float = Mat::default();
     rgb.convert_to(&mut rgb_float, CV_32FC3, 1.0, 0.0)?;
