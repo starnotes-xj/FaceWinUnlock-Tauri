@@ -88,8 +88,16 @@ fn apply_update_inner() -> Result<String, String> {
     }
 
     let tmp_dir = ROOT_DIR.join("update_temp");
-    // 清理上一次可能残留的临时目录，避免脏文件混入。
-    let _ = std::fs::remove_dir_all(&tmp_dir);
+    // 清理上一次可能残留的临时目录，避免脏文件混入。先删除完成标记，防止
+    // 新批次下载中途失败时被旧的有效标记误认为完整批次。
+    if tmp_dir.exists() {
+        let ready_marker = tmp_dir.join(UPDATE_READY_MARKER);
+        if ready_marker.exists() {
+            std::fs::remove_file(&ready_marker)
+                .map_err(|e| format!("清理旧更新完成标记失败: {e}"))?;
+        }
+        std::fs::remove_dir_all(&tmp_dir).map_err(|e| format!("清理旧更新暂存目录失败: {e}"))?;
+    }
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
 
     let download_result = (|| -> Result<(), String> {

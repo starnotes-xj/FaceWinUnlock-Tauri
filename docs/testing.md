@@ -132,7 +132,7 @@ RGB passive PAD reduces common 2D attacks but is not an IR/depth proof. Record t
 
 1. Enable liveness for enrollment consistency, capture a genuine face, and enter verification.
 2. Expected: the UI reports passive sampling for the first four frames, then passes without requesting a blink, turn, or spoken action.
-3. Monitor Task Manager while repeating verification on a low-end CPU. Each UI command must consume one camera frame and one liveness inference, not synchronously capture four extra frames.
+3. Monitor Task Manager while repeating verification on a low-end CPU. Each UI command must consume one camera frame and one liveness inference, not synchronously capture four extra frames. Pause camera verification for more than three seconds; expected: sampling restarts at `1/5` instead of reusing stale live frames.
 4. Start the management UI without opening the face-enrollment page. Expected: it does not parse or initialize any OpenCV model.
 5. Select Intel NPU on a supported Core Ultra system with the packaged OpenVINO runtime. Confirm the log reports `(backend=2, target=9)` and does not contain an ONNX importer error.
 6. Temporarily rename one NPU `.xml` or `.bin` asset and reload the backend. Expected: UI and Unlock report a CPU fallback; enrollment and native Windows PIN/password remain usable.

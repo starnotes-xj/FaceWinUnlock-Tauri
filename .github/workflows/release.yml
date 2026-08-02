@@ -452,19 +452,22 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}" -replace '^v',''
-          if ($version -notmatch '^\d+\.\d+\.\d+') {
-            Write-Host "ref_name '$version' not semver; skipping version sync"
+          # Windows/MSIX 使用三段数字版本；预发布 tag（如 0.5.11-rc.1）同步其稳定基线，
+          # 而 release metadata/manifest 仍保留完整的预发布版本字符串。
+          $baseVersion = ($version -split '[-+]', 2)[0]
+          if ($baseVersion -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Host "ref_name '$version' has no numeric semver base; skipping version sync"
           } else {
             $conf = "UI/src-tauri/tauri.conf.json"
             $json = Get-Content $conf -Raw
-            $json = [regex]::Replace($json, '"version"\s*:\s*"[^"]*"', "`"version`": `"$version`"", 1)
+            $json = [regex]::Replace($json, '"version"\s*:\s*"[^"]*"', "`"version`": `"$baseVersion`"", 1)
             Set-Content $conf -Value $json -NoNewline -Encoding utf8
-            Write-Host "Synced $conf version -> $version"
+            Write-Host "Synced $conf version -> $baseVersion"
             $cargo = "UI/src-tauri/Cargo.toml"
             $toml = Get-Content $cargo -Raw
-            $toml = [regex]::Replace($toml, '(?m)^version\s*=\s*"[^"]*"', "version = `"$version`"", 1)
+            $toml = [regex]::Replace($toml, '(?m)^version\s*=\s*"[^"]*"', "version = `"$baseVersion`"", 1)
             Set-Content $cargo -Value $toml -NoNewline -Encoding utf8
-            Write-Host "Synced $cargo version -> $version"
+            Write-Host "Synced $cargo version -> $baseVersion"
           }
 
       - name: Build Tauri installer
@@ -580,6 +583,8 @@ jobs:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           draft: false
           prerelease: ${{ steps.release_meta.outputs.is_prerelease }}
+          # 预发布版本绝不抢占 latest；稳定版本继续显式成为 latest。
+          make_latest: ${{ steps.release_meta.outputs.is_prerelease == 'false' && 'true' || 'false' }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |

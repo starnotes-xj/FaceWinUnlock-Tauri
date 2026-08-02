@@ -75,7 +75,7 @@ The Active check is repeated in `SetUsageScenario`, `Advise`, before pipe connec
 ## Data And Trust
 
 - Face records, options, and configured Windows credentials remain local.
-- Passive PAD inference and its rolling decision window remain local; camera frames and model scores are not written to logs.
+- Passive PAD inference and its rolling decision window remain local; camera frames and model scores are not written to logs. The UI window resets when the reference changes, the camera session ends, or sampling pauses for more than three seconds.
 - The generic Credential Provider briefly handles account credentials to log on; it must never log serialization bytes or secret values.
 - Passkey private keys are per-user Software KSP keys. Metadata backup is under `%ProgramData%\facewinunlock-tauri\PasskeyBackup`.
 - RGB recognition with passive PAD materially reduces printed-photo and screen-replay attacks, but remains a convenience layer and is not equivalent to Windows Hello IR/depth biometric assurance.

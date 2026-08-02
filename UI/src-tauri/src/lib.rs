@@ -1,5 +1,6 @@
 use std::{
     env,
+    os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -7,9 +8,11 @@ use std::{
 use tauri::{tray::TrayIcon, Manager, Wry};
 use windows::Win32::{
     Foundation::HWND,
+    Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH},
     System::RemoteDesktop::{WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION},
     UI::Shell::SetWindowSubclass,
 };
+use windows_core::PCWSTR;
 
 pub mod modules;
 pub mod proc;
@@ -99,6 +102,60 @@ lazy_static::lazy_static! {
     };
 }
 
+/// Copies a staged file to a same-directory temporary file and atomically swaps it into place.
+/// The destination remains untouched if copying or the final Windows rename fails.
+pub(crate) fn atomic_copy_file(source: &Path, destination: &Path) -> Result<(), String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("目标路径没有父目录: {}", destination.display()))?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("创建替换目录失败: {e}"))?;
+    let name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("目标文件名无效: {}", destination.display()))?;
+    let temporary = parent.join(format!(".{name}.facewinunlock-part"));
+    if temporary.exists() {
+        std::fs::remove_file(&temporary)
+            .map_err(|e| format!("清理临时替换文件失败: {e}"))?;
+    }
+
+    let expected_size = std::fs::metadata(source)
+        .map_err(|e| format!("读取源文件大小失败: {e}"))?
+        .len();
+    let copied_size = std::fs::copy(source, &temporary)
+        .map_err(|e| format!("复制到临时替换文件失败: {e}"))?;
+    let temporary_size = std::fs::metadata(&temporary)
+        .map_err(|e| format!("读取临时替换文件大小失败: {e}"))?
+        .len();
+    if copied_size != expected_size || temporary_size != expected_size {
+        let _ = std::fs::remove_file(&temporary);
+        return Err("临时替换文件大小校验失败".to_string());
+    }
+
+    let source_wide: Vec<u16> = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let result = unsafe {
+        MoveFileExW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("原子替换文件失败: {error}"));
+    }
+    Ok(())
+}
+
 /// 应用上次退出时因文件占用而延迟的增量更新（`X.new` → `X`），best-effort。
 /// 由 `close_app` 在替换被占用文件时写出 `X.new`；此处在启动早期尝试改名替换。
 /// 目标仍被占用（如运行中的核心服务持有 `FaceWinUnlock-Server.exe`）时静默跳过，下次启动再试。
@@ -112,9 +169,8 @@ fn apply_pending_updates_in(directory: &Path) {
         if path.extension().and_then(|e| e.to_str()) == Some("new") {
             // FaceWinUnlock-Server.exe.new → FaceWinUnlock-Server.exe
             let target = path.with_extension("");
-            // Windows 的 rename 不会覆盖已存在目标。直接覆盖复制；目标仍被占用时
-            // copy 失败并保留 .new，待下次启动继续尝试。
-            if std::fs::copy(&path, &target).is_ok() {
+            // 通过同目录临时文件原子替换；目标仍被占用时保留 .new，待下次启动继续尝试。
+            if atomic_copy_file(&path, &target).is_ok() {
                 let _ = std::fs::remove_file(&path);
             }
         }

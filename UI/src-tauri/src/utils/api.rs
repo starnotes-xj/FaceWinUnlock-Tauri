@@ -770,10 +770,12 @@ fn apply_downloaded_update() {
     let passkey_package_updated = update_dir.join("FaceWinUnlock-Passkey.msix").exists()
         || update_dir.join("FaceWinUnlock-Passkey.cer").exists();
 
-    apply_staged_directory(&update_dir, Path::new(""));
-    apply_staged_directory(&update_dir.join("resources"), Path::new("resources"));
+    let root_result = apply_staged_directory(&update_dir, Path::new(""));
+    let resources_result =
+        apply_staged_directory(&update_dir.join("resources"), Path::new("resources"));
+    let all_files_applied = root_result.all_applied && resources_result.all_applied;
 
-    if passkey_package_updated {
+    if passkey_package_updated && all_files_applied {
         match crate::modules::passkey_plugin::update_bundled_passkey_plugin_preserving_data() {
             Ok(Some(message)) => info!("apply_downloaded_update: {message}"),
             Ok(None) => {
@@ -783,14 +785,24 @@ fn apply_downloaded_update() {
         }
     }
 
-    let _ = std::fs::remove_dir_all(&update_dir);
+    if all_files_applied {
+        let _ = std::fs::remove_dir_all(&update_dir);
+    } else {
+        warn!(
+            "apply_downloaded_update: 保留未完成的更新暂存目录，服务保持停止以等待下次原子替换"
+        );
+    }
 
     // 服务已被我们停掉 → 通过计划任务重新拉起新版本（任务自带 1 分钟 TimeTrigger 兜底重启）。
-    if unlock_was_running {
+    if unlock_was_running && all_files_applied {
         let _ = Command::new("schtasks")
             .args(&["/Run", "/TN", "FaceWinUnlockServer"])
             .creation_flags(CREATE_NO_WINDOW)
             .status();
+    } else if unlock_was_running {
+        warn!(
+            "apply_downloaded_update: 文件仍待替换，未自动重启 Unlock 服务；请重试或重启系统"
+        );
     }
 }
 
@@ -807,10 +819,16 @@ fn staged_model_resources_present(update_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn apply_staged_directory(staged_dir: &Path, relative_dir: &Path) {
+#[derive(Default)]
+struct ApplyDirectoryResult {
+    all_applied: bool,
+}
+
+fn apply_staged_directory(staged_dir: &Path, relative_dir: &Path) -> ApplyDirectoryResult {
+    let mut result = ApplyDirectoryResult { all_applied: true };
     let entries = match std::fs::read_dir(staged_dir) {
         Ok(entries) => entries,
-        Err(_) => return,
+        Err(_) => return result,
     };
     for entry in entries.flatten() {
         let src = entry.path();
@@ -824,15 +842,20 @@ fn apply_staged_directory(staged_dir: &Path, relative_dir: &Path) {
             continue;
         }
         let dst = ROOT_DIR.join(relative_dir).join(name);
-        if let Some(parent) = dst.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if std::fs::copy(&src, &dst).is_err() {
-            // 仍被占用（极少见）：写出 X.new，下次启动时由 apply_pending_updates 替换。
+        if crate::atomic_copy_file(&src, &dst).is_err() {
+            result.all_applied = false;
+            // 仍被占用：把完整文件原子写成 X.new，留给下次启动再次尝试。
             let pending_name = format!("{}.new", name.to_string_lossy());
-            let _ = std::fs::copy(&src, dst.with_file_name(pending_name));
+            if let Err(error) = crate::atomic_copy_file(&src, &dst.with_file_name(pending_name)) {
+                warn!(
+                    "apply_downloaded_update: 无法暂存 {} 的 pending 替换: {}",
+                    dst.display(),
+                    error
+                );
+            }
         }
     }
+    result
 }
 
 #[cfg(test)]

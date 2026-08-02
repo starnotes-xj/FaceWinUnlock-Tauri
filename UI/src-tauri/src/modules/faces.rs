@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{LazyLock, Mutex},
+    time::{Duration, Instant},
 };
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -17,6 +18,8 @@ use crate::{APP_STATE, ROOT_DIR};
 
 const LIVENESS_WINDOW_SIZE: usize = 5;
 const LIVENESS_FACE_EXPAND_SCALE: f32 = 1.35;
+// 允许低端设备单帧推理较慢，但不允许隔很久后复用旧的真人帧。
+const LIVENESS_MAX_SAMPLE_GAP: Duration = Duration::from_secs(3);
 
 /// 缓存参考图的人脸特征，避免每帧重复提取 (#121)
 struct VerificationCache {
@@ -32,11 +35,15 @@ static VERIFY_CACHE: LazyLock<Mutex<Option<VerificationCache>>> =
 struct LivenessVoteWindow {
     reference_key: String,
     scores: VecDeque<f32>,
+    last_sample_at: Option<Instant>,
 }
 
 impl LivenessVoteWindow {
-    fn record(&mut self, reference_key: &str, score: f32) {
-        if self.reference_key != reference_key {
+    fn record(&mut self, reference_key: &str, score: f32, sampled_at: Instant) {
+        let sampling_gap_expired = self
+            .last_sample_at
+            .is_some_and(|last| sampled_at.duration_since(last) > LIVENESS_MAX_SAMPLE_GAP);
+        if self.reference_key != reference_key || sampling_gap_expired {
             self.reference_key.clear();
             self.reference_key.push_str(reference_key);
             self.scores.clear();
@@ -45,6 +52,7 @@ impl LivenessVoteWindow {
             self.scores.pop_front();
         }
         self.scores.push_back(score);
+        self.last_sample_at = Some(sampled_at);
     }
 
     fn result(&self, threshold: f64) -> Option<(usize, f32)> {
@@ -618,7 +626,7 @@ pub fn verify_face(
             let mut votes = LIVENESS_VOTES.lock().map_err(|error| {
                 CustomResult::error(Some(format!("获取活体投票状态失败: {}", error)), None)
             })?;
-            votes.record(&reference_key, score);
+            votes.record(&reference_key, score, Instant::now());
             (votes.scores.len(), votes.result(liveness_threshold))
         };
 
@@ -729,11 +737,29 @@ mod tests {
     fn liveness_vote_window_resets_for_new_reference() {
         let mut votes = LivenessVoteWindow::default();
         for _ in 0..LIVENESS_WINDOW_SIZE {
-            votes.record("first", 0.9);
+            votes.record("first", 0.9, Instant::now());
         }
         assert_eq!(votes.result(0.5).unwrap().0, LIVENESS_WINDOW_SIZE);
 
-        votes.record("second", 0.1);
+        votes.record("second", 0.1, Instant::now());
+        assert!(votes.result(0.5).is_none());
+        assert_eq!(votes.scores.len(), 1);
+    }
+
+    #[test]
+    fn liveness_vote_window_expires_after_sampling_gap() {
+        let mut votes = LivenessVoteWindow::default();
+        let start = Instant::now();
+        for index in 0..LIVENESS_WINDOW_SIZE {
+            votes.record("same", 0.9, start + Duration::from_millis(index as u64 * 100));
+        }
+        assert!(votes.result(0.5).is_some());
+
+        votes.record(
+            "same",
+            0.1,
+            start + LIVENESS_MAX_SAMPLE_GAP + Duration::from_millis(1),
+        );
         assert!(votes.result(0.5).is_none());
         assert_eq!(votes.scores.len(), 1);
     }
