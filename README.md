@@ -1,5 +1,13 @@
 # FaceWinUnlock-Tauri
 
+## 求打赏
+
+我现在暑假留校维护这个项目，生活费真的快撑不住、要吃不起饭了。如果这个项目对你有帮助，欢迎扫码请我吃顿饭；量力而行，每一份支持我都会记在心里，感谢！
+
+<p align="center">
+  <img src="docs/donation-wechat.png" alt="微信赞赏码" width="480">
+</p>
+
 [English](README_EN.md) | [Releases](https://github.com/starnotes-xj/FaceWinUnlock-Tauri/releases) | [测试指南](docs/testing.md)
 
 FaceWinUnlock-Tauri 为不支持 Windows Hello 人脸的普通摄像头提供本地面容解锁。项目由 Tauri/Vue 管理界面、Rust 人脸识别服务、Windows Credential Provider 和可选的 Windows Passkey Provider 组成。
