@@ -24,7 +24,7 @@ Default log paths:
 Run these first. Stop the release if any item fails.
 
 1. Add or edit a face; camera preview appears without a long black screen.
-2. On a clean setup, finish the initialization lock-screen test. After automatic unlock, the dashboard must be visible immediately without clicking the app window.
+2. On a clean setup, finish the initialization lock-screen test. After automatic unlock, the Add Face page must open immediately without clicking the app window; later initialization checks should return to the dashboard.
 3. `Win+L`, move the mouse, and unlock by face.
 4. `Win+L`, keep the face away, enter Windows PIN manually, and confirm the camera LED turns off within 5 seconds.
 5. Reveal a saved browser password; face verification succeeds.
@@ -33,6 +33,15 @@ Run these first. Stop the release if any item fails.
 8. Separately choose a passkey saved with FaceWinUnlock; the plugin's dedicated face authorization starts the camera and succeeds.
 9. Enable automatic lock with a 30-second timeout and confirm it locks through the interactive-session helper.
 10. Sleep/resume and repeat face unlock plus manual PIN unlock.
+
+## Install, Restart, And First Enrollment
+
+1. Install the NSIS candidate and confirm a `FaceWinUnlock-Tauri` shortcut is present on the desktop.
+2. When the installer reports that the Credential Provider requires a restart, choose **Yes**.
+3. After Windows logs in, expected: the launcher opens FaceWinUnlock automatically; no manual search through the install directory is needed.
+4. Complete the initialization lock-screen test. Expected: the first-time flow opens **Add Face** directly after the test succeeds.
+5. Cancel or finish enrollment, close the app, and verify the desktop shortcut still starts the launcher and reaches the dashboard.
+6. Uninstall the candidate. Expected: the custom desktop shortcut and any pending one-time post-restart launch entry are removed.
 
 ## Issue #33 Smart Delay Mode
 

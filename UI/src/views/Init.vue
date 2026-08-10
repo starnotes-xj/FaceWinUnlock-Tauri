@@ -217,6 +217,7 @@ async function waitForSessionUnlock() {
 }
 
 async function completeInitialization() {
+  const firstInitialization = !initialized.value;
   const errorList: any = await optionsStore.saveOptions({ is_initialized: 'true' });
   if (errorList.length > 0) {
     await ElMessageBox.alert(formatObjectString(errorList), '保存设置失败', { confirmButtonText: '确定' });
@@ -227,9 +228,10 @@ async function completeInitialization() {
   await appWindow.show();
   await appWindow.setFocus();
   document.documentElement.classList.remove('anim-idle');
-  await router.replace('/');
+  initialized.value = true;
+  await router.replace(firstInitialization ? '/faces/add' : '/');
   await nextTick();
-  ElMessage.success('初始化成功');
+  ElMessage.success(firstInitialization ? '初始化成功，请录入第一张人脸' : '初始化成功');
 }
 
 const finishInit = () => {
