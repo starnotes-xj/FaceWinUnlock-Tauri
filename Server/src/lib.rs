@@ -19,8 +19,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 // Windows基础类型和COM接口
 use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, HINSTANCE, S_FALSE, S_OK};
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
-use windows::Win32::System::SystemInformation::{GetTickCount, GetTickCount64};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::Shell::ICredentialProvider;
 use windows_core::{implement, Ref, GUID, PCWSTR};
 use windows::Win32::Foundation::BOOL;
@@ -135,27 +134,12 @@ pub fn read_facewinunlock_registry(key_name: &str) -> windows::core::Result<Stri
 /// marker contains no credentials or user data and is created atomically, so
 /// concurrent provider instances cannot both select boot-delay mode.
 pub fn claim_boot_delay_session() -> bool {
-    const RECENT_INPUT_GRACE_MS: u32 = 60_000;
-
-    // A recent key/mouse event is strong evidence that this is an explicit
-    // Win+L/unlock interaction. If the query fails, fail closed to manual.
-    let mut input = LASTINPUTINFO {
-        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
-        dwTime: 0,
-    };
-    if !unsafe { GetLastInputInfo(&mut input).as_bool() } {
-        info!("boot delay candidate rejected: GetLastInputInfo failed");
-        return false;
-    }
-    let input_age = unsafe { GetTickCount() }.wrapping_sub(input.dwTime);
-    if input_age <= RECENT_INPUT_GRACE_MS {
-        info!(
-            "boot delay candidate rejected: recent interactive input {}ms ago",
-            input_age
-        );
-        return false;
-    }
-
+    // Do not use GetLastInputInfo here. Windows can report the power-button or
+    // boot-time interaction as recent input, which rejects the very first
+    // CPUS_LOGON session before the user has reached the machine. The atomic
+    // per-boot marker below is the actual boundary: the first CPUS_LOGON
+    // session may claim boot-delay mode, while every later session (including
+    // Win+L) is forced to manual mode.
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

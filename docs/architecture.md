@@ -28,8 +28,8 @@ Credential Provider APIs do not expose Chromium's prompt message. Broker classif
 
 For the primary logon/unlock scenes, the DLL selects one per-session trigger policy:
 
-- `prepare:boot` is claimed only once per Windows boot, for an unattended `CPUS_LOGON` candidate with no recent keyboard/mouse input. The claim is stored as a non-sensitive per-boot marker under `%ProgramData%\facewinunlock-tauri\boot-sessions` so LogonUI or service restarts do not turn a later Win+L into an automatic unlock.
-- `prepare:manual` is used for `CPUS_UNLOCK_WORKSTATION`, later logon candidates, recent-input candidates, and all uncertain cases. Recognition still requires the existing low-level input hook.
+- `prepare:boot` is claimed only once per Windows boot, for the first `CPUS_LOGON` candidate. The claim is stored as a non-sensitive per-boot marker under `%ProgramData%\facewinunlock-tauri\boot-sessions` so LogonUI or service restarts do not turn a later Win+L into an automatic unlock. The first-session boundary is intentional: Windows may report the power-button or boot-time interaction as recent input before the user has reached the machine.
+- `prepare:manual` is used for `CPUS_UNLOCK_WORKSTATION`, later logon candidates, and all uncertain cases. Recognition still requires the existing low-level input hook.
 - `prepare:legacy` preserves the existing run-gated delay behavior for supported CREDUI password scenarios. It does not apply to the official Passkey provider.
 
 The DLL never synthesizes keyboard/PIN input and never sends an automatic `run` command. In boot mode, Unlock starts the configured delay only after a credential client is connected; it performs at most three automatic attempts, then changes that session to input-only mode. A manual input cancels any pending boot timer.
