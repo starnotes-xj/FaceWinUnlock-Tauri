@@ -34,6 +34,17 @@ Run these first. Stop the release if any item fails.
 9. Enable automatic lock with a 30-second timeout and confirm it locks through the interactive-session helper.
 10. Sleep/resume and repeat face unlock plus manual PIN unlock.
 
+## Issue #33 Smart Delay Mode
+
+Use an installed build with the existing face-recognition type set to `delay`.
+
+1. Cold boot into LogonUI with no keyboard or mouse input. Expected: after the configured delay and cold-boot readiness protection, face recognition starts without an input event.
+2. Leave the computer at the lock screen with no person present. Expected: at most three automatic recognition attempts occur; afterward the camera is released according to the normal idle policy and a later mouse/keyboard event is required.
+3. After reaching the desktop, press `Win+L` and remain away from the camera longer than the configured delay. Expected: no automatic recognition or unlock occurs.
+4. On that same Win+L session, move the mouse or press a key. Expected: the existing input hook starts recognition and face unlock works.
+5. Start a supported browser password-fill/CREDUI flow and a FaceWinUnlock Passkey flow. Expected: CREDUI keeps its legacy run-gated fallback behavior and the Passkey provider remains on its dedicated face-authorization pipe.
+6. Restart LogonUI or the Unlock worker between cold boot and Win+L tests. Expected: the current boot marker prevents a second unattended boot claim; uncertain or failed marker access falls back to manual mode.
+
 ## Enrollment And Camera Ownership
 
 ### No Face Records

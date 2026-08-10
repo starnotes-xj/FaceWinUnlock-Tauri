@@ -24,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         Arc, Condvar, Mutex,
     },
     thread,
@@ -79,6 +79,28 @@ const PIPE_SERVER_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustServer";
 const PIPE_UNLOCK_NAME: &str = r"\\.\pipe\MansonWindowsUnlockRustUnlock";
 const PIPE_PASSKEY_FACE_NAME: &str = r"\\.\pipe\FaceWinUnlockPasskeyFaceAuth";
 const BUF_SIZE: u32 = 4096;
+// Delay policy is selected by the Credential Provider per primary session.
+// Legacy is retained for CREDUI so browser/password-fill behavior is unchanged.
+const DELAY_POLICY_LEGACY: u8 = 0;
+const DELAY_POLICY_BOOT: u8 = 1;
+const DELAY_POLICY_MANUAL: u8 = 2;
+const MAX_BOOT_DELAY_ATTEMPTS: u32 = 3;
+
+fn should_arm_delayed_recognition(
+    policy: u8,
+    boot_attempts: u32,
+    has_credential_client: bool,
+    dll_run_received: bool,
+) -> bool {
+    if !has_credential_client {
+        return false;
+    }
+    match policy {
+        DELAY_POLICY_BOOT => boot_attempts < MAX_BOOT_DELAY_ATTEMPTS,
+        DELAY_POLICY_LEGACY => dll_run_received,
+        _ => false,
+    }
+}
 // 预热帧数恢复到 10（issue #94：NVIDIA Broadcast 等虚拟摄像头需足够预热帧才稳定输出，
 // 否则花屏/黑帧）。有了「摄像头预热（秒解锁）」后，这段预热多在锁屏预开阶段完成、不在解锁关键路径上。
 const CAMERA_WARMUP_MAX_FRAMES: usize = 10;
@@ -125,9 +147,9 @@ struct State {
     /// 上一次用户活跃的时间戳（Unix 秒），用于自动锁屏
     last_user_active: AtomicI64,
     active_pipe_handlers: AtomicUsize,
-    /// DLL 是否已发送过至少一次 "run" 命令。delay 模式必须收到 DLL 的显式
-    /// run 后才允许自动重试——防止冷启动时 DLL 仅发 "prepare" 就触发识别，
-    /// 导致凭据在系统未就绪时提交、桌面加载卡死（白色圆点转圈→强制关机）。
+    /// DLL 是否已发送过至少一次 "run" 命令。legacy CREDUI delay 模式必须
+    /// 收到显式 run 后才允许自动重试；primary boot-delay 使用独立策略门控，
+    /// 防止手动会话和 CREDUI 误触发无人值守识别。
     dll_run_received: AtomicBool,
     /// 上次面容识别成功的时间戳（Unix 秒）。0 表示尚未成功解锁过。
     /// 重锁宽限期：成功解锁后重新锁屏时，delay 模式在 RE_LOCK_GRACE_SECS
@@ -143,6 +165,15 @@ struct State {
     /// 0 表示无冷却。冷却解决 credentialuibroker.exe 每次请求
     /// 创建新进程导致 DLL 端 static 变量归零的问题。
     after_release_cooldown_until: AtomicI64,
+    /// Primary-session delay policy selected by the DLL. Boot mode is the only
+    /// mode allowed to start recognition without a user input event.
+    delay_policy: AtomicU8,
+    /// A manual input cancels a pending boot-delay timer and converts the
+    /// current session to input-only mode.
+    delay_cancel_requested: AtomicBool,
+    /// Heartbeat prepare:boot messages from the same provider must not
+    /// re-enable delay after a user has already supplied manual input.
+    delay_boot_cancelled: AtomicBool,
     /// UI 让位摄像头的截止时间（Unix 毫秒）。UI 录入 / 一致性校验 / 预览前发 "ui_release"
     /// 设为 now + UI_CAMERA_YIELD_FALLBACK_MS，发 "ui_done" 清零。> now 时后台不预热、不自动
     /// 开摄像头，把摄像头让给 UI，修复录入采集黑屏（UI 与后台服务争抢同一摄像头）。
@@ -180,6 +211,9 @@ impl State {
             last_successful_unlock_at: AtomicI64::new(0),
             consecutive_failures: AtomicU32::new(0),
             after_release_cooldown_until: AtomicI64::new(0),
+            delay_policy: AtomicU8::new(DELAY_POLICY_LEGACY),
+            delay_cancel_requested: AtomicBool::new(false),
+            delay_boot_cancelled: AtomicBool::new(false),
             camera_yield_until: AtomicI64::new(0),
             power: Arc::new(power_events::PowerLifecycle::default()),
             passkey_face_gate: Arc::new(passkey::FaceAuthorizationGate::default()),
@@ -461,10 +495,36 @@ fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
                             .store(state.power.generation(), Ordering::SeqCst);
                         state.run_requested.store(true, Ordering::SeqCst);
                         state.dll_run_received.store(true, Ordering::SeqCst);
+                        if state.delay_policy.load(Ordering::SeqCst) == DELAY_POLICY_BOOT {
+                            state.delay_policy.store(DELAY_POLICY_MANUAL, Ordering::SeqCst);
+                            state.delay_cancel_requested.store(true, Ordering::SeqCst);
+                            state.delay_boot_cancelled.store(true, Ordering::SeqCst);
+                            log_service(
+                                &state.exe_dir,
+                                "INFO",
+                                "manual input received; boot delay cancelled for this session",
+                            );
+                        }
                         log_service(&state.exe_dir, "INFO", "run requested from credential provider");
                     }
                     control_buf.clear();
                 } else if control_buf.contains("prepare") {
+                    let policy = if control_buf.contains("prepare:boot")
+                        && !state.delay_boot_cancelled.load(Ordering::SeqCst)
+                    {
+                        DELAY_POLICY_BOOT
+                    } else if control_buf.contains("prepare:manual") {
+                        DELAY_POLICY_MANUAL
+                    } else if control_buf.contains("prepare:legacy") {
+                        DELAY_POLICY_LEGACY
+                    } else {
+                        // Older DLLs send plain "prepare". Keep their behavior.
+                        DELAY_POLICY_LEGACY
+                    };
+                    state.delay_policy.store(policy, Ordering::SeqCst);
+                    if policy == DELAY_POLICY_MANUAL {
+                        state.delay_cancel_requested.store(true, Ordering::SeqCst);
+                    }
                     state.prepare_requested.store(true, Ordering::SeqCst);
                     control_buf.clear();
                 } else if control_buf.len() > 32 {
@@ -1384,6 +1444,62 @@ mod prewarm_session_gate_tests {
     }
 }
 
+#[cfg(test)]
+mod delay_policy_tests {
+    use super::{
+        should_arm_delayed_recognition, DELAY_POLICY_BOOT, DELAY_POLICY_LEGACY,
+        DELAY_POLICY_MANUAL, MAX_BOOT_DELAY_ATTEMPTS,
+    };
+
+    #[test]
+    fn boot_delay_requires_a_credential_client_and_has_a_bound() {
+        assert!(!should_arm_delayed_recognition(
+            DELAY_POLICY_BOOT,
+            0,
+            false,
+            false,
+        ));
+        assert!(should_arm_delayed_recognition(
+            DELAY_POLICY_BOOT,
+            0,
+            true,
+            false,
+        ));
+        assert!(!should_arm_delayed_recognition(
+            DELAY_POLICY_BOOT,
+            MAX_BOOT_DELAY_ATTEMPTS,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn manual_primary_sessions_never_arm_delay() {
+        assert!(!should_arm_delayed_recognition(
+            DELAY_POLICY_MANUAL,
+            0,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn legacy_broker_delay_still_requires_run() {
+        assert!(!should_arm_delayed_recognition(
+            DELAY_POLICY_LEGACY,
+            0,
+            true,
+            false,
+        ));
+        assert!(should_arm_delayed_recognition(
+            DELAY_POLICY_LEGACY,
+            0,
+            true,
+            true,
+        ));
+    }
+}
+
 fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     const COLD_BOOT_GRACE_SECS: u64 = 60;
     /// 重锁宽限期：成功面容解锁后若重新锁屏（Win+L 或自动锁屏），
@@ -1408,6 +1524,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
     let mut not_face_delay = load_not_face_delay(&db_path);
     let mut delayed_run_at: Option<Instant> = None;
     let mut delay_session_armed = false;
+    let mut boot_delay_attempts = 0u32;
     let mut last_failed_at: Option<Instant> = None;
     let mut last_model_attempt = instant_secs_ago(5); // 首次尽快尝试（开机早期回退为 now）
     // 摄像头预热（秒解锁）：prewarm_at = 锁屏预开摄像头的时刻；
@@ -1436,6 +1553,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             state.broker_guard_prewarm_blocked.store(false, Ordering::SeqCst);
             delayed_run_at = None;
             delay_session_armed = false;
+            boot_delay_attempts = 0;
+            state.delay_boot_cancelled.store(false, Ordering::SeqCst);
             last_failed_at = None;
             state.prepare_requested.store(false, Ordering::SeqCst);
             if !preserve_new_run {
@@ -1498,6 +1617,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             prewarm_session_gate.on_manual_release();
             delayed_run_at = None;
             delay_session_armed = false;
+            boot_delay_attempts = 0;
+            state.delay_boot_cancelled.store(false, Ordering::SeqCst);
             last_failed_at = None;
             state.dll_run_received.store(false, Ordering::SeqCst);
             log_service(&exe_dir, "INFO", "camera released");
@@ -1525,6 +1646,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         let has_credential_client =
             state.dll_creds_pipe.load(Ordering::SeqCst) != INVALID_HANDLE_VALUE.0 as isize;
         if prewarm_session_gate.observe_credential_client(has_credential_client) {
+            boot_delay_attempts = 0;
+            state.delay_boot_cancelled.store(false, Ordering::SeqCst);
             // power_resume_requires_run 仅当摄像头实际被阻断时才保持抑制——
             // 防止 Modern Standby 恢复后锁屏界面立刻预热。若摄像头未被阻断
             // 但标志仍为 true（虚假 power 事件、初始通知等），则解除。
@@ -1563,6 +1686,8 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         if !has_credential_client && !state.recognition_active.load(Ordering::SeqCst) {
             delayed_run_at = None;
             delay_session_armed = false;
+            boot_delay_attempts = 0;
+            state.delay_boot_cancelled.store(false, Ordering::SeqCst);
             power_resume_requires_run = false;
             // ★ broker_guard_prewarm_blocked 跨会话泄漏修复（CRITICAL）：
             //   passkey CredUI 结束→DLL 断开→标记仍为 true→下一次锁屏/密码填充
@@ -1607,12 +1732,18 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                     log_service(&exe_dir, "INFO", "delay skipped: broker release cooldown active");
                     continue;
                 }
-                // delay 模式必须收到 DLL 的显式 "run" 后才允许自动重试。
-                // 这确保首次面容识别始终由用户在锁屏界面的鼠标/键盘输入触发，
-                // 防止冷启动时 DLL 仅发 "prepare" 就自动开始识别并提交凭据，
-                // 导致系统未就绪时桌面加载卡死（白色圆点转圈→强制关机）。
-                // 一旦 DLL 发送过 "run"，后续的重试/重新识别由 delay 计时器调度。
-                if !delay_session_armed && state.dll_run_received.load(Ordering::SeqCst) {
+                let delay_policy = state.delay_policy.load(Ordering::SeqCst);
+                let allow_delay = should_arm_delayed_recognition(
+                    delay_policy,
+                    boot_delay_attempts,
+                    has_credential_client,
+                    state.dll_run_received.load(Ordering::SeqCst),
+                );
+                // Boot mode is explicitly selected by the DLL for the first
+                // logon session of a Windows boot. Manual primary sessions do
+                // not enter this path; legacy broker sessions retain the old
+                // run-gated retry behavior.
+                if !delay_session_armed && allow_delay {
                     let mut delay_deadline = Instant::now() + face_recog_delay;
 
                     // 重锁宽限期：成功解锁后若重新锁屏，在 RE_LOCK_GRACE_SECS
@@ -1730,11 +1861,28 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             }
         }
 
+        if state.delay_cancel_requested.swap(false, Ordering::SeqCst) {
+            delayed_run_at = None;
+            delay_session_armed = false;
+            log_service(&exe_dir, "INFO", "pending delay cancelled by manual input");
+        }
+
         if let Some(deadline) = delayed_run_at {
             if Instant::now() >= deadline && !state.recognition_active.load(Ordering::SeqCst) {
                 delayed_run_at = None;
                 state.release_requested.store(false, Ordering::SeqCst);
                 state.run_requested.store(true, Ordering::SeqCst);
+                if state.delay_policy.load(Ordering::SeqCst) == DELAY_POLICY_BOOT {
+                    boot_delay_attempts = boot_delay_attempts.saturating_add(1);
+                    log_service(
+                        &exe_dir,
+                        "INFO",
+                        &format!(
+                            "boot delayed recognition attempt {}/{}",
+                            boot_delay_attempts, MAX_BOOT_DELAY_ATTEMPTS
+                        ),
+                    );
+                }
                 log_service(&exe_dir, "INFO", "run requested by delayed recognition mode");
             }
         }
@@ -1886,6 +2034,14 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             }
             state.recognition_active.store(false, Ordering::SeqCst);
             cam = None;
+            delay_session_armed = false;
+            if state.delay_policy.load(Ordering::SeqCst) == DELAY_POLICY_BOOT
+                && boot_delay_attempts >= MAX_BOOT_DELAY_ATTEMPTS
+            {
+                state.delay_policy.store(DELAY_POLICY_MANUAL, Ordering::SeqCst);
+                state.delay_boot_cancelled.store(true, Ordering::SeqCst);
+                log_service(&exe_dir, "INFO", "boot delayed attempts exhausted; input mode armed");
+            }
             continue;
         }
 
@@ -1918,6 +2074,14 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                     state.run_requested.store(false, Ordering::SeqCst);
                 }
                 state.recognition_active.store(false, Ordering::SeqCst);
+                delay_session_armed = false;
+                if state.delay_policy.load(Ordering::SeqCst) == DELAY_POLICY_BOOT
+                    && boot_delay_attempts >= MAX_BOOT_DELAY_ATTEMPTS
+                {
+                    state.delay_policy.store(DELAY_POLICY_MANUAL, Ordering::SeqCst);
+                    state.delay_boot_cancelled.store(true, Ordering::SeqCst);
+                    log_service(&exe_dir, "INFO", "boot delayed attempts exhausted; input mode armed");
+                }
                 continue 'main;
             }
         }
@@ -2169,6 +2333,17 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 // 重置 delay 状态，允许下次 prepare 心跳重新布防。
                 delayed_run_at = None;
                 delay_session_armed = false;
+                if state.delay_policy.load(Ordering::SeqCst) == DELAY_POLICY_BOOT
+                    && boot_delay_attempts >= MAX_BOOT_DELAY_ATTEMPTS
+                {
+                    state.delay_policy.store(DELAY_POLICY_MANUAL, Ordering::SeqCst);
+                    state.delay_boot_cancelled.store(true, Ordering::SeqCst);
+                    log_service(
+                        &exe_dir,
+                        "INFO",
+                        "boot delayed attempts exhausted after no match; input mode armed",
+                    );
+                }
                 log_service(&exe_dir, "WARN", &format!(
                     "face recognition finished without a match (consecutive failures: {fails})"
                 ));

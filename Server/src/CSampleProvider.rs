@@ -204,6 +204,7 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
                     inner.shared_creds.clone(),
                     is_primary,
                     is_broker,
+                    inner.usage_scenario.0 as u32,
                 ));
             }
         }

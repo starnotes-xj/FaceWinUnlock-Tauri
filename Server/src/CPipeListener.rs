@@ -344,7 +344,7 @@ pub struct CPipeListener {
     creds_thread: Option<JoinHandle<()>>,
     /// 保存凭据线程当前持有的管道句柄原始值（isize），用于 stop_and_join 时关闭句柄打断 ReadFile
     creds_pipe_raw: Arc<AtomicIsize>,
-    /// 是否安装了鼠标/键盘 Hook。所有已启用场景都可用 Hook 触发 run，CREDUI 额外保留自动 run 兜底。
+    /// 是否安装了鼠标/键盘 Hook。所有已启用场景都可用 Hook 触发 run。
     use_input_hooks: bool,
     /// 是否主场景（登录/解锁）。仅主场景在 stop_and_join 中向 Unlock EXE 发 release 释放摄像头；
     /// CREDUI/broker 场景不发——既符合文档约定（锁屏可能仍需 Unlock EXE），也避免在
@@ -354,7 +354,7 @@ pub struct CPipeListener {
 
 impl CPipeListener {
     /// 启动管道监听：
-    ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，先发送 "prepare"；
+    ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，先发送会话策略 prepare；
     ///     所有已启用场景都可由 DLL 低级输入 Hook 捕获鼠标/键盘事件后发送 "run"
     ///   - Creds 线程：阻塞等待凭据推送，收到后设置动画为 Success
     pub fn start(
@@ -363,18 +363,33 @@ impl CPipeListener {
         shared_creds: Arc<Mutex<SharedCredentials>>,
         is_primary_scenario: bool,
         broker_fallback_to_pin: bool,
+        usage_scenario: u32,
     ) -> Arc<Mutex<Self>> {
         let is_unlocked    = Arc::new(AtomicBool::new(false));
         let stop_flag      = Arc::new(AtomicBool::new(false));
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
         let use_input_hooks = true;
-        // 所有场景（登录/解锁/CREDUI）统一由鼠标/键盘输入 Hook 触发 "run"，不自动开始识别。
-        // 不启用 auto_run 的原因：① 锁屏后人未走开即被自动解锁，削弱锁屏安全意义（且
-        //   UNLOCK_GRACE_PERIOD 常为 0，锁了立刻就识别）；② 开机时可能在 explorer/系统就绪
-        //   前就提交凭据登录，导致转圈卡死；③ 摄像头常开耗电。用户走到机前本就会动一下
-        //   鼠标/键盘，这一下正好表达解锁意图、再秒级识别——成本极低且更安全稳定。
-        let auto_run_on_connect = false;
+        // 不再由 DLL 直接自动发送 "run"。开机候选只发送策略标记，
+        // Unlock EXE 在 delay 配置、凭据连接和冷启动保护均满足后内部触发识别。
+        // 这样保留 SetSelected/GetSerialization 的启动安全边界，也避免把
+        // 「CPUS_LOGON」误判成每一次 Win+L 后都自动解锁。
+        let boot_delay_session = is_primary_scenario
+            && usage_scenario == 1
+            && crate::claim_boot_delay_session();
+        let prepare_command: &'static [u8] = if !is_primary_scenario {
+            b"prepare:legacy"
+        } else if boot_delay_session {
+            b"prepare:boot"
+        } else {
+            b"prepare:manual"
+        };
+        let prepare_label = String::from_utf8_lossy(prepare_command);
+        info!(
+            "{} 场景策略: {}",
+            if is_primary_scenario { "登录/解锁" } else { "CREDUI/UAC" },
+            prepare_label
+        );
         if use_input_hooks {
             install_input_hooks();
         }
@@ -458,24 +473,19 @@ impl CPipeListener {
                         return;
                     }
 
-                    if let Err(e) = pipe_write_raw(pipe, b"prepare") {
+                    if let Err(e) = pipe_write_raw(pipe, prepare_command) {
                         error!("写入 prepare 失败: {:?}", e);
                         unsafe { let _ = CloseHandle(pipe); }
                         if interruptible_sleep(Duration::from_secs(5), &stop_flag) { break; }
                         continue;
                     }
-                    info!("向管道写入数据成功：prepare");
+                    info!("向管道写入数据成功：{}", prepare_label);
 
                     let mut hooks_armed = !use_input_hooks;
                     let arm_after = Instant::now() + Duration::from_millis(250);
-                    let min_run_interval = if auto_run_on_connect {
-                        Duration::from_millis(2500)
-                    } else {
-                        Duration::from_millis(1500)
-                    };
+                    let min_run_interval = Duration::from_millis(1500);
                     let mut last_run_at = Instant::now() - min_run_interval;
                     let mut last_prepare_at = Instant::now();
-                    let mut auto_run_sent = false;
                     let mut broker_first_run_at: Option<Instant> = None;
                     if use_input_hooks {
                         INPUT_HOOKS_ARMED.store(false, Ordering::SeqCst);
@@ -544,10 +554,9 @@ impl CPipeListener {
                         } else {
                             0
                         };
-                        let auto_requested = auto_run_on_connect && !auto_run_sent;
                         let should_send_run = hooks_armed
                             && last_run_at.elapsed() >= min_run_interval
-                            && (input_requested || auto_requested);
+                            && input_requested;
 
                         if should_send_run {
                             // ★ WebAuthn 守卫复查 + 实时 debounce（v0.5.10-rc5 修复）：
@@ -591,9 +600,6 @@ impl CPipeListener {
                                     broker_timeout.as_millis()
                                 );
                             }
-                            if auto_run_on_connect {
-                                auto_run_sent = true;
-                            }
                             if input_requested {
                                 let source_name = match input_source {
                                     INPUT_SOURCE_MOUSE => "鼠标",
@@ -601,8 +607,6 @@ impl CPipeListener {
                                     _ => "鼠标/键盘",
                                 };
                                 info!("检测到{}{}输入，已发送 run", scenario_label, source_name);
-                            } else {
-                                info!("登录/解锁主场景已自动发送 run");
                             }
                         }
 
@@ -631,7 +635,7 @@ impl CPipeListener {
                         }
 
                         if last_prepare_at.elapsed() >= Duration::from_secs(1) {
-                            if let Err(e) = pipe_write_raw(pipe, b"prepare") {
+                            if let Err(e) = pipe_write_raw(pipe, prepare_command) {
                                 warn!("prepare 心跳失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
                                 unsafe { let _ = CloseHandle(pipe); }
                                 break;

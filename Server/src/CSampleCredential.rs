@@ -133,7 +133,7 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
     fn GetStringValue(&self, dwfieldid: u32) -> windows_core::Result<PWSTR> {
         info!("SampleCredential::GetStringValue - 获取字段 {} 的文本内容", dwfieldid);
         let val = match dwfieldid {
-            1 => "FaceWinUnlock - 触碰鼠标或按下键盘即可启动人脸识别",  // 字段1的文本内容
+            1 => "FaceWinUnlock - 开机延迟识别；锁屏后触碰鼠标或按键启动",  // 字段1的文本内容
             _ => {
                 warn!("SampleCredential::GetStringValue - 字段 {} 无文本内容", dwfieldid);
                 ""
