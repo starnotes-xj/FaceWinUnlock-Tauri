@@ -42,6 +42,13 @@
   IfFileExists "$INSTDIR\resources\FaceWinUnlock-Launcher.exe" 0 +2
     CopyFiles /SILENT "$INSTDIR\resources\FaceWinUnlock-Launcher.exe" "$INSTDIR\"
 
+  ; Tauri 默认创建开始菜单快捷方式，但不创建桌面快捷方式。
+  ; 桌面入口指向无 OpenCV 依赖的 Launcher，既方便用户找到，也保留启动前自愈能力。
+  SetShellVarContext current
+  IfFileExists "$INSTDIR\FaceWinUnlock-Launcher.exe" 0 fwu_desktop_shortcut_done
+    CreateShortCut "$DESKTOP\FaceWinUnlock-Tauri.lnk" "$INSTDIR\FaceWinUnlock-Launcher.exe" "" "$INSTDIR\facewinunlock-tauri.exe" 0
+  fwu_desktop_shortcut_done:
+
   ; ── 杀软误删自愈（根治「安装后第二天 opencv_world4120.dll / FaceWinUnlock-Server.exe 丢失」）──
   ; 两个无签名二进制（OpenCV DLL + 开摄像头/注入凭据的后台服务）可能被火绒/Defender
   ; 云查杀当成可疑文件删除。resilience.ps1 -Mode Setup 会：①把两文件打成压缩备份
@@ -101,6 +108,9 @@
     Pop $2
     ${If} $2 == 0
       MessageBox MB_YESNO|MB_ICONINFORMATION "Credential Provider DLL 已更新，但系统进程正在使用旧版本。$\n$\n人脸识别和 Google 登录等功能需重启后生效。$\n$\n是否立即重启？" IDNO cp_no_reboot
+      ; 重启后通过当前用户的 RunOnce 重新打开应用。
+      ; 首次安装时应用会继续初始化向导，初始化完成后自动进入录入人脸页面。
+      WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\RunOnce" "FaceWinUnlockPostInstall" "$\"$INSTDIR\FaceWinUnlock-Launcher.exe$\""
       Reboot
       cp_no_reboot:
     ${EndIf}
@@ -182,6 +192,11 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ; 清理当前用户的自定义桌面入口和可能尚未执行的一次性启动项。
+  SetShellVarContext current
+  Delete "$DESKTOP\FaceWinUnlock-Tauri.lnk"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\RunOnce" "FaceWinUnlockPostInstall"
+
   SetRegView 64
 
   ; ─── 1. 先删值后删键（DeleteRegKey 会连带所有子键值一起清除，先单独删避免残留）───

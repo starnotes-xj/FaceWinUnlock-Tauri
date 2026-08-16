@@ -8,6 +8,8 @@ use simplelog::*;
 use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, REG_VALUE_TYPE};
 use std::fs::OpenOptions;
 use std::os::windows::fs::OpenOptionsExt;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // 引入必要的系统类型和Win32 API绑定
 use std::ffi::{c_void, OsStr};
@@ -17,6 +19,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 // Windows基础类型和COM接口
 use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, HINSTANCE, S_FALSE, S_OK};
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
+use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::Shell::ICredentialProvider;
 use windows_core::{implement, Ref, GUID, PCWSTR};
 use windows::Win32::Foundation::BOOL;
@@ -121,6 +124,49 @@ pub fn read_facewinunlock_registry(key_name: &str) -> windows::core::Result<Stri
     // 将 UTF-16 数组转换回 Rust String
     let value = String::from_utf16(&buffer)?.trim_end_matches('\0').to_string();
     Ok(value)
+}
+
+/// Claim the first unattended CPUS_LOGON session of the current Windows boot.
+///
+/// The credential provider API does not reliably distinguish boot logon from
+/// workstation unlock on modern Windows. A per-boot marker gives us a stable,
+/// conservative boundary even if LogonUI or the service is restarted. The
+/// marker contains no credentials or user data and is created atomically, so
+/// concurrent provider instances cannot both select boot-delay mode.
+pub fn claim_boot_delay_session() -> bool {
+    // Do not use GetLastInputInfo here. Windows can report the power-button or
+    // boot-time interaction as recent input, which rejects the very first
+    // CPUS_LOGON session before the user has reached the machine. The atomic
+    // per-boot marker below is the actual boundary: the first CPUS_LOGON
+    // session may claim boot-delay mode, while every later session (including
+    // Win+L) is forced to manual mode.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let uptime_ms = unsafe { GetTickCount64() } as u128;
+    let boot_marker = now_ms.saturating_sub(uptime_ms) / 1_000;
+    let marker_dir = PathBuf::from(
+        std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string()),
+    )
+    .join("facewinunlock-tauri")
+    .join("boot-sessions");
+    if std::fs::create_dir_all(&marker_dir).is_err() {
+        info!("boot delay candidate rejected: unable to create boot marker directory");
+        return false;
+    }
+
+    let marker = marker_dir.join(format!("{boot_marker}.claimed"));
+    match OpenOptions::new().write(true).create_new(true).open(marker) {
+        Ok(_) => {
+            info!("boot delay session claimed for current Windows boot");
+            true
+        }
+        Err(_) => {
+            info!("boot delay candidate rejected: current boot session already claimed");
+            false
+        }
+    }
 }
 
 /// 返回当前宿主进程可执行文件名（小写，不含路径），失败时返回空串。

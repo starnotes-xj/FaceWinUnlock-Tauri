@@ -24,7 +24,7 @@ Default log paths:
 Run these first. Stop the release if any item fails.
 
 1. Add or edit a face; camera preview appears without a long black screen.
-2. On a clean setup, finish the initialization lock-screen test. After automatic unlock, the dashboard must be visible immediately without clicking the app window.
+2. On a clean setup, finish the initialization lock-screen test. After automatic unlock, the Add Face page must open immediately without clicking the app window; later initialization checks should return to the dashboard.
 3. `Win+L`, move the mouse, and unlock by face.
 4. `Win+L`, keep the face away, enter Windows PIN manually, and confirm the camera LED turns off within 5 seconds.
 5. Reveal a saved browser password; face verification succeeds.
@@ -33,6 +33,26 @@ Run these first. Stop the release if any item fails.
 8. Separately choose a passkey saved with FaceWinUnlock; the plugin's dedicated face authorization starts the camera and succeeds.
 9. Enable automatic lock with a 30-second timeout and confirm it locks through the interactive-session helper.
 10. Sleep/resume and repeat face unlock plus manual PIN unlock.
+
+## Install, Restart, And First Enrollment
+
+1. Install the NSIS candidate and confirm a `FaceWinUnlock-Tauri` shortcut is present on the desktop.
+2. When the installer reports that the Credential Provider requires a restart, choose **Yes**.
+3. After Windows logs in, expected: the launcher opens FaceWinUnlock automatically; no manual search through the install directory is needed.
+4. Complete the initialization lock-screen test. Expected: the first-time flow opens **Add Face** directly after the test succeeds.
+5. Cancel or finish enrollment, close the app, and verify the desktop shortcut still starts the launcher and reaches the dashboard.
+6. Uninstall the candidate. Expected: the custom desktop shortcut and any pending one-time post-restart launch entry are removed.
+
+## Issue #33 Smart Delay Mode
+
+Use an installed build with the existing face-recognition type set to `delay`.
+
+1. Cold boot into LogonUI. Expected: the first `CPUS_LOGON` session claims `prepare:boot`; after the configured delay and cold-boot readiness protection, face recognition starts without an input event. Do not use recent-input state alone to classify this session because Windows may attribute power-button or boot-time interaction to `GetLastInputInfo`.
+2. Leave the computer at the lock screen with no person present. Expected: at most three automatic recognition attempts occur; afterward the camera is released according to the normal idle policy and a later mouse/keyboard event is required.
+3. After reaching the desktop, press `Win+L` and remain away from the camera longer than the configured delay. Expected: no automatic recognition or unlock occurs.
+4. On that same Win+L session, move the mouse or press a key. Expected: the existing input hook starts recognition and face unlock works.
+5. Start a supported browser password-fill/CREDUI flow and a FaceWinUnlock Passkey flow. Expected: CREDUI keeps its legacy run-gated fallback behavior and the Passkey provider remains on its dedicated face-authorization pipe.
+6. Restart LogonUI or the Unlock worker between cold boot and Win+L tests. Expected: the current boot marker prevents a second unattended boot claim; later sessions remain manual.
 
 ## Enrollment And Camera Ownership
 
