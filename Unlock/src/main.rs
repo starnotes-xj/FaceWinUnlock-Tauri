@@ -32,7 +32,7 @@ use std::{
 };
 
 use opencv::{
-    core::{Mat, Ptr, Size},
+    core::{Mat, Ptr, Scalar, Size},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     prelude::*,
     videoio::{self, VideoCapture},
@@ -975,8 +975,20 @@ struct Models {
 }
 
 fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<Models> {
-    let detector = FaceDetectorYN::create(
-        resources.join("face_detection_yunet_2023mar.onnx").to_str().unwrap_or(""),
+    // Intel NPU (backend=2 INFERENCE_ENGINE / target=9 NPU) 用预转换 OpenVINO IR
+    // (.xml/.bin)：OpenCV 4.12 内置 ONNX importer 对 SFace/YuNet 的某些算子报
+    // "unsupported opset: extension" 而无法反序列化（issue #32）。IR 由
+    // download_models.ps1 用 ovc --compress_to_fp16 预生成，绕开 ONNX 解析路径。
+    let extension = if inference.backend_id == 2 && inference.target_id == 9 {
+        "xml"
+    } else {
+        "onnx"
+    };
+    let mut detector = FaceDetectorYN::create(
+        resources
+            .join(format!("face_detection_yunet_2023mar.{extension}"))
+            .to_str()
+            .unwrap_or(""),
         "",
         Size::new(320, 320),
         0.9,
@@ -986,11 +998,29 @@ fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<
         inference.target_id,
     )?;
     let recognizer = FaceRecognizerSF::create(
-        resources.join("face_recognition_sface_2021dec.onnx").to_str().unwrap_or(""),
+        resources
+            .join(format!("face_recognition_sface_2021dec.{extension}"))
+            .to_str()
+            .unwrap_or(""),
         "",
         inference.backend_id,
         inference.target_id,
     )?;
+    if inference != CPU_INFERENCE {
+        // OpenCV/OpenVINO 常把设备编译推迟到首次推理。NPU 的 IR 即使能被解析，
+        // 也可能在第一次 detect 时才失败（issue #32 报错即来自首次推理前的
+        // 模型准备）；这里用空白图先跑一次检测，让坏路径在 load 阶段就暴露并
+        // 回退 CPU，而不是首次解锁时才卡住。
+        let detector_input = Mat::new_rows_cols_with_default(
+            320,
+            320,
+            opencv::core::CV_8UC3,
+            Scalar::all(0.0),
+        )?;
+        detector.set_input_size(Size::new(320, 320))?;
+        let mut faces = Mat::default();
+        detector.detect(&detector_input, &mut faces)?;
+    }
     Ok(Models { detector, recognizer })
 }
 

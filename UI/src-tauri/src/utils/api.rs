@@ -877,16 +877,24 @@ fn build_opencv_models(
     target_id: i32,
 ) -> Result<(Ptr<FaceDetectorYN>, Ptr<FaceRecognizerSF>, opencv::dnn::Net), String> {
     let res = ROOT_DIR.join("resources");
+    // Intel NPU (backend=2 / target=9) 用预转换 OpenVINO IR (.xml/.bin)，绕开
+    // OpenCV 4.12 ONNX importer 对部分算子的 "unsupported opset" 反序列化失败
+    // （issue #32）；其它后端继续用 ONNX。
+    let extension = if backend_id == 2 && target_id == 9 {
+        "xml"
+    } else {
+        "onnx"
+    };
     let detector_path = res
-        .join("face_detection_yunet_2023mar.onnx")
+        .join(format!("face_detection_yunet_2023mar.{extension}"))
         .to_string_lossy()
         .into_owned();
     let recognizer_path = res
-        .join("face_recognition_sface_2021dec.onnx")
+        .join(format!("face_recognition_sface_2021dec.{extension}"))
         .to_string_lossy()
         .into_owned();
     let liveness_path = res
-        .join("face_liveness.onnx")
+        .join(format!("face_liveness.{extension}"))
         .to_string_lossy()
         .into_owned();
 
@@ -915,8 +923,14 @@ fn build_opencv_models(
             .map_err(|e| format!("初始化识别器模型失败: {:?}", e))
     });
     let live_handle = thread::spawn(move || -> Result<opencv::dnn::Net, String> {
-        let mut net = opencv::dnn::read_net_from_onnx(&liveness_path)
-            .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?;
+        let mut net = if backend_id == 2 && target_id == 9 {
+            // NPU：IR 文件用通用 read_net（按扩展名识别格式），不能用 read_net_from_onnx。
+            opencv::dnn::read_net(&liveness_path, "", "")
+                .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?
+        } else {
+            opencv::dnn::read_net_from_onnx(&liveness_path)
+                .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?
+        };
         net.set_preferable_backend(backend_id)
             .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
         net.set_preferable_target(target_id)

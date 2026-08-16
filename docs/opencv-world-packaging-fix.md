@@ -36,6 +36,27 @@ Physical cameras can complete warmup after stable frames. Virtual cameras such a
 - Intel NPU requires the packaged OpenVINO runtime and a compatible driver.
 - Slow startup, repeated tuning, black consistency checks, or matching regressions should be reproduced on CPU before changing recognition logic.
 
+## Intel NPU Model Loading (issue #32)
+
+OpenCV 4.12's built-in ONNX importer fails on some SFace/YuNet operators with
+`Cannot create opencv ngraph layer onnx node! minscalar0 ... unsupported opset:
+extension`, so the NPU backend must not load `.onnx` directly.
+
+Both Unlock (`load_models`) and the UI (`build_opencv_models`) therefore select
+pre-converted **OpenVINO IR** (`.xml` + `.bin`) files when the backend is
+`(2, 9)` (INFERENCE_ENGINE / NPU); all other backends keep using `.onnx`:
+
+- `face_detection_yunet_2023mar.{xml,bin}`
+- `face_recognition_sface_2021dec.{xml,bin}`
+- `face_liveness.{xml,bin}`
+
+`UI/resources/download_models.ps1` regenerates the IR with
+`ovc --output_model <name>.xml --compress_to_fp16 True` whenever `ovc` is on
+PATH and the IR is older than its ONNX source. The IR files are committed so
+installed builds work without the converter. A blank-image detection probe runs
+at model load for non-CPU backends so a broken NPU path falls back to CPU
+before the first unlock attempt.
+
 ## Camera Ownership
 
 The UI sends `ui_release` before enrollment/preview and `ui_done` on every completion or error path. Unlock suppresses prewarm while the UI owns the camera. Manual PIN unlock also releases the device and prevents the old session from immediately reopening it.

@@ -212,6 +212,17 @@ After uninstall, FaceWinUnlock must disappear from “where to save a passkey.�
 5. Toggle the threshold between 0.1 and 0.9. Expected: a higher threshold rejects more marginal frames; the score shown tracks the fused median of up to five samples (up to seven camera frames).
 6. On a mid/low-end device (i5 or weaker), keep the verification loop running for several minutes. Expected: the WebView stays responsive and CPU/GPU use is bounded (async commands + 320px preview downscale + OpenCV thread cap).
 
+## Intel NPU Backend (issue #32)
+
+Requires a machine with an Intel NPU (Meteor Lake/Arrow Lake/Lunar Lake+ or Core Ultra 200 series), the Intel NPU driver, and the packaged OpenVINO runtime (`openvino*.dll` under the install dir). The NPU path loads pre-converted OpenVINO IR (`.xml`/`.bin`) because OpenCV 4.12's ONNX importer rejects the SFace/YuNet opset (`unsupported opset: extension`).
+
+1. Open 首选项 → 识别参数 → 推理后端 and choose **Intel NPU**.
+2. Open 面容管理 → 添加新面容. Expected: model load succeeds (no `Failed to read/deserialize model`); a fallback to CPU is only acceptable with a visible warning and a logged reason.
+3. Enroll a face and run 一致性验证. Expected: face detection and matching work; the log line `opencv models loaded with Intel NPU backend (2,9)` appears (Unlock) and the UI load log shows backend `2, target 9`.
+4. Lock with Win+L and unlock by face. Expected: recognition runs on the NPU and unlocks; the service must not silently fall back to CPU unless the driver/runtime is missing.
+5. Restart the Unlock service (or reboot) and repeat. Expected: NPU still loads the IR; no first-inference stall.
+6. On a machine without NPU support, selecting Intel NPU must fall back to CPU with a clear message, not hang or crash.
+
 ## Release Decision
 
 Promote the candidate only when:
