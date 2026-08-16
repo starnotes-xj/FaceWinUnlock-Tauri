@@ -203,6 +203,15 @@ After uninstall, FaceWinUnlock must disappear from “where to save a passkey.�
 - On Windows 10, core face unlock works and Passkey installation is skipped with a clear unsupported message.
 - On GPU/OpenCL, perform enrollment consistency and six lock/unlock cycles; switch to CPU if tuning, accuracy, or latency regresses.
 
+## Enrollment Consistency Verification (issue #30)
+
+1. In 首选项 → 录入一致性验证, enable 无感活体检测 (livenessEnabled).
+2. Enter 面容管理 → 添加新面容, capture a face, then start 一致性验证.
+3. Expected: the liveness check reports a meaningful 真人置信度 near 0.9–1.0 for a live face and verification succeeds. The bundled `face_liveness.onnx` is facenox 98.20 — preprocessing is 128×128 RGB normalized to [0,1], and the model returns [real, spoof] logits; the check must not use the old 80×80 mean-subtracted contract or read the spoof logit as the live score.
+4. Hold a printed photo or a static screen toward the camera. Expected: the check either reports 活体检测未通过 (score below threshold) or an insufficient-sample message; it must not authorize the photo as live.
+5. Toggle the threshold between 0.1 and 0.9. Expected: a higher threshold rejects more marginal frames; the score shown tracks the fused median of up to five samples (up to seven camera frames).
+6. On a mid/low-end device (i5 or weaker), keep the verification loop running for several minutes. Expected: the WebView stays responsive and CPU/GPU use is bounded (async commands + 320px preview downscale + OpenCV thread cap).
+
 ## Release Decision
 
 Promote the candidate only when:

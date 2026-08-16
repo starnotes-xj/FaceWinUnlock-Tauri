@@ -117,6 +117,7 @@ export default {
     livenessPass: 'Liveness check passed',
     livenessFail: 'Liveness check failed',
     livenessScore: 'Liveness Score',
+    livenessDesc: 'A local model automatically analyzes a short burst of face texture; no blink, head turn, or mouth movement required',
   },
   options: {
     title: 'Preferences',

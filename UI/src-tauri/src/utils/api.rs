@@ -33,6 +33,14 @@ use super::pipe::Client;
 /// Camera open/close can proceed while models load in the background.
 static MODEL_LOAD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+/// 限制 OpenCV DNN 使用的线程数（issue #31：中低端设备 UI 占用大量 CPU/GPU 导致
+/// Windows 无响应数分钟）。OpenCV 默认按逻辑核心数开线程，双核四线程的轻薄本上
+/// 3 个模型并行推理会打满所有核心，拖垮 WebView 渲染。这里压到 ≤4 线程，
+/// 推理耗时略增但对低端设备整体可用性收益远大于损失；高端机器不受影响。
+fn cap_opencv_threads() {
+    let _ = opencv::core::set_num_threads(4);
+}
+
 #[tauri::command]
 pub fn is_silent_launch() -> bool {
     std::env::args().any(|arg| arg == "-s" || arg == "--silent" || arg == "--s")
@@ -136,8 +144,11 @@ pub fn test_win_logon(user_name: String, password: String) -> Result<CustomResul
 }
 
 // 初始化模型
+// async：Tauri 2 中同步命令在主线程执行，加载 3 个 ONNX 模型会长时间阻塞 WebView，
+// 低端设备上表现为「Windows 无响应数分钟」（issue #31）。改为异步后模型在后台线程加载。
 #[tauri::command]
-pub fn init_model() -> Result<CustomResult, CustomResult> {
+pub async fn init_model() -> Result<CustomResult, CustomResult> {
+    cap_opencv_threads();
     // 加载模型
     let resource_path = ROOT_DIR
         .join("resources")
@@ -176,8 +187,9 @@ pub fn init_model() -> Result<CustomResult, CustomResult> {
 }
 
 // 获取windows所有摄像头
+// async：枚举摄像头 + 逐个探测可用性在部分机器上耗时数秒，同步命令会阻塞主线程（issue #31）。
 #[tauri::command]
-pub fn get_camera() -> Result<CustomResult, CustomResult> {
+pub async fn get_camera() -> Result<CustomResult, CustomResult> {
     // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
     // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
 
@@ -262,8 +274,9 @@ pub fn prepare_camera_for_ui() -> Result<CustomResult, CustomResult> {
 }
 
 // 打开摄像头
+// async：打开摄像头含预热 + 最多 3s 让位重试，同步命令会阻塞主线程（issue #31）。
 #[tauri::command]
-pub fn open_camera(
+pub async fn open_camera(
     backend: Option<CameraBackend>,
     camear_index: i32,
 ) -> Result<CustomResult, CustomResult> {
@@ -946,7 +959,6 @@ pub struct ModelLoadResult {
     pub fallback_reason: Option<String>,
 }
 
-#[tauri::command]
 // 加载opencv模型，backend/target 对应 OpenCV DNN 后端 ID:
 //   (0,0)=CPU  (3,1)=OpenCL  (3,2)=OpenCL_FP16  (2,9)=Intel NPU(OpenVINO)
 //
@@ -954,10 +966,13 @@ pub struct ModelLoadResult {
 // （报错 StsNotImplemented -213 "Backend(plugin) is not available"），自动回退到
 // CPU，使人脸录入流程仍可正常进行——与 Unlock 服务的 load_models_with_fallback
 // 行为保持一致 (issue #125)。返回值告知前端实际生效的后端及是否发生回退。
-pub fn load_opencv_model(
+// async：模型构建耗时数秒，同步命令会阻塞主线程导致 WebView 无响应（issue #31）。
+#[tauri::command]
+pub async fn load_opencv_model(
     backend: Option<i32>,
     target: Option<i32>,
 ) -> Result<ModelLoadResult, String> {
+    cap_opencv_threads();
     let backend_id = backend.unwrap_or(0);
     let target_id = target.unwrap_or(0);
     let _load_guard = MODEL_LOAD_LOCK

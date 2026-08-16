@@ -607,16 +607,15 @@
 	const livenessEnabledChange = ()=>{
 		if(config.livenessEnabled){
 			ElMessageBox.confirm(
-				'活体检测准确率低，<span style="color: var(--v7-cinnabar-bright);">误判极高，不建议开启</span><br />' +
-				'当前只影响录入页面的一致性验证，不参与锁屏解锁<br />' +
-				'是否继续开启活体检测？', 
-				'警告', 
+				'启用后将在录入时由本地模型自动分析短时多帧人脸纹理，无需眨眼、转头或张嘴。<br />' +
+				'当前只影响录入页面的一致性验证，不参与锁屏解锁。<br />' +
+				'是否开启活体检测？',
+				'开启活体检测',
 				{
 					dangerouslyUseHTMLString: true,
-					confirmButtonText: '我明白风险，继续开启',
-					confirmButtonClass: 'el-button--danger',
+					confirmButtonText: '继续开启',
 					cancelButtonText: '取消',
-					type: 'warning'
+					type: 'info'
 				}
 			).then(() => {
 				// 继续开启活体检测
@@ -853,17 +852,20 @@
 							<!-- 活体检测开关 -->
 							<div class="option-row">
 								<div class="row-text">
-									<p class="label">一致性验证启用活体检测</p>
-									<p class="sub">仅用于录入页面的人脸一致性验证，不参与锁屏解锁；准确率不高，不推荐开启</p>
+									<p class="label">一致性验证启用无感活体检测</p>
+									<p class="sub">仅用于录入页面的一致性验证，不参与锁屏解锁；本地分析短时多帧人脸纹理</p>
 								</div>
 								<el-switch v-model="config.livenessEnabled" @change="livenessEnabledChange"/>
 							</div>
+							<p class="row-help" style="margin: -6px 0 6px; font-size: 12px; color: var(--v7-text-dim);">
+								全程自动完成，不要求眨眼、转头、张嘴或等待数秒
+							</p>
 
 							<!-- 阈值设置 -->
 							<div class="option-row">
 								<div class="row-text">
-									<p class="label">假体置信度阈值</p>
-									<p class="sub">阈值越高，安全性越好，假脸被当作真人的概率越低，建议 0.3~0.7</p>
+									<p class="label">真人置信度阈值</p>
+									<p class="sub">越高越严格，也更容易在弱光或低画质下误拒；建议保持默认值 0.50</p>
 								</div>
 								<el-input-number
 									v-model="config.livenessThreshold"
