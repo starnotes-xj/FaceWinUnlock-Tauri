@@ -101,6 +101,27 @@ fn should_arm_delayed_recognition(
         _ => false,
     }
 }
+
+/// Resolve a DLL prepare message into a delay policy. A cancelled boot
+/// session must map back to manual, never to legacy: after the manual
+/// input the DLL has already sent one "run", so a legacy mapping would
+/// satisfy the run-gated retry condition and re-arm delayed recognition.
+fn resolve_delay_policy(msg: &str, boot_cancelled: bool) -> u8 {
+    if msg.contains("prepare:boot") {
+        if boot_cancelled {
+            DELAY_POLICY_MANUAL
+        } else {
+            DELAY_POLICY_BOOT
+        }
+    } else if msg.contains("prepare:manual") {
+        DELAY_POLICY_MANUAL
+    } else if msg.contains("prepare:legacy") {
+        DELAY_POLICY_LEGACY
+    } else {
+        // Older DLLs send plain "prepare". Keep their behavior.
+        DELAY_POLICY_LEGACY
+    }
+}
 // 预热帧数恢复到 10（issue #94：NVIDIA Broadcast 等虚拟摄像头需足够预热帧才稳定输出，
 // 否则花屏/黑帧）。有了「摄像头预热（秒解锁）」后，这段预热多在锁屏预开阶段完成、不在解锁关键路径上。
 const CAMERA_WARMUP_MAX_FRAMES: usize = 10;
@@ -509,20 +530,16 @@ fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
                     }
                     control_buf.clear();
                 } else if control_buf.contains("prepare") {
-                    let policy = if control_buf.contains("prepare:boot")
-                        && !state.delay_boot_cancelled.load(Ordering::SeqCst)
-                    {
-                        DELAY_POLICY_BOOT
-                    } else if control_buf.contains("prepare:manual") {
-                        DELAY_POLICY_MANUAL
-                    } else if control_buf.contains("prepare:legacy") {
-                        DELAY_POLICY_LEGACY
-                    } else {
-                        // Older DLLs send plain "prepare". Keep their behavior.
-                        DELAY_POLICY_LEGACY
-                    };
-                    state.delay_policy.store(policy, Ordering::SeqCst);
-                    if policy == DELAY_POLICY_MANUAL {
+                    let policy = resolve_delay_policy(
+                        &control_buf,
+                        state.delay_boot_cancelled.load(Ordering::SeqCst),
+                    );
+                    // Only flag a cancel when the policy transitions into
+                    // MANUAL. prepare:manual heartbeats repeat every second;
+                    // re-flagging each one would log "pending delay cancelled"
+                    // even when no delay is armed.
+                    let prev = state.delay_policy.swap(policy, Ordering::SeqCst);
+                    if policy == DELAY_POLICY_MANUAL && prev != DELAY_POLICY_MANUAL {
                         state.delay_cancel_requested.store(true, Ordering::SeqCst);
                     }
                     state.prepare_requested.store(true, Ordering::SeqCst);
@@ -1447,8 +1464,8 @@ mod prewarm_session_gate_tests {
 #[cfg(test)]
 mod delay_policy_tests {
     use super::{
-        should_arm_delayed_recognition, DELAY_POLICY_BOOT, DELAY_POLICY_LEGACY,
-        DELAY_POLICY_MANUAL, MAX_BOOT_DELAY_ATTEMPTS,
+        resolve_delay_policy, should_arm_delayed_recognition, DELAY_POLICY_BOOT,
+        DELAY_POLICY_LEGACY, DELAY_POLICY_MANUAL, MAX_BOOT_DELAY_ATTEMPTS,
     };
 
     #[test]
@@ -1497,6 +1514,16 @@ mod delay_policy_tests {
             true,
             true,
         ));
+    }
+
+    #[test]
+    fn cancelled_boot_heartbeat_maps_to_manual_not_legacy() {
+        assert_eq!(resolve_delay_policy("prepare:boot", false), DELAY_POLICY_BOOT);
+        assert_eq!(resolve_delay_policy("prepare:boot", true), DELAY_POLICY_MANUAL);
+        assert_eq!(resolve_delay_policy("prepare:manual", true), DELAY_POLICY_MANUAL);
+        assert_eq!(resolve_delay_policy("prepare:legacy", true), DELAY_POLICY_LEGACY);
+        // Older DLLs that send plain "prepare" keep the legacy behavior.
+        assert_eq!(resolve_delay_policy("prepare", true), DELAY_POLICY_LEGACY);
     }
 }
 
