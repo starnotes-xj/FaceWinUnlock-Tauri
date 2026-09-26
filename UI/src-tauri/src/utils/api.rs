@@ -8,9 +8,9 @@ use std::{
 
 use crate::{utils::custom_result::CustomResult, OpenCVResource, APP_STATE, GLOBAL_TRAY, ROOT_DIR};
 use opencv::{
-    core::{Mat, MatTraitConst, Ptr, Size},
+    core::{Mat, MatTraitConst, Ptr, Scalar, Size, CV_8UC3},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
-    prelude::NetTrait,
+    prelude::{FaceDetectorYNTrait, FaceRecognizerSFTrait, NetTrait},
     videoio::{self, VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst},
 };
 use serde::{Deserialize, Serialize};
@@ -870,6 +870,66 @@ fn stop_unlock_service() {
     // 额外等一拍，确保 supervisor 退出、文件句柄完全释放
     thread::sleep(Duration::from_millis(500));
 }
+const INTEL_NPU_BACKEND: (i32, i32) = (2, 9);
+const OPENCL_BACKEND: (i32, i32) = (3, 1);
+const CPU_BACKEND: (i32, i32) = (0, 0);
+
+fn is_intel_npu_backend(backend_id: i32, target_id: i32) -> bool {
+    (backend_id, target_id) == INTEL_NPU_BACKEND
+}
+
+fn primary_model_extension(backend_id: i32, target_id: i32) -> &'static str {
+    if is_intel_npu_backend(backend_id, target_id) {
+        "xml"
+    } else {
+        "onnx"
+    }
+}
+
+fn liveness_backend_for(backend_id: i32, target_id: i32) -> (i32, i32) {
+    if is_intel_npu_backend(backend_id, target_id) {
+        // The liveness model has a dynamic batch dimension that Intel NPU does
+        // not reliably support. Keep it on OpenCL; configure_liveness_net will
+        // use CPU if OpenCL is unavailable.
+        OPENCL_BACKEND
+    } else {
+        (backend_id, target_id)
+    }
+}
+
+fn configure_liveness_net(
+    net: &mut opencv::dnn::Net,
+    backend_id: i32,
+    target_id: i32,
+) -> Result<(i32, i32), String> {
+    let preferred = liveness_backend_for(backend_id, target_id);
+    let preferred_result = net
+        .set_preferable_backend(preferred.0)
+        .and_then(|_| net.set_preferable_target(preferred.1));
+    if preferred_result.is_ok() {
+        return Ok(preferred);
+    }
+
+    if !is_intel_npu_backend(backend_id, target_id) {
+        return Err(format!(
+            "设置活体检测推理后端失败 ({},{}): {:?}",
+            preferred.0,
+            preferred.1,
+            preferred_result.err()
+        ));
+    }
+
+    // NPU is still used by YuNet/SFace. Only the liveness model falls back.
+    net.set_preferable_backend(CPU_BACKEND.0)
+        .map_err(|e| format!("活体检测回退 CPU 后端失败: {:?}", e))?;
+    net.set_preferable_target(CPU_BACKEND.1)
+        .map_err(|e| format!("活体检测回退 CPU 目标失败: {:?}", e))?;
+    warn!(
+        "Intel NPU 不支持活体检测的 OpenCL 配置，活体模型回退到 CPU；检测器和识别器仍使用 Intel NPU"
+    );
+    Ok(CPU_BACKEND)
+}
+
 // 用指定 backend/target 构建全部三个 OpenCV 模型；任一失败即返回错误。
 // 不写入全局状态，便于在失败时安全回退到其它后端后再统一赋值。
 fn build_opencv_models(
@@ -877,14 +937,10 @@ fn build_opencv_models(
     target_id: i32,
 ) -> Result<(Ptr<FaceDetectorYN>, Ptr<FaceRecognizerSF>, opencv::dnn::Net), String> {
     let res = ROOT_DIR.join("resources");
-    // Intel NPU (backend=2 / target=9) 用预转换 OpenVINO IR (.xml/.bin)，绕开
-    // OpenCV 4.12 ONNX importer 对部分算子的 "unsupported opset" 反序列化失败
-    // （issue #32）；其它后端继续用 ONNX。
-    let extension = if backend_id == 2 && target_id == 9 {
-        "xml"
-    } else {
-        "onnx"
-    };
+    // Intel NPU (backend=2 / target=9) 用预转换 OpenVINO IR (.xml/.bin) 加载
+    // YuNet/SFace，绕开 OpenCV 4.12 ONNX importer 对部分算子的
+    // "unsupported opset" 反序列化失败（issue #32）；其它后端继续用 ONNX。
+    let extension = primary_model_extension(backend_id, target_id);
     let detector_path = res
         .join(format!("face_detection_yunet_2023mar.{extension}"))
         .to_string_lossy()
@@ -893,8 +949,10 @@ fn build_opencv_models(
         .join(format!("face_recognition_sface_2021dec.{extension}"))
         .to_string_lossy()
         .into_owned();
+    // Keep liveness on ONNX: its dynamic batch dimension is not supported
+    // reliably by Intel NPU (issue #32).
     let liveness_path = res
-        .join(format!("face_liveness.{extension}"))
+        .join("face_liveness.onnx")
         .to_string_lossy()
         .into_owned();
 
@@ -902,10 +960,15 @@ fn build_opencv_models(
 
     // 先在主线程加载 detector：它最小最快，且借此触发 OpenCV DNN 的一次性全局初始化（层工厂注册等），
     // 使随后并行加载 recognizer/liveness 时不会多线程并发触发该全局初始化的竞态（issue #3）。
-    let detector = FaceDetectorYN::create(
+    let detector_input_size = if is_intel_npu_backend(backend_id, target_id) {
+        640
+    } else {
+        320
+    };
+    let mut detector = FaceDetectorYN::create(
         &detector_path,
         "",
-        Size::new(320, 320),
+        Size::new(detector_input_size, detector_input_size),
         0.9,
         0.3,
         5000,
@@ -923,27 +986,44 @@ fn build_opencv_models(
             .map_err(|e| format!("初始化识别器模型失败: {:?}", e))
     });
     let live_handle = thread::spawn(move || -> Result<opencv::dnn::Net, String> {
-        let mut net = if backend_id == 2 && target_id == 9 {
-            // NPU：IR 文件用通用 read_net（按扩展名识别格式），不能用 read_net_from_onnx。
-            opencv::dnn::read_net(&liveness_path, "", "")
-                .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?
-        } else {
-            opencv::dnn::read_net_from_onnx(&liveness_path)
-                .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?
-        };
-        net.set_preferable_backend(backend_id)
-            .map_err(|e| format!("设置推理后端失败: {:?}", e))?;
-        net.set_preferable_target(target_id)
-            .map_err(|e| format!("设置推理目标失败: {:?}", e))?;
+        let mut net = opencv::dnn::read_net_from_onnx(&liveness_path)
+            .map_err(|e| format!("初始化活体检测模型失败: {:?}", e))?;
+        let _ = configure_liveness_net(&mut net, backend_id, target_id)?;
         Ok(net)
     });
 
-    let recognizer = rec_handle
+    let mut recognizer = rec_handle
         .join()
         .map_err(|_| "识别器加载线程 panic".to_string())??;
     let liveness = live_handle
         .join()
         .map_err(|_| "活体检测加载线程 panic".to_string())??;
+
+    // OpenCV/OpenVINO 可能把设备编译推迟到第一次推理。提前探测检测器和
+    // SFace，确保 NPU 失败时在加载阶段回退，而不是首次录入/解锁才失败。
+    if backend_id != 0 || target_id != 0 {
+        let detector_input = Mat::new_rows_cols_with_default(
+            detector_input_size,
+            detector_input_size,
+            CV_8UC3,
+            Scalar::all(0.0),
+        )
+        .map_err(|e| format!("创建模型探测图像失败: {:?}", e))?;
+        detector
+            .set_input_size(Size::new(detector_input_size, detector_input_size))
+            .map_err(|e| format!("设置模型探测输入尺寸失败: {:?}", e))?;
+        let mut faces = Mat::default();
+        detector
+            .detect(&detector_input, &mut faces)
+            .map_err(|e| format!("检测器首次推理失败: {:?}", e))?;
+
+        let aligned = Mat::new_rows_cols_with_default(112, 112, CV_8UC3, Scalar::all(0.0))
+            .map_err(|e| format!("创建识别器探测图像失败: {:?}", e))?;
+        let mut feature = Mat::default();
+        recognizer
+            .feature(&aligned, &mut feature)
+            .map_err(|e| format!("识别器首次推理失败: {:?}", e))?;
+    }
 
     info!(
         "OpenCV 模型加载：detector {}ms(主线程) + recognizer/liveness 并行 {}ms = 合计 {}ms (backend={}, target={})",
@@ -1039,6 +1119,8 @@ pub async fn load_opencv_model(
     app_state.detector = Some(OpenCVResource { inner: detector });
     app_state.recognizer = Some(OpenCVResource { inner: recognizer });
     app_state.liveness = Some(OpenCVResource { inner: liveness });
+    app_state.uses_fixed_npu_detector = is_intel_npu_backend(active_backend, active_target);
+    app_state.liveness_cpu_fallback = is_intel_npu_backend(active_backend, active_target);
 
     Ok(ModelLoadResult {
         requested_backend: backend_id,
@@ -1073,6 +1155,8 @@ pub fn unload_model() -> Result<(), String> {
     if app_state.liveness.is_some() {
         app_state.liveness = None;
     }
+    app_state.uses_fixed_npu_detector = false;
+    app_state.liveness_cpu_fallback = false;
     Ok(())
 }
 
@@ -1308,6 +1392,33 @@ fn enumerate_video_devices_mf() -> windows::core::Result<Vec<(String, u32)>> {
 
         let _ = MFShutdown();
         result
+    }
+}
+
+#[cfg(test)]
+mod inference_backend_tests {
+    use super::{
+        liveness_backend_for, primary_model_extension, CPU_BACKEND, INTEL_NPU_BACKEND,
+        OPENCL_BACKEND,
+    };
+
+    #[test]
+    fn intel_npu_uses_ir_only_for_primary_models() {
+        assert_eq!(
+            primary_model_extension(INTEL_NPU_BACKEND.0, INTEL_NPU_BACKEND.1),
+            "xml"
+        );
+        assert_eq!(primary_model_extension(0, 0), "onnx");
+    }
+
+    #[test]
+    fn intel_npu_keeps_liveness_off_npu() {
+        assert_eq!(
+            liveness_backend_for(INTEL_NPU_BACKEND.0, INTEL_NPU_BACKEND.1),
+            OPENCL_BACKEND
+        );
+        assert_eq!(liveness_backend_for(0, 0), CPU_BACKEND);
+        assert_eq!(liveness_backend_for(3, 2), (3, 2));
     }
 }
 

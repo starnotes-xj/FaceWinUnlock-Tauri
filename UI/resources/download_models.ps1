@@ -1,6 +1,6 @@
 # 下载 ONNX 模型文件到 UI/resources/
 # 这些模型是 FaceWinUnlock-Tauri 人脸识别必需的
-# 有 ovc (OpenVINO) 时，额外为 Intel NPU 生成 .xml/.bin IR（issue #32）。
+# 有 ovc (OpenVINO) 时，额外为 Intel NPU 生成 YuNet/SFace 的 .xml/.bin IR（issue #32）。
 
 $ResourceDir = "$PSScriptRoot"
 
@@ -49,11 +49,18 @@ Write-Host "  ✓ 活体模型哈希正确" -ForegroundColor Green
 # CPU/OpenCL 等其它后端继续用 ONNX。
 $ovc = Get-Command ovc -ErrorAction SilentlyContinue
 if ($null -ne $ovc) {
-    foreach ($model in @($yunet, $sface, $liveness)) {
+    foreach ($model in @($yunet, $sface)) {
         $xml = [System.IO.Path]::ChangeExtension($model, ".xml")
         $bin = [System.IO.Path]::ChangeExtension($model, ".bin")
-        if (-not (Test-Path $xml) -or -not (Test-Path $bin) -or
-            (Get-Item -LiteralPath $xml).LastWriteTimeUtc -lt (Get-Item -LiteralPath $model).LastWriteTimeUtc) {
+        $needsRegenerate = -not (Test-Path $xml) -or -not (Test-Path $bin) -or
+            (Get-Item -LiteralPath $xml).LastWriteTimeUtc -lt (Get-Item -LiteralPath $model).LastWriteTimeUtc
+        if (-not $needsRegenerate -and $model -eq $yunet) {
+            # OpenCV 4.12's OpenVINO bridge asks the IR for a concrete shape
+            # while creating the network, and Intel NPU does not accept this
+            # dynamic YuNet input path. Runtime code letterboxes camera frames.
+            $needsRegenerate = -not (Select-String -LiteralPath $xml -SimpleMatch '<data shape="1,3,640,640"' -Quiet)
+        }
+        if ($needsRegenerate) {
             Write-Host "  生成 OpenVINO IR: $(Split-Path $xml -Leaf)" -ForegroundColor Yellow
             & $ovc.Source $model --output_model $xml --compress_to_fp16 True
             if ($LASTEXITCODE -ne 0) {

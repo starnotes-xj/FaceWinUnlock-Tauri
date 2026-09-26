@@ -214,7 +214,7 @@ After uninstall, FaceWinUnlock must disappear from “where to save a passkey.�
 
 ## Intel NPU Backend (issue #32)
 
-Requires a machine with an Intel NPU (Meteor Lake/Arrow Lake/Lunar Lake+ or Core Ultra 200 series), the Intel NPU driver, and the packaged OpenVINO runtime (`openvino*.dll` under the install dir). The NPU path loads pre-converted OpenVINO IR (`.xml`/`.bin`) because OpenCV 4.12's ONNX importer rejects the SFace/YuNet opset (`unsupported opset: extension`).
+Requires a machine with an Intel NPU (Meteor Lake/Arrow Lake/Lunar Lake+ or Core Ultra 200 series), the Intel NPU driver, and the packaged OpenVINO runtime (`openvino*.dll` under the install dir). The NPU path loads pre-converted OpenVINO IR (`.xml`/`.bin`) for YuNet/SFace because OpenCV 4.12's ONNX importer rejects their opset (`unsupported opset: extension`). YuNet IR is static `1,3,640,640`; the runtime letterboxes camera frames before detection and restores coordinates afterward. The liveness model stays on ONNX and uses OpenCL, or CPU when OpenCL is unavailable or its first OpenCL inference fails, because its dynamic batch dimension is not a reliable NPU path.
 
 1. Open 首选项 → 识别参数 → 推理后端 and choose **Intel NPU**.
 2. Open 面容管理 → 添加新面容. Expected: model load succeeds (no `Failed to read/deserialize model`); a fallback to CPU is only acceptable with a visible warning and a logged reason.

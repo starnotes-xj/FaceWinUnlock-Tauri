@@ -15,6 +15,10 @@ opencv_world4120.dll
 face_detection_yunet_2023mar.onnx
 face_recognition_sface_2021dec.onnx
 face_liveness.onnx
+face_detection_yunet_2023mar.xml
+face_detection_yunet_2023mar.bin
+face_recognition_sface_2021dec.xml
+face_recognition_sface_2021dec.bin
 ```
 
 ## Camera Backend Order
@@ -48,14 +52,24 @@ pre-converted **OpenVINO IR** (`.xml` + `.bin`) files when the backend is
 
 - `face_detection_yunet_2023mar.{xml,bin}`
 - `face_recognition_sface_2021dec.{xml,bin}`
-- `face_liveness.{xml,bin}`
 
-`UI/resources/download_models.ps1` regenerates the IR with
-`ovc --output_model <name>.xml --compress_to_fp16 True` whenever `ovc` is on
-PATH and the IR is older than its ONNX source. The IR files are committed so
-installed builds work without the converter. A blank-image detection probe runs
-at model load for non-CPU backends so a broken NPU path falls back to CPU
-before the first unlock attempt.
+The YuNet IR is converted with a static `1,3,640,640` input. OpenCV 4.12's
+OpenVINO bridge queries a concrete IR shape while creating the network, and
+Intel NPU does not reliably support the dynamic YuNet path there. The runtime
+letterboxes each camera frame to 640x640 before detection and maps the box and
+landmarks back to the original frame, so the aspect ratio is preserved.
+
+The liveness model intentionally remains `face_liveness.onnx` and uses
+OpenCL, or CPU when OpenCL is unavailable, even when the selected primary
+backend is Intel NPU. Its dynamic batch dimension is not a supported NPU
+path.
+
+`UI/resources/download_models.ps1` regenerates the IR with `ovc` whenever the
+converter is on PATH and the IR is older than its ONNX source; it also
+regenerates YuNet when an older non-640x640 shape is detected. The IR files
+are committed so installed builds work without the converter. Blank-image
+detection and SFace feature probes run at model load for non-CPU backends so a
+broken NPU path falls back to CPU before the first unlock attempt.
 
 ## Camera Ownership
 
