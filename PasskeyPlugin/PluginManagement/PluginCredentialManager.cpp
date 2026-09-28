@@ -1,6 +1,5 @@
 #include "pch.h"
 #include "PluginCredentialManager.h"
-#include <CorError.h>
 #include <Credential.h>
 #include <wil/registry_helpers.h>
 #include <wil/safecast.h>

@@ -1,7 +1,6 @@
 #include "pch.h"
 #include "MainPage.xaml.h"
 #include "PluginRegistrationManager.h"
-#include <CorError.h>
 #include <wil/safecast.h>
 
 namespace winrt::PasskeyManager::implementation {
