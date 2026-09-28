@@ -98,20 +98,29 @@ if (-not $allGood) {
 
 # ── 5. 构建 Tauri 安装包 (NSIS) ─────────────────────────────
 Write-Host "`n[5/5] 构建 Tauri 安装包..." -ForegroundColor Yellow
-Push-Location (Join-Path $ScriptDir "UI")
-try {
-    # 首次构建需要 npm install
-    if (-not (Test-Path "node_modules")) {
-        Write-Host "  首次构建，正在 npm install..." -ForegroundColor Gray
-        npm install
-    }
+$uiDir = Join-Path $ScriptDir "UI"
+Push-Location $uiDir
 
-    npm run tauri build
-    if ($LASTEXITCODE -ne 0) { throw "tauri build 失败" }
-    Write-Host "  Tauri 安装包构建完成" -ForegroundColor Green
-} finally {
-    Pop-Location
+# 首次构建需要 npm ci
+$npmExitCode = 0
+if (-not (Test-Path "node_modules")) {
+    Write-Host "  首次构建，正在 npm ci..." -ForegroundColor Gray
+    npm ci
+    $npmExitCode = $LASTEXITCODE
 }
+
+if ($npmExitCode -ne 0) {
+    Pop-Location
+    throw "npm ci 失败"
+}
+
+npm run tauri build
+$tauriExitCode = $LASTEXITCODE
+
+Pop-Location
+
+if ($tauriExitCode -ne 0) { throw "tauri build 失败" }
+Write-Host "  Tauri 安装包构建完成" -ForegroundColor Green
 
 # ── 输出结果 ─────────────────────────────────────────────────
 Write-Host "`n========================================" -ForegroundColor Cyan
