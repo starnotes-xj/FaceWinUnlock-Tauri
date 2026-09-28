@@ -363,11 +363,7 @@
     <Error Condition="!Exists('packages\Microsoft.WindowsAppSDK.1.7.250606001\build\native\Microsoft.WindowsAppSDK.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.WindowsAppSDK.1.7.250606001\build\native\Microsoft.WindowsAppSDK.targets'))" />
   </Target>
   <Target Name="EnsureExternalHeaders" BeforeTargets="PrepareForBuild">
-    <DownloadFile Condition="!Exists('$(ProjectDir)\include\cbor-lite\codec-fp.h')" DestinationFolder="$(ProjectDir)\include\cbor-lite" SourceUrl="https://bitbucket.org/isode/cbor-lite/raw/master/include/cbor-lite/codec-fp.h" />
-    <DownloadFile Condition="!Exists('$(ProjectDir)\include\cbor-lite\codec.h')" DestinationFolder="$(ProjectDir)\include\cbor-lite" SourceUrl="https://bitbucket.org/isode/cbor-lite/raw/master/include/cbor-lite/codec.h" />
-  </Target>
-  <Target Name="CleanExternalHeaders" AfterTargets="CoreClean">
-    <Delete Files="$(ProjectDir)\include\cbor-lite\codec-fp.h" />
-    <Delete Files="$(ProjectDir)\include\cbor-lite\codec.h" />
+    <Error Condition="!Exists('$(ProjectDir)\include\cbor-lite\codec-fp.h')" Text="Missing vendored cbor-lite header: $(ProjectDir)\include\cbor-lite\codec-fp.h" />
+    <Error Condition="!Exists('$(ProjectDir)\include\cbor-lite\codec.h')" Text="Missing vendored cbor-lite header: $(ProjectDir)\include\cbor-lite\codec.h" />
   </Target>
 </Project>
