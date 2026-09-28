@@ -27,8 +27,15 @@ try {
     exit 1
 }
 
-# ── 2. 构建 Rust 项目 (工作区: Server + Unlock + UI) ─────────
-Write-Host "`n[2/5] 构建 Rust 工作区 (Server DLL + Unlock EXE + UI)..." -ForegroundColor Yellow
+# ── 2. 构建官方 Passkey 插件 MSIX ────────────────────────────
+# Tauri 的资源列表在 cargo 编译阶段就要求 .msix 和 .cer 已经存在，
+# 因此必须先生成 Passkey 产物，再构建 Rust 工作区。
+Write-Host "`n[2/5] 构建 FaceWinUnlock Passkey 插件..." -ForegroundColor Yellow
+& (Join-Path $ScriptDir "scripts\build-passkey-plugin.ps1")
+if ($LASTEXITCODE -ne 0) { throw "Passkey 插件构建失败" }
+
+# ── 3. 构建 Rust 项目 (工作区: Server + Unlock + UI) ─────────
+Write-Host "`n[3/5] 构建 Rust 工作区 (Server DLL + Unlock EXE + UI)..." -ForegroundColor Yellow
 Write-Host "  这可能需要几分钟，取决于 CPU 性能..." -ForegroundColor Gray
 
 Push-Location $ScriptDir
@@ -39,11 +46,6 @@ try {
 } finally {
     Pop-Location
 }
-
-# ── 3. 构建官方 Passkey 插件 MSIX ────────────────────────────
-Write-Host "`n[3/5] 构建 FaceWinUnlock Passkey 插件..." -ForegroundColor Yellow
-& (Join-Path $ScriptDir "scripts\build-passkey-plugin.ps1")
-if ($LASTEXITCODE -ne 0) { throw "Passkey 插件构建失败" }
 
 # ── 4. 验证关键产物 ─────────────────────────────────────────
 Write-Host "`n[4/5] 验证构建产物..." -ForegroundColor Yellow
