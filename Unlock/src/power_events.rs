@@ -2,7 +2,7 @@ use std::{
     ffi::c_void,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Condvar, Mutex,
     },
 };
 
@@ -28,6 +28,8 @@ pub struct PowerLifecycle {
     display_inactive: AtomicBool,
     camera_blocked: AtomicBool,
     generation: AtomicU64,
+    camera_change_lock: Mutex<()>,
+    camera_change_cv: Condvar,
 }
 
 impl PowerLifecycle {
@@ -47,11 +49,37 @@ impl PowerLifecycle {
         self.camera_blocked.load(Ordering::SeqCst)
     }
 
+    pub fn wait_while_camera_blocked(&self, should_exit: &AtomicBool) {
+        let mut guard = self
+            .camera_change_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while self.is_camera_blocked() && !should_exit.load(Ordering::SeqCst) {
+            guard = self
+                .camera_change_cv
+                .wait(guard)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+
+    pub fn wake_waiters(&self) {
+        let _guard = self
+            .camera_change_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.camera_change_cv.notify_all();
+    }
+
     fn refresh_camera_blocked(&self) {
-        let blocked = self.suspended.load(Ordering::SeqCst)
-            || self.display_inactive.load(Ordering::SeqCst);
+        let _guard = self
+            .camera_change_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let blocked =
+            self.suspended.load(Ordering::SeqCst) || self.display_inactive.load(Ordering::SeqCst);
         if self.camera_blocked.swap(blocked, Ordering::SeqCst) != blocked {
             self.generation.fetch_add(1, Ordering::SeqCst);
+            self.camera_change_cv.notify_all();
         }
     }
 
@@ -170,6 +198,7 @@ pub fn register(lifecycle: Arc<PowerLifecycle>) -> Result<SuspendResumeRegistrat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{sync::mpsc, thread, time::Duration};
 
     #[repr(C)]
     struct DisplaySetting {
@@ -280,5 +309,66 @@ mod tests {
         let lifecycle = Arc::new(PowerLifecycle::default());
         let registration = register(lifecycle).expect("power callback registration should succeed");
         drop(registration);
+    }
+
+    #[test]
+    fn camera_block_wait_wakes_when_display_turns_on() {
+        let lifecycle = Arc::new(PowerLifecycle::default());
+        lifecycle.apply_display_state(0);
+        let should_exit = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+
+        let waiting_lifecycle = lifecycle.clone();
+        let waiting_should_exit = should_exit.clone();
+        let waiter = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            waiting_lifecycle.wait_while_camera_blocked(&waiting_should_exit);
+            finished_tx.send(()).unwrap();
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("waiter should start");
+        thread::sleep(Duration::from_millis(25));
+        lifecycle.apply_display_state(PowerMonitorOn.0 as u32);
+
+        let woke = finished_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        if !woke {
+            should_exit.store(true, Ordering::SeqCst);
+            lifecycle.wake_waiters();
+        }
+        waiter.join().expect("waiter should exit cleanly");
+        assert!(
+            woke,
+            "display-on notification should wake the camera worker"
+        );
+    }
+
+    #[test]
+    fn camera_block_wait_wakes_when_service_exits() {
+        let lifecycle = Arc::new(PowerLifecycle::default());
+        lifecycle.apply_display_state(0);
+        let should_exit = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+
+        let waiting_lifecycle = lifecycle.clone();
+        let waiting_should_exit = should_exit.clone();
+        let waiter = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            waiting_lifecycle.wait_while_camera_blocked(&waiting_should_exit);
+            finished_tx.send(()).unwrap();
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("waiter should start");
+        thread::sleep(Duration::from_millis(25));
+        should_exit.store(true, Ordering::SeqCst);
+        lifecycle.wake_waiters();
+
+        assert!(finished_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        waiter.join().expect("waiter should exit cleanly");
     }
 }

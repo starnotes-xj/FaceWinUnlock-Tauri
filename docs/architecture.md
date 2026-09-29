@@ -67,6 +67,7 @@ The Active check is repeated in `SetUsageScenario`, `Advise`, before pipe connec
 
 ## Camera Lifecycle
 
+- When the system is suspended or the console display becomes inactive, the Unlock worker closes the camera and waits for a power notification or service exit before resuming its face loop.
 - Lock-screen prewarm opens the configured camera before the first `run` where possible.
 - Boot-delay mode may start recognition without user input, but only after the primary session policy is explicitly marked `prepare:boot` and the credential client is connected.
 - Boot-delay mode is bounded to three automatic attempts; exhaustion arms the existing mouse/keyboard path and does not inject credentials.

@@ -724,6 +724,7 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                     state.release_requested.store(true, Ordering::SeqCst);
                     state.should_exit.store(true, Ordering::SeqCst);
                     state.exit_cv.notify_all();
+                    state.power.wake_waiters();
                 }
                 "release" => {
                     log_service(&state.exe_dir, "INFO", "received release command, closing camera");
@@ -1605,7 +1606,9 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             );
         }
         if state.power.is_camera_blocked() {
-            thread::sleep(Duration::from_millis(20));
+            state
+                .power
+                .wait_while_camera_blocked(&state.should_exit);
             continue;
         }
 

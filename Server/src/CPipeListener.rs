@@ -45,6 +45,23 @@ fn interruptible_sleep(duration: Duration, stop_flag: &AtomicBool) -> bool {
     }
 }
 
+#[derive(Default)]
+struct PipeReconnectBackoff {
+    failures: u32,
+}
+
+impl PipeReconnectBackoff {
+    fn next_delay(&mut self) -> Duration {
+        let shift = self.failures.min(5);
+        self.failures = self.failures.saturating_add(1);
+        Duration::from_millis((100_u64 << shift).min(2_000))
+    }
+
+    fn reset(&mut self) {
+        self.failures = 0;
+    }
+}
+
 fn broker_fallback_timeout() -> Duration {
     let seconds = read_facewinunlock_registry("CREDUI_BROKER_FALLBACK_TIMEOUT")
         .ok()
@@ -659,6 +676,7 @@ impl CPipeListener {
 
                 info!("CPipeListener::start - 进入凭据Client线程");
 
+                let mut reconnect_backoff = PipeReconnectBackoff::default();
                 loop {
                     if stop_flag.load(Ordering::SeqCst) { break; }
 
@@ -668,7 +686,9 @@ impl CPipeListener {
                         Ok(p)  => p,
                         Err(_) => {
                             // Unlock EXE 可能尚未运行，继续等待
-                            thread::sleep(Duration::from_millis(100));
+                            if interruptible_sleep(reconnect_backoff.next_delay(), &stop_flag) {
+                                break;
+                            }
                             continue;
                         }
                     };
@@ -698,6 +718,7 @@ impl CPipeListener {
 
                     match read_result {
                         Ok(data) if !data.is_empty() => {
+                            reconnect_backoff.reset();
                             if broker_fallback_to_pin && crate::is_webauthn_guard_active() {
                                 trigger_broker_pin_fallback(
                                     &shared_creds,
@@ -747,11 +768,17 @@ impl CPipeListener {
                             }
                         }
                         Ok(_) => {
-                            // 空数据或 stop_and_join 关闭句柄导致的返回，忽略
+                            // EOF means the server disconnected. Back off before reconnecting.
+                            if interruptible_sleep(reconnect_backoff.next_delay(), &stop_flag) {
+                                break;
+                            }
                         }
                         Err(e) => {
                             if !stop_flag.load(Ordering::SeqCst) {
                                 warn!("凭据线程：读取失败（Unlock EXE 断开？）: {:?}", e);
+                            }
+                            if interruptible_sleep(reconnect_backoff.next_delay(), &stop_flag) {
+                                break;
                             }
                         }
                     }
@@ -842,6 +869,24 @@ impl CPipeListener {
         let _ = self.client_thread.take();
         let _ = self.creds_thread.take();
         info!("CPipeListener::stop_and_join - 已分离后台线程与 teardown 线程，UI 线程零阻塞返回");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PipeReconnectBackoff;
+    use std::time::Duration;
+
+    #[test]
+    fn pipe_reconnect_backoff_grows_caps_and_resets() {
+        let mut backoff = PipeReconnectBackoff::default();
+        let expected_ms = [100, 200, 400, 800, 1_600, 2_000, 2_000];
+        for delay_ms in expected_ms {
+            assert_eq!(backoff.next_delay(), Duration::from_millis(delay_ms));
+        }
+
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_millis(100));
     }
 }
 
