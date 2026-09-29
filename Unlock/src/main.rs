@@ -32,7 +32,8 @@ use std::{
 };
 
 use opencv::{
-    core::{Mat, Ptr, Size},
+    core::{Mat, Ptr, Scalar, Size},
+    imgproc,
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
     prelude::*,
     videoio::{self, VideoCapture},
@@ -972,13 +973,91 @@ fn cosine_sim(a: &[u8], b: &[u8]) -> f64 {
 struct Models {
     detector:   Ptr<FaceDetectorYN>,
     recognizer: Ptr<FaceRecognizerSF>,
+    uses_fixed_npu_detector: bool,
+}
+
+const NPU_DETECTOR_INPUT_SIZE: i32 = 640;
+
+fn letterbox_for_npu(frame: &Mat) -> opencv::Result<(Mat, f32, i32, i32)> {
+    let width = frame.cols();
+    let height = frame.rows();
+    if width <= 0 || height <= 0 {
+        return Err(opencv::Error::new(0, "NPU detector received an empty frame"));
+    }
+
+    let scale = (NPU_DETECTOR_INPUT_SIZE as f64 / width as f64)
+        .min(NPU_DETECTOR_INPUT_SIZE as f64 / height as f64);
+    let resized_size = Size::new(
+        ((width as f64 * scale).round() as i32).max(1),
+        ((height as f64 * scale).round() as i32).max(1),
+    );
+    let mut resized = Mat::default();
+    imgproc::resize(
+        frame,
+        &mut resized,
+        resized_size,
+        0.0,
+        0.0,
+        imgproc::INTER_LINEAR,
+    )?;
+
+    let pad_x = (NPU_DETECTOR_INPUT_SIZE - resized_size.width) / 2;
+    let pad_y = (NPU_DETECTOR_INPUT_SIZE - resized_size.height) / 2;
+    let mut boxed = Mat::default();
+    opencv::core::copy_make_border(
+        &resized,
+        &mut boxed,
+        pad_y,
+        NPU_DETECTOR_INPUT_SIZE - resized_size.height - pad_y,
+        pad_x,
+        NPU_DETECTOR_INPUT_SIZE - resized_size.width - pad_x,
+        opencv::core::BORDER_CONSTANT,
+        Scalar::all(0.0),
+    )?;
+    Ok((boxed, scale as f32, pad_x, pad_y))
+}
+
+fn remap_npu_faces(faces: &mut Mat, scale: f32, pad_x: i32, pad_y: i32) -> opencv::Result<()> {
+    for row in 0..faces.rows() {
+        for col in [0, 4, 6, 8, 10, 12] {
+            let value = *faces.at_2d::<f32>(row, col)?;
+            *faces.at_2d_mut::<f32>(row, col)? = (value - pad_x as f32) / scale;
+        }
+        for col in [1, 5, 7, 9, 11, 13] {
+            let value = *faces.at_2d::<f32>(row, col)?;
+            *faces.at_2d_mut::<f32>(row, col)? = (value - pad_y as f32) / scale;
+        }
+        for col in [2, 3] {
+            let value = *faces.at_2d::<f32>(row, col)?;
+            *faces.at_2d_mut::<f32>(row, col)? = value / scale;
+        }
+    }
+    Ok(())
 }
 
 fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<Models> {
-    let detector = FaceDetectorYN::create(
-        resources.join("face_detection_yunet_2023mar.onnx").to_str().unwrap_or(""),
+    // Intel NPU (backend=2 INFERENCE_ENGINE / target=9 NPU) 用预转换 OpenVINO IR
+    // (.xml/.bin)：OpenCV 4.12 内置 ONNX importer 对 SFace/YuNet 的某些算子报
+    // "unsupported opset: extension" 而无法反序列化（issue #32）。IR 由
+    // download_models.ps1 用 ovc --compress_to_fp16 预生成，绕开 ONNX 解析路径。
+    let extension = if inference.backend_id == 2 && inference.target_id == 9 {
+        "xml"
+    } else {
+        "onnx"
+    };
+    let uses_fixed_npu_detector = inference.backend_id == 2 && inference.target_id == 9;
+    let detector_input_size = if uses_fixed_npu_detector {
+        NPU_DETECTOR_INPUT_SIZE
+    } else {
+        320
+    };
+    let mut detector = FaceDetectorYN::create(
+        resources
+            .join(format!("face_detection_yunet_2023mar.{extension}"))
+            .to_str()
+            .unwrap_or(""),
         "",
-        Size::new(320, 320),
+        Size::new(detector_input_size, detector_input_size),
         0.9,
         0.3,
         5000,
@@ -986,12 +1065,30 @@ fn load_models(resources: &Path, inference: InferenceBackend) -> opencv::Result<
         inference.target_id,
     )?;
     let recognizer = FaceRecognizerSF::create(
-        resources.join("face_recognition_sface_2021dec.onnx").to_str().unwrap_or(""),
+        resources
+            .join(format!("face_recognition_sface_2021dec.{extension}"))
+            .to_str()
+            .unwrap_or(""),
         "",
         inference.backend_id,
         inference.target_id,
     )?;
-    Ok(Models { detector, recognizer })
+    if inference != CPU_INFERENCE {
+        // OpenCV/OpenVINO 常把设备编译推迟到首次推理。NPU 的 IR 即使能被解析，
+        // 也可能在第一次 detect 时才失败（issue #32 报错即来自首次推理前的
+        // 模型准备）；这里用空白图先跑一次检测，让坏路径在 load 阶段就暴露并
+        // 回退 CPU，而不是首次解锁时才卡住。
+        let detector_input = Mat::new_rows_cols_with_default(
+            detector_input_size,
+            detector_input_size,
+            opencv::core::CV_8UC3,
+            Scalar::all(0.0),
+        )?;
+        detector.set_input_size(Size::new(detector_input_size, detector_input_size))?;
+        let mut faces = Mat::default();
+        detector.detect(&detector_input, &mut faces)?;
+    }
+    Ok(Models { detector, recognizer, uses_fixed_npu_detector })
 }
 
 fn load_models_with_fallback(
@@ -1080,9 +1177,19 @@ fn reload_models_if_inference_changed(
 
 /// 检测+提取特征，返回 None 表示无人脸或失败
 fn detect_and_extract(models: &mut Models, frame: &Mat) -> Option<Mat> {
-    models.detector.set_input_size(Size::new(frame.cols(), frame.rows())).ok()?;
     let mut faces = Mat::default();
-    models.detector.detect(frame, &mut faces).ok()?;
+    if models.uses_fixed_npu_detector {
+        let (boxed, scale, pad_x, pad_y) = letterbox_for_npu(frame).ok()?;
+        models
+            .detector
+            .set_input_size(Size::new(NPU_DETECTOR_INPUT_SIZE, NPU_DETECTOR_INPUT_SIZE))
+            .ok()?;
+        models.detector.detect(&boxed, &mut faces).ok()?;
+        remap_npu_faces(&mut faces, scale, pad_x, pad_y).ok()?;
+    } else {
+        models.detector.set_input_size(Size::new(frame.cols(), frame.rows())).ok()?;
+        models.detector.detect(frame, &mut faces).ok()?;
+    }
     if faces.rows() == 0 { return None; }
 
     // 克隆第一行（BoxedRef → Mat）以满足 ToInputArray 要求

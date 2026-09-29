@@ -58,6 +58,10 @@ pub struct AppState {
     pub recognizer: Option<OpenCVResource<Ptr<FaceRecognizerSF>>>,
     pub liveness: Option<OpenCVResource<opencv::dnn::Net>>,
     pub camera: Option<OpenCVResource<VideoCapture>>,
+    /// Intel NPU 的 YuNet IR 固定为 640x640；检测前需要补边，检测后还原坐标。
+    pub uses_fixed_npu_detector: bool,
+    /// NPU 主路径下活体模型优先走 OpenCL；首次推理失败时只回退活体到 CPU。
+    pub liveness_cpu_fallback: bool,
 }
 
 lazy_static::lazy_static! {
@@ -70,6 +74,8 @@ lazy_static::lazy_static! {
         recognizer: None,
         liveness: None,
         camera: None,
+        uses_fixed_npu_detector: false,
+        liveness_cpu_fallback: false,
     });
 
     // 全局只读软件根目录
