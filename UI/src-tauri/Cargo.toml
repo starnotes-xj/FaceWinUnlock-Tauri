@@ -48,6 +48,7 @@ encoding_rs = "0.8"
 winreg = "0.52"
 sha2 = "0.10"
 hex = "0.4"
+minisign-verify = "0.3"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

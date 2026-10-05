@@ -784,61 +784,51 @@ pub fn close_app(app_handle: AppHandle) -> Result<CustomResult, CustomResult> {
 // 计划任务把新版本拉起。其余配套资源通常未占用，直接覆盖即可。
 // 极端情况下仍被占用则退回 X.new，由下次启动的 apply_pending_updates 替换。
 fn apply_downloaded_update() {
-    let update_dir = ROOT_DIR.join("update_temp");
-    if !update_dir.exists() {
+    let mut server_running = false;
+    let result = crate::modules::update_download::apply_staged_update(&ROOT_DIR, |files| {
+        server_running = files.iter().any(|name| name == "FaceWinUnlock-Server.exe")
+            && check_process_running().is_ok();
+        if server_running {
+            stop_unlock_service();
+        }
+    });
+    let files = match result {
+        Ok(files) => files,
+        Err(error) => {
+            warn!("增量更新验证或应用失败: {error}");
+            if server_running {
+                let _ = Command::new("schtasks")
+                    .args(["/Run", "/TN", "FaceWinUnlockServer"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status();
+            }
+            return;
+        }
+    };
+    if files.is_empty() {
         return;
     }
 
-    // 本次更新是否要替换正在运行的核心服务 exe？是则先停服务释放文件锁。
-    let server_running =
-        update_dir.join("FaceWinUnlock-Server.exe").exists() && check_process_running().is_ok();
-    if server_running {
-        stop_unlock_service();
-    }
-    let passkey_package_updated = update_dir.join("FaceWinUnlock-Passkey.msix").exists()
-        || update_dir.join("FaceWinUnlock-Passkey.cer").exists();
-
-    let entries = match std::fs::read_dir(&update_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let src = entry.path();
-        if !src.is_file() {
-            continue;
-        }
-        let name = match src.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let dst = ROOT_DIR.join(&name);
-        if std::fs::copy(&src, &dst).is_err() {
-            // 仍被占用（极少见）：写出 X.new，下次启动时由 apply_pending_updates 替换
-            let _ = std::fs::copy(&src, ROOT_DIR.join(format!("{name}.new")));
-        }
-    }
-
+    let passkey_package_updated = files
+        .iter()
+        .any(|name| name == "FaceWinUnlock-Passkey.msix" || name == "FaceWinUnlock-Passkey.cer");
     if passkey_package_updated {
         match crate::modules::passkey_plugin::update_bundled_passkey_plugin_preserving_data() {
             Ok(Some(message)) => info!("apply_downloaded_update: {message}"),
             Ok(None) => {
-                info!("apply_downloaded_update: Passkey 插件未安装或已是最新版本，跳过 MSIX 更新")
+                info!("apply_downloaded_update: Passkey 插件尚未安装，跳过捆绑 MSIX 更新")
             }
-            Err(e) => warn!("apply_downloaded_update: Passkey 插件更新失败: {e}"),
+            Err(e) => warn!("apply_downloaded_update: Passkey 更新安装失败: {e}"),
         }
     }
 
-    let _ = std::fs::remove_dir_all(&update_dir);
-
-    // 服务已被我们停掉 → 通过计划任务重新拉起新版本（任务自带 1 分钟 TimeTrigger 兜底重启）。
     if server_running {
         let _ = Command::new("schtasks")
-            .args(&["/Run", "/TN", "FaceWinUnlockServer"])
+            .args(["/Run", "/TN", "FaceWinUnlockServer"])
             .creation_flags(CREATE_NO_WINDOW)
             .status();
     }
 }
-
 // 发送 "exit" 优雅停止 Unlock 服务，并轮询等待其完全退出以释放 exe 文件锁（最多 ~5s）。
 // 机制：worker 收到 "exit" 后 face_recognition_loop 返回、worker 返回退出码 0，
 // supervisor 检测到 status.success() 即停止整个进程树（Unlock/src/main.rs）。

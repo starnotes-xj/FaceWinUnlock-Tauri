@@ -79,6 +79,7 @@ The Active check is repeated in `SetUsageScenario`, `Advise`, before pipe connec
 ## Data And Trust
 
 - Face records, options, and configured Windows credentials remain local.
+- The incremental updater verifies the raw release manifest with the reviewed Minisign public-key ring before parsing it, and rechecks staged asset hashes before replacement. Older clients without this verifier retain their previous behavior.
 - The generic Credential Provider briefly handles account credentials to log on; it must never log serialization bytes or secret values.
 - Passkey private keys are per-user Software KSP keys. Metadata backup is under `%ProgramData%\facewinunlock-tauri\PasskeyBackup`.
 - Ordinary RGB face recognition is a convenience layer, not equivalent to Windows Hello biometric assurance.

@@ -39,6 +39,34 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      - name: Require release signing configuration
+        shell: pwsh
+        env:
+          UPDATE_RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_RELEASE_SIGNING_PRIVATE_KEY }}
+          UPDATE_RELEASE_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.UPDATE_RELEASE_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $keyFile = "UI/src-tauri/release-signing-public-keys.txt"
+          if (-not (Test-Path $keyFile)) { throw "Pinned release public-key file is missing" }
+          $publicKeys = @(Get-Content -LiteralPath $keyFile | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          if ($publicKeys.Count -eq 0 -or $publicKeys -contains "UNCONFIGURED") {
+            throw "Configure a Minisign public key in $keyFile before releasing"
+          }
+          foreach ($publicKey in $publicKeys) {
+            try { $decoded = [Convert]::FromBase64String($publicKey) }
+            catch { throw "Pinned release public key is not valid base64" }
+            if ($decoded.Length -ne 42 -or [Text.Encoding]::ASCII.GetString($decoded, 0, 2) -ne "Ed") {
+              throw "Pinned key must be a Minisign Ed25519 public key"
+            }
+          }
+          if (-not $env:UPDATE_RELEASE_SIGNING_PRIVATE_KEY) {
+            throw "Secret UPDATE_RELEASE_SIGNING_PRIVATE_KEY is required"
+          }
+          if (-not $env:UPDATE_RELEASE_SIGNING_PRIVATE_KEY_PASSWORD) {
+            throw "Secret UPDATE_RELEASE_SIGNING_PRIVATE_KEY_PASSWORD is required"
+          }
+          Write-Host "Release signing configuration is present."
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -542,9 +570,79 @@ jobs:
           }
           $manifest = [ordered]@{ version = $version; files = $files }
           $out = "target/release/update_manifest.json"
-          $manifest | ConvertTo-Json -Depth 4 | Out-File -Encoding utf8 $out
+          $json = $manifest | ConvertTo-Json -Depth 4
+          [System.IO.File]::WriteAllText($out, $json, [System.Text.UTF8Encoding]::new($false))
           Write-Host "Generated ${out}:"
           Get-Content $out
+
+      - name: Sign release metadata and generate SHA256SUMS
+        working-directory: UI
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_RELEASE_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.UPDATE_RELEASE_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifest = "../target/release/update_manifest.json"
+          $manifestSignature = "$manifest.sig"
+          npm run tauri -- signer sign $manifest
+          if (-not (Test-Path $manifestSignature) -or (Get-Item $manifestSignature).Length -eq 0) {
+            throw "Tauri signer did not create $manifestSignature"
+          }
+          $encodedSignature = [System.IO.File]::ReadAllText($manifestSignature).Trim()
+          $signatureBytes = [Convert]::FromBase64String($encodedSignature)
+          $signatureText = [System.Text.Encoding]::UTF8.GetString($signatureBytes)
+          if (-not $signatureText.StartsWith("untrusted comment: signature from ")) {
+            throw "Tauri signer output is not a Minisign detached signature"
+          }
+          [System.IO.File]::WriteAllBytes($manifestSignature, $signatureBytes)
+
+          # SHA256SUMS covers every uploaded release payload and the manifest signature.
+          # It intentionally excludes itself and its own detached signature.
+          $payloads = [System.Collections.Generic.List[string]]::new()
+          foreach ($name in @(
+            "FaceWinUnlock_Tauri.dll",
+            "FaceWinUnlock-Server.exe",
+            "FaceWinUnlock-Launcher.exe",
+            "FaceWinUnlock-Passkey.msix",
+            "FaceWinUnlock-Passkey.cer",
+            "update_manifest.json",
+            "update_manifest.json.sig"
+          )) {
+            $path = "../target/release/$name"
+            if (-not (Test-Path $path)) { throw "Release payload missing: $path" }
+            $payloads.Add((Resolve-Path $path).Path)
+          }
+
+          $installers = @(Get-ChildItem "../target/release/bundle/nsis" -Filter "*.exe" -File | Sort-Object Name)
+          if ($installers.Count -eq 0) { throw "No NSIS installer was built" }
+          foreach ($installer in $installers) { $payloads.Add($installer.FullName) }
+
+          $sumLines = foreach ($path in ($payloads | Sort-Object)) {
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $(Split-Path -Leaf $path)"
+          }
+          $sums = "../target/release/SHA256SUMS"
+          [System.IO.File]::WriteAllLines($sums, $sumLines, [System.Text.UTF8Encoding]::new($false))
+
+          npm run tauri -- signer sign $sums
+          if (-not (Test-Path "$sums.sig") -or (Get-Item "$sums.sig").Length -eq 0) {
+            throw "Tauri signer did not create $sums.sig"
+          }
+          $encodedSumsSignature = [System.IO.File]::ReadAllText("$sums.sig").Trim()
+          $sumsSignatureBytes = [Convert]::FromBase64String($encodedSumsSignature)
+          $sumsSignatureText = [System.Text.Encoding]::UTF8.GetString($sumsSignatureBytes)
+          if (-not $sumsSignatureText.StartsWith("untrusted comment: signature from ")) {
+            throw "Tauri signer output is not a Minisign detached signature"
+          }
+          [System.IO.File]::WriteAllBytes("$sums.sig", $sumsSignatureBytes)
+
+          # Verify both generated signatures with the exact keyring compiled into the client.
+          $env:UPDATE_RELEASE_MANIFEST_PATH = (Resolve-Path $manifest).Path
+          $env:UPDATE_RELEASE_MANIFEST_SIGNATURE_PATH = (Resolve-Path $manifestSignature).Path
+          $env:UPDATE_RELEASE_SHA256SUMS_PATH = (Resolve-Path $sums).Path
+          $env:UPDATE_RELEASE_SHA256SUMS_SIGNATURE_PATH = (Resolve-Path "$sums.sig").Path
+          cargo test --manifest-path src-tauri/Cargo.toml --lib release_signatures_match_the_embedded_keyring -- --ignored
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -558,7 +656,11 @@ jobs:
           files: |
             target/release/FaceWinUnlock_Tauri.dll
             target/release/FaceWinUnlock-Server.exe
+            target/release/FaceWinUnlock-Launcher.exe
             target/release/FaceWinUnlock-Passkey.msix
             target/release/FaceWinUnlock-Passkey.cer
             target/release/update_manifest.json
+            target/release/update_manifest.json.sig
+            target/release/SHA256SUMS
+            target/release/SHA256SUMS.sig
             target/release/bundle/nsis/*.exe
