@@ -19,6 +19,39 @@ Default log paths:
 <install dir>\logs\app.log
 ```
 
+## Release Asset Verification (Windows)
+
+Before running an installer, obtain `minisign.exe` from the official [Minisign project](https://github.com/jedisct1/minisign) and use the public key committed in `UI/src-tauri/release-signing-public-keys.txt` (or the versioned copy supplied by the release publisher). Verify the signed checksum list first, then verify the manifest signature and each listed file:
+
+```powershell
+$keys = Get-Content .\release-signing-public-keys.txt | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+$sumsVerified = $false
+foreach ($key in $keys) {
+    & .\minisign.exe -Vm .\SHA256SUMS -P $key -q
+    if ($LASTEXITCODE -eq 0) { $sumsVerified = $true; break }
+}
+if (-not $sumsVerified) { throw 'SHA256SUMS signature did not match a trusted key' }
+
+$manifestVerified = $false
+foreach ($key in $keys) {
+    & .\minisign.exe -Vm .\update_manifest.json -P $key -q
+    if ($LASTEXITCODE -eq 0) { $manifestVerified = $true; break }
+}
+if (-not $manifestVerified) { throw 'Update manifest signature did not match a trusted key' }
+
+Get-Content .\SHA256SUMS | ForEach-Object {
+    if ($_ -notmatch '^([0-9a-fA-F]{64})  (.+)$') { throw "Invalid SHA256SUMS line: $_" }
+    $expected = $Matches[1]
+    $file = Join-Path (Get-Location) $Matches[2]
+    $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+    if ($actual -ne $expected) { throw "SHA-256 mismatch: $file" }
+}
+```
+
+The checksum list covers every binary asset uploaded by the release workflow, plus `update_manifest.json` and its `.sig`; it excludes `SHA256SUMS` and `SHA256SUMS.sig` themselves. Hashes detect byte changes only when the expected list is trusted. Minisign authenticates that list and the update manifest under the publisher's private key. Authenticode is a separate Windows code-signing certificate and trust-chain mechanism; this project does not configure Authenticode deployment or alter Windows certificate trust.
+
+Publisher key setup and rotation are documented in [release-signing.md](release-signing.md). Old installed clients do not verify these signatures; install a new full installer to migrate them to the signed-manifest client.
+
 ## Fast Acceptance Order
 
 Run these first. Stop the release if any item fails.
