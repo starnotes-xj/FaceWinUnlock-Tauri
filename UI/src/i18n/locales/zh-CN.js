@@ -117,6 +117,7 @@ export default {
     livenessPass: '活体检测通过',
     livenessFail: '活体检测未通过',
     livenessScore: '活体分数',
+    livenessDesc: '本地模型自动分析短时多帧人脸纹理，无需眨眼、转头或张嘴',
   },
   options: {
     title: '首选项',

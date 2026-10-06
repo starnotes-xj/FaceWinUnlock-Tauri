@@ -15,6 +15,10 @@ opencv_world4120.dll
 face_detection_yunet_2023mar.onnx
 face_recognition_sface_2021dec.onnx
 face_liveness.onnx
+face_detection_yunet_2023mar.xml
+face_detection_yunet_2023mar.bin
+face_recognition_sface_2021dec.xml
+face_recognition_sface_2021dec.bin
 ```
 
 ## Camera Backend Order
@@ -35,6 +39,37 @@ Physical cameras can complete warmup after stable frames. Virtual cameras such a
 - OpenCL and OpenCL FP16 are optional. Kernel tuning cache must use a persistent writable location.
 - Intel NPU requires the packaged OpenVINO runtime and a compatible driver.
 - Slow startup, repeated tuning, black consistency checks, or matching regressions should be reproduced on CPU before changing recognition logic.
+
+## Intel NPU Model Loading (issue #32)
+
+OpenCV 4.12's built-in ONNX importer fails on some SFace/YuNet operators with
+`Cannot create opencv ngraph layer onnx node! minscalar0 ... unsupported opset:
+extension`, so the NPU backend must not load `.onnx` directly.
+
+Both Unlock (`load_models`) and the UI (`build_opencv_models`) therefore select
+pre-converted **OpenVINO IR** (`.xml` + `.bin`) files when the backend is
+`(2, 9)` (INFERENCE_ENGINE / NPU); all other backends keep using `.onnx`:
+
+- `face_detection_yunet_2023mar.{xml,bin}`
+- `face_recognition_sface_2021dec.{xml,bin}`
+
+The YuNet IR is converted with a static `1,3,640,640` input. OpenCV 4.12's
+OpenVINO bridge queries a concrete IR shape while creating the network, and
+Intel NPU does not reliably support the dynamic YuNet path there. The runtime
+letterboxes each camera frame to 640x640 before detection and maps the box and
+landmarks back to the original frame, so the aspect ratio is preserved.
+
+The liveness model intentionally remains `face_liveness.onnx` and uses
+OpenCL, or CPU when OpenCL is unavailable, even when the selected primary
+backend is Intel NPU. Its dynamic batch dimension is not a supported NPU
+path.
+
+`UI/resources/download_models.ps1` regenerates the IR with `ovc` whenever the
+converter is on PATH and the IR is older than its ONNX source; it also
+regenerates YuNet when an older non-640x640 shape is detected. The IR files
+are committed so installed builds work without the converter. Blank-image
+detection and SFace feature probes run at model load for non-CPU backends so a
+broken NPU path falls back to CPU before the first unlock attempt.
 
 ## Camera Ownership
 

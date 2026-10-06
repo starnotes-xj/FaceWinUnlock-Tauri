@@ -3,12 +3,18 @@ use std::sync::Mutex;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use opencv::{
-    core::{Mat, Rect, Scalar, Size, Vector},
+    core::{Mat, Ptr, Rect, Scalar, Size, Vector},
     imgcodecs, imgproc,
+    objdetect::FaceDetectorYN,
     prelude::*,
 };
+use tauri_plugin_log::log::warn;
 use serde_json::json;
 
+use super::liveness::{
+    median_liveness_score, score_face_liveness, MAX_LIVENESS_CAPTURE_FRAMES,
+    MIN_LIVENESS_SAMPLES, TARGET_LIVENESS_SAMPLES,
+};
 use crate::utils::custom_result::CustomResult;
 use crate::{APP_STATE, ROOT_DIR};
 
@@ -51,6 +57,36 @@ fn mat_to_data_url(frame: &Mat) -> Result<String, String> {
     ))
 }
 
+/// 预览图最长边上限。录入/一致性验证循环 20~30fps 逐帧把整幅 640×480 编码成 JPEG +
+/// base64 送给 WebView 是低端设备 CPU/GPU 的主要消耗（issue #31）；预览框实际只展示
+/// 小图，先缩到 320px 再编码，编码与解码开销约降 4 倍，观感基本不变。保存用的
+/// raw_base64 仍是原图，不受影响。
+const PREVIEW_MAX_SIDE: i32 = 320;
+const NPU_DETECTOR_INPUT_SIZE: i32 = 640;
+
+/// 把帧按最长边缩到 PREVIEW_MAX_SIDE 以内（只缩小不放大），用于预览展示。
+fn preview_frame(frame: &Mat) -> Result<Mat, String> {
+    let longest = frame.cols().max(frame.rows()).max(1);
+    if longest <= PREVIEW_MAX_SIDE {
+        return frame.try_clone().map_err(|e| format!("克隆预览帧失败: {:?}", e));
+    }
+    let scale = PREVIEW_MAX_SIDE as f64 / longest as f64;
+    let new_size = Size::new(
+        ((frame.cols() as f64) * scale).round().max(1.0) as i32,
+        ((frame.rows() as f64) * scale).round().max(1.0) as i32,
+    );
+    let mut out = Mat::default();
+    imgproc::resize(frame, &mut out, new_size, 0.0, 0.0, imgproc::INTER_AREA)
+        .map_err(|e| format!("预览帧缩放失败: {:?}", e))?;
+    Ok(out)
+}
+
+/// 预览展示用的 data URL：先降采样再编码（issue #31）。
+fn mat_to_data_url_preview(frame: &Mat) -> Result<String, String> {
+    let preview = preview_frame(frame)?;
+    mat_to_data_url(&preview)
+}
+
 fn base64_to_mat(b64: &str) -> Result<Mat, String> {
     let payload = if let Some(p) = b64.find(',') {
         &b64[p + 1..]
@@ -80,6 +116,110 @@ fn resize_longest(src: &Mat, target: i32) -> Result<Mat, String> {
     imgproc::resize(src, &mut out, new_size, 0.0, 0.0, imgproc::INTER_AREA)
         .map_err(|e| format!("图片缩放失败: {:?}", e))?;
     Ok(out)
+}
+
+/// 把任意摄像头帧按比例放入 YuNet NPU 所需的固定 640x640 输入，并返回还原坐标所需参数。
+fn letterbox_for_npu(frame: &Mat) -> Result<(Mat, f32, i32, i32), String> {
+    let width = frame.cols();
+    let height = frame.rows();
+    if width <= 0 || height <= 0 {
+        return Err("NPU 人脸检测收到空图像".to_string());
+    }
+
+    let scale = (NPU_DETECTOR_INPUT_SIZE as f64 / width as f64)
+        .min(NPU_DETECTOR_INPUT_SIZE as f64 / height as f64);
+    let resized_size = Size::new(
+        ((width as f64 * scale).round() as i32).max(1),
+        ((height as f64 * scale).round() as i32).max(1),
+    );
+    let mut resized = Mat::default();
+    imgproc::resize(
+        frame,
+        &mut resized,
+        resized_size,
+        0.0,
+        0.0,
+        imgproc::INTER_LINEAR,
+    )
+    .map_err(|e| format!("NPU 人脸检测缩放失败: {:?}", e))?;
+
+    let pad_x = (NPU_DETECTOR_INPUT_SIZE - resized_size.width) / 2;
+    let pad_y = (NPU_DETECTOR_INPUT_SIZE - resized_size.height) / 2;
+    let mut boxed = Mat::default();
+    opencv::core::copy_make_border(
+        &resized,
+        &mut boxed,
+        pad_y,
+        NPU_DETECTOR_INPUT_SIZE - resized_size.height - pad_y,
+        pad_x,
+        NPU_DETECTOR_INPUT_SIZE - resized_size.width - pad_x,
+        opencv::core::BORDER_CONSTANT,
+        Scalar::all(0.0),
+    )
+    .map_err(|e| format!("NPU 人脸检测补边失败: {:?}", e))?;
+
+    Ok((boxed, scale as f32, pad_x, pad_y))
+}
+
+/// 将 YuNet 在补边图上的框和五个关键点映射回原始帧坐标。
+fn remap_npu_faces(
+    faces: &mut Mat,
+    scale: f32,
+    pad_x: i32,
+    pad_y: i32,
+) -> Result<(), String> {
+    if faces.rows() == 0 {
+        return Ok(());
+    }
+    for row in 0..faces.rows() {
+        for col in [0, 4, 6, 8, 10, 12] {
+            let value = *faces
+                .at_2d::<f32>(row, col)
+                .map_err(|e| format!("读取 NPU 人脸横坐标失败: {:?}", e))?;
+            *faces
+                .at_2d_mut::<f32>(row, col)
+                .map_err(|e| format!("写入 NPU 人脸横坐标失败: {:?}", e))? =
+                (value - pad_x as f32) / scale;
+        }
+        for col in [1, 5, 7, 9, 11, 13] {
+            let value = *faces
+                .at_2d::<f32>(row, col)
+                .map_err(|e| format!("读取 NPU 人脸纵坐标失败: {:?}", e))?;
+            *faces
+                .at_2d_mut::<f32>(row, col)
+                .map_err(|e| format!("写入 NPU 人脸纵坐标失败: {:?}", e))? =
+                (value - pad_y as f32) / scale;
+        }
+        for col in [2, 3] {
+            let value = *faces
+                .at_2d::<f32>(row, col)
+                .map_err(|e| format!("读取 NPU 人脸尺寸失败: {:?}", e))?;
+            *faces
+                .at_2d_mut::<f32>(row, col)
+                .map_err(|e| format!("写入 NPU 人脸尺寸失败: {:?}", e))? = value / scale;
+        }
+    }
+    Ok(())
+}
+
+fn detect_faces_fixed_npu(
+    detector: &mut Ptr<FaceDetectorYN>,
+    frame: &Mat,
+) -> Result<Mat, String> {
+    let (boxed, scale, pad_x, pad_y) = letterbox_for_npu(frame)?;
+    detector
+        .set_input_size(Size::new(NPU_DETECTOR_INPUT_SIZE, NPU_DETECTOR_INPUT_SIZE))
+        .map_err(|e| format!("设置 NPU 检测器输入尺寸失败: {:?}", e))?;
+    let mut faces = Mat::default();
+    detector
+        .detect(&boxed, &mut faces)
+        .map_err(|e| format!("NPU 人脸检测失败: {:?}", e))?;
+    remap_npu_faces(&mut faces, scale, pad_x, pad_y)?;
+    Ok(faces)
+}
+
+fn should_retry_liveness_on_cpu(error: &str) -> bool {
+    error.starts_with("设置活体模型输入失败") || error.starts_with("活体模型推理失败")
 }
 
 /// 多尺度人脸检测（issue #20）：YuNet 对「人脸占画面的绝对像素大小」敏感——近景大脸在大图上会
@@ -117,6 +257,7 @@ fn detect_faces(frame: &Mat, threshold: f32) -> Result<Mat, String> {
     let mut state = APP_STATE
         .lock()
         .map_err(|e| format!("获取 APP_STATE 失败: {}", e))?;
+    let uses_fixed_npu_detector = state.uses_fixed_npu_detector;
     let det = state
         .detector
         .as_mut()
@@ -125,15 +266,18 @@ fn detect_faces(frame: &Mat, threshold: f32) -> Result<Mat, String> {
     det.inner
         .set_score_threshold(threshold)
         .map_err(|e| format!("设置检测阈值失败: {:?}", e))?;
-    det.inner
-        .set_input_size(Size::new(frame.cols(), frame.rows()))
-        .map_err(|e| format!("设置输入尺寸失败: {:?}", e))?;
-
-    let mut faces = Mat::default();
-    det.inner
-        .detect(frame, &mut faces)
-        .map_err(|e| format!("人脸检测失败: {:?}", e))?;
-    Ok(faces)
+    if uses_fixed_npu_detector {
+        detect_faces_fixed_npu(&mut det.inner, frame)
+    } else {
+        det.inner
+            .set_input_size(Size::new(frame.cols(), frame.rows()))
+            .map_err(|e| format!("设置输入尺寸失败: {:?}", e))?;
+        let mut faces = Mat::default();
+        det.inner
+            .detect(frame, &mut faces)
+            .map_err(|e| format!("人脸检测失败: {:?}", e))?;
+        Ok(faces)
+    }
 }
 
 /// 在帧上绘制第一个检测框（绿色）
@@ -196,56 +340,46 @@ fn cosine_similarity(feat1: &Mat, feat2: &Mat) -> Result<f64, String> {
 
 /// 活体检测，返回真实人脸置信度（0.0 ~ 1.0）
 fn liveness_score(frame: &Mat, faces: &Mat) -> Result<f32, String> {
-    let x = (*faces.at_2d::<f32>(0, 0).map_err(|e| e.to_string())?).max(0.0) as i32;
-    let y = (*faces.at_2d::<f32>(0, 1).map_err(|e| e.to_string())?).max(0.0) as i32;
-    let w = (*faces.at_2d::<f32>(0, 2).map_err(|e| e.to_string())?).max(1.0) as i32;
-    let h = (*faces.at_2d::<f32>(0, 3).map_err(|e| e.to_string())?).max(1.0) as i32;
-    let w = w.min(frame.cols() - x);
-    let h = h.min(frame.rows() - y);
-    if w <= 0 || h <= 0 {
-        return Ok(0.0);
-    }
-
-    let face_crop = frame
-        .roi(Rect::new(x, y, w, h))
-        .map_err(|e| format!("裁剪人脸失败: {:?}", e))?;
-
-    let blob = opencv::dnn::blob_from_image(
-        &face_crop,
-        1.0 / 255.0,
-        Size::new(80, 80),
-        Scalar::new(0.5 * 255.0, 0.5 * 255.0, 0.5 * 255.0, 0.0),
-        true,
-        false,
-        opencv::core::CV_32F,
-    )
-    .map_err(|e| format!("构建 liveness blob 失败: {:?}", e))?;
-
     let mut state = APP_STATE
         .lock()
         .map_err(|e| format!("获取 APP_STATE 失败: {}", e))?;
-    let net = state
-        .liveness
-        .as_mut()
-        .ok_or_else(|| "活体模型未加载".to_string())?;
+    let should_retry_on_cpu = state.liveness_cpu_fallback;
+    let result = {
+        let net = state
+            .liveness
+            .as_mut()
+            .ok_or_else(|| "活体模型未加载".to_string())?;
+        score_face_liveness(&mut net.inner, frame, faces)
+    };
+    if result.is_ok() || !should_retry_on_cpu {
+        return result;
+    }
 
-    net.inner
-        .set_input(&blob, "", 1.0, Scalar::default())
-        .map_err(|e| format!("设置 liveness 输入失败: {:?}", e))?;
-
-    // forward_single 是返回 Mat 的变体（区别于填充 OutputArray 的 forward）
-    let output = net
-        .inner
-        .forward_single("")
-        .map_err(|e| format!("liveness 前向推理失败: {:?}", e))?;
-
-    let flat = output
-        .reshape(1, 1)
-        .map_err(|e| format!("reshape 失败: {:?}", e))?;
-    let cols = flat.cols();
-    let idx = if cols >= 2 { 1 } else { 0 };
-    let score = *flat.at::<f32>(idx).map_err(|e| e.to_string())?;
-    Ok(score.clamp(0.0, 1.0))
+    let first_error = result.err().unwrap_or_else(|| "未知错误".to_string());
+    if !should_retry_liveness_on_cpu(&first_error) {
+        return Err(first_error);
+    }
+    warn!(
+        "Intel NPU 模式下活体 OpenCL 首次推理失败，回退活体模型到 CPU: {}",
+        first_error
+    );
+    let retry = {
+        let net = state
+            .liveness
+            .as_mut()
+            .ok_or_else(|| "活体模型未加载".to_string())?;
+        net.inner
+            .set_preferable_backend(0)
+            .map_err(|e| format!("活体检测回退 CPU 后端失败: {:?}; 原错误: {}", e, first_error))?;
+        net.inner
+            .set_preferable_target(0)
+            .map_err(|e| format!("活体检测回退 CPU 目标失败: {:?}; 原错误: {}", e, first_error))?;
+        score_face_liveness(&mut net.inner, frame, faces)
+    };
+    // 配置成功后只尝试一次 CPU；若模型本身也失败，应把最终错误交给上层，
+    // 不要在后续每一帧重复切换后端。
+    state.liveness_cpu_fallback = false;
+    retry
 }
 
 // ─── 共用：从给定帧检测人脸并返回带框/原始 base64 ────────────────────────────
@@ -271,15 +405,20 @@ fn check_face_inner(
     let raw_b64 = mat_to_data_url(&frame).map_err(|e| CustomResult::error(Some(e), None))?;
 
     if faces.rows() == 0 {
+        // 返回降采样帧用于预览（此处 raw 仅作预览，无人脸不保存；issue #31 低端设备逐帧
+        // 全尺寸 JPEG+base64 是主要 CPU 消耗）
+        let preview_b64 =
+            mat_to_data_url_preview(&frame).map_err(|e| CustomResult::error(Some(e), None))?;
         return Ok(CustomResult::success(
             None,
-            Some(json!({ "display_base64": "未检测到人脸", "raw_base64": raw_b64 })),
+            Some(json!({ "display_base64": "未检测到人脸", "raw_base64": preview_b64 })),
         ));
     }
 
     let mut display = frame.clone();
     draw_face_box(&mut display, &faces).map_err(|e| CustomResult::error(Some(e), None))?;
-    let display_b64 = mat_to_data_url(&display).map_err(|e| CustomResult::error(Some(e), None))?;
+    let display_b64 =
+        mat_to_data_url_preview(&display).map_err(|e| CustomResult::error(Some(e), None))?;
 
     Ok(CustomResult::success(
         None,
@@ -290,8 +429,9 @@ fn check_face_inner(
 // ─── Tauri commands ───────────────────────────────────────────────────────────
 
 /// 从摄像头拍一帧并检测人脸
+/// async：逐帧检测 + JPEG 编码在低端设备上耗时较长，同步命令会阻塞主线程（issue #31）。
 #[tauri::command]
-pub fn check_face_from_camera(
+pub async fn check_face_from_camera(
     face_detection_threshold: f64,
     camera_rotation: i32,
 ) -> Result<CustomResult, CustomResult> {
@@ -320,8 +460,9 @@ pub fn check_face_from_camera(
 }
 
 /// 从图片文件加载并检测人脸
+/// async：多尺度检测在超大图上耗时明显，同步命令会阻塞主线程（issue #31）。
 #[tauri::command]
-pub fn check_face_from_img(
+pub async fn check_face_from_img(
     img_path: String,
     face_detection_threshold: f64,
 ) -> Result<CustomResult, CustomResult> {
@@ -344,8 +485,9 @@ pub fn check_face_from_img(
 
 /// 保存人脸注册信息（特征 .face 文件 + 图片 .faceimg 文件），返回 { file_name: uuid }
 /// reference_base64: 不含 data URI 前缀的 JPEG base64
+/// async：多尺度检测 + 特征提取耗时较长，同步命令会阻塞主线程（issue #31）。
 #[tauri::command]
-pub fn save_face_registration(
+pub async fn save_face_registration(
     _name: String,
     reference_base64: String,
     face_detection_threshold: f64,
@@ -447,8 +589,9 @@ fn get_ref_feature(reference_base64: &str, threshold: f32) -> Result<Mat, String
 
 /// 人脸验证（摄像头当前帧 vs 参考图），返回 { display_base64, success, score, message }
 /// reference_base64: 不含 data URI 前缀的 JPEG base64
+/// async：多帧活体采样 + 特征比对耗时较长，同步命令会阻塞主线程（issue #31）。
 #[tauri::command]
-pub fn verify_face(
+pub async fn verify_face(
     reference_base64: String,
     face_detection_threshold: f64,
     liveness_enabled: bool,
@@ -457,6 +600,11 @@ pub fn verify_face(
     camera_rotation: i32,
 ) -> Result<CustomResult, CustomResult> {
     let threshold = face_detection_threshold as f32;
+    let liveness_threshold = if liveness_threshold.is_finite() {
+        liveness_threshold.clamp(0.01, 0.99) as f32
+    } else {
+        0.5
+    };
 
     // 1. 从摄像头读取一帧
     let frame = {
@@ -487,8 +635,9 @@ pub fn verify_face(
         detect_faces(&frame, threshold).map_err(|e| CustomResult::error(Some(e), None))?;
 
     if cam_faces.rows() == 0 {
-        // 返回裸帧用于预览（不做参考图处理，节省时间）
-        let raw_b64 = mat_to_data_url(&frame).map_err(|e| CustomResult::error(Some(e), None))?;
+        // 返回降采样裸帧用于预览（不做参考图处理，节省时间；issue #31）
+        let raw_b64 =
+            mat_to_data_url_preview(&frame).map_err(|e| CustomResult::error(Some(e), None))?;
         return Ok(CustomResult::success(
             None,
             Some(json!({
@@ -500,22 +649,93 @@ pub fn verify_face(
         ));
     }
 
-    // 3. 活体检测（可选）
+    // 3. 无感活体检测：短时多帧 PAD + 中位数融合，不要求眨眼、转头或张嘴。
     if liveness_enabled {
-        let live_score =
-            liveness_score(&frame, &cam_faces).map_err(|e| CustomResult::error(Some(e), None))?;
-        if (live_score as f64) < liveness_threshold {
+        let mut live_scores: Vec<f32> = Vec::with_capacity(TARGET_LIVENESS_SAMPLES);
+        let mut last_liveness_error: Option<String> = None;
+
+        match liveness_score(&frame, &cam_faces) {
+            Ok(score) => live_scores.push(score),
+            Err(error) => last_liveness_error = Some(error),
+        }
+
+        // 首帧已经计入采样预算。最多再读 6 帧，目标拿到 5 个有效样本；
+        // 瞬时丢脸或自动曝光抖动不会立刻误拒。
+        for _ in 1..MAX_LIVENESS_CAPTURE_FRAMES {
+            if live_scores.len() >= TARGET_LIVENESS_SAMPLES {
+                break;
+            }
+            let mut extra_frame = Mat::default();
+            {
+                let mut state = APP_STATE
+                    .lock()
+                    .map_err(|e| {
+                        CustomResult::error(Some(format!("获取 APP_STATE 失败: {}", e)), None)
+                    })?;
+                let cam = state
+                    .camera
+                    .as_mut()
+                    .ok_or_else(|| CustomResult::error(Some("摄像头未打开".to_string()), None))?;
+                cam.inner
+                    .read(&mut extra_frame)
+                    .map_err(|e| CustomResult::error(Some(format!("读取额外帧失败: {:?}", e)), None))?;
+            }
+            if extra_frame.empty() {
+                continue;
+            }
+            let extra_frame = rotate_frame(&extra_frame, camera_rotation)
+                .map_err(|e| CustomResult::error(Some(e), None))?;
+
+            match detect_faces(&extra_frame, threshold) {
+                Ok(extra_faces) if extra_faces.rows() > 0 => {
+                    match liveness_score(&extra_frame, &extra_faces) {
+                        Ok(score) => live_scores.push(score),
+                        Err(error) => last_liveness_error = Some(error),
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => last_liveness_error = Some(error),
+            }
+        }
+
+        let fused_score = median_liveness_score(&live_scores).unwrap_or(0.0);
+        if live_scores.len() < MIN_LIVENESS_SAMPLES {
             let mut display = frame.clone();
             let _ = draw_face_box(&mut display, &cam_faces);
             let display_b64 =
-                mat_to_data_url(&display).map_err(|e| CustomResult::error(Some(e), None))?;
+                mat_to_data_url_preview(&display).map_err(|e| CustomResult::error(Some(e), None))?;
+            let reason = if let Some(error) = last_liveness_error {
+                format!("活体检测暂时不可用：{}", error)
+            } else {
+                "画面暂时不稳定，未收集到足够的活体样本".to_string()
+            };
             return Ok(CustomResult::success(
                 None,
                 Some(json!({
                     "display_base64": display_b64,
                     "success": false,
-                    "score": (live_score as f64 * 100.0).round() / 100.0,
-                    "message": "活体检测未通过"
+                    "score": (fused_score as f64 * 100.0).round() / 100.0,
+                    "message": reason
+                })),
+            ));
+        }
+
+        if fused_score < liveness_threshold {
+            let mut display = frame.clone();
+            let _ = draw_face_box(&mut display, &cam_faces);
+            let display_b64 =
+                mat_to_data_url_preview(&display).map_err(|e| CustomResult::error(Some(e), None))?;
+            return Ok(CustomResult::success(
+                None,
+                Some(json!({
+                    "display_base64": display_b64,
+                    "success": false,
+                    "score": (fused_score as f64 * 100.0).round() / 100.0,
+                    "message": format!(
+                        "活体检测未通过（真人置信度 {:.0}%，阈值 {:.0}%）",
+                        fused_score * 100.0,
+                        liveness_threshold * 100.0
+                    )
                 })),
             ));
         }
@@ -541,7 +761,8 @@ pub fn verify_face(
     // 7. 绘制结果并返回
     let mut display = frame.clone();
     let _ = draw_face_box(&mut display, &cam_faces);
-    let display_b64 = mat_to_data_url(&display).map_err(|e| CustomResult::error(Some(e), None))?;
+    let display_b64 =
+        mat_to_data_url_preview(&display).map_err(|e| CustomResult::error(Some(e), None))?;
 
     let success = score >= 0.5;
     let message = if success {
@@ -564,7 +785,40 @@ pub fn verify_face(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencv::core::CV_8UC3;
+    use opencv::core::{CV_32FC1, CV_8UC3};
+
+    #[test]
+    fn npu_letterbox_preserves_aspect_and_remaps_coordinates() {
+        let frame = Mat::new_rows_cols_with_default(480, 640, CV_8UC3, Scalar::all(0.0)).unwrap();
+        let (boxed, scale, pad_x, pad_y) = letterbox_for_npu(&frame).unwrap();
+        assert_eq!((boxed.cols(), boxed.rows()), (640, 640));
+        assert_eq!(scale, 1.0);
+        assert_eq!((pad_x, pad_y), (0, 80));
+
+        let mut faces =
+            Mat::new_rows_cols_with_default(1, 15, CV_32FC1, Scalar::all(0.0)).unwrap();
+        *faces.at_2d_mut::<f32>(0, 0).unwrap() = 100.0;
+        *faces.at_2d_mut::<f32>(0, 1).unwrap() = 180.0;
+        *faces.at_2d_mut::<f32>(0, 2).unwrap() = 200.0;
+        *faces.at_2d_mut::<f32>(0, 3).unwrap() = 300.0;
+        *faces.at_2d_mut::<f32>(0, 4).unwrap() = 120.0;
+        *faces.at_2d_mut::<f32>(0, 5).unwrap() = 200.0;
+        remap_npu_faces(&mut faces, scale, pad_x, pad_y).unwrap();
+        assert_eq!(*faces.at_2d::<f32>(0, 0).unwrap(), 100.0);
+        assert_eq!(*faces.at_2d::<f32>(0, 1).unwrap(), 100.0);
+        assert_eq!(*faces.at_2d::<f32>(0, 2).unwrap(), 200.0);
+        assert_eq!(*faces.at_2d::<f32>(0, 3).unwrap(), 300.0);
+        assert_eq!(*faces.at_2d::<f32>(0, 4).unwrap(), 120.0);
+        assert_eq!(*faces.at_2d::<f32>(0, 5).unwrap(), 120.0);
+    }
+
+    #[test]
+    fn liveness_cpu_retry_only_covers_backend_execution_errors() {
+        assert!(should_retry_liveness_on_cpu("设置活体模型输入失败: backend"));
+        assert!(should_retry_liveness_on_cpu("活体模型推理失败: plugin"));
+        assert!(!should_retry_liveness_on_cpu("活体检测收到无效人脸框"));
+        assert!(!should_retry_liveness_on_cpu("活体模型输出契约不匹配"));
+    }
 
     // #20a：按最长边缩放（多尺度用），4K→576 且保持宽高比
     #[test]

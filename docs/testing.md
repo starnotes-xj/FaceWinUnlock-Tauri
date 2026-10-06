@@ -236,6 +236,26 @@ After uninstall, FaceWinUnlock must disappear from “where to save a passkey.�
 - On Windows 10, core face unlock works and Passkey installation is skipped with a clear unsupported message.
 - On GPU/OpenCL, perform enrollment consistency and six lock/unlock cycles; switch to CPU if tuning, accuracy, or latency regresses.
 
+## Enrollment Consistency Verification (issue #30)
+
+1. In 首选项 → 录入一致性验证, enable 无感活体检测 (livenessEnabled).
+2. Enter 面容管理 → 添加新面容, capture a face, then start 一致性验证.
+3. Expected: the liveness check reports a meaningful 真人置信度 near 0.9–1.0 for a live face and verification succeeds. The bundled `face_liveness.onnx` is facenox 98.20 — preprocessing is 128×128 RGB normalized to [0,1], and the model returns [real, spoof] logits; the check must not use the old 80×80 mean-subtracted contract or read the spoof logit as the live score.
+4. Hold a printed photo or a static screen toward the camera. Expected: the check either reports 活体检测未通过 (score below threshold) or an insufficient-sample message; it must not authorize the photo as live.
+5. Toggle the threshold between 0.1 and 0.9. Expected: a higher threshold rejects more marginal frames; the score shown tracks the fused median of up to five samples (up to seven camera frames).
+6. On a mid/low-end device (i5 or weaker), keep the verification loop running for several minutes. Expected: the WebView stays responsive and CPU/GPU use is bounded (async commands + 320px preview downscale + OpenCV thread cap).
+
+## Intel NPU Backend (issue #32)
+
+Requires a machine with an Intel NPU (Meteor Lake/Arrow Lake/Lunar Lake+ or Core Ultra 200 series), the Intel NPU driver, and the packaged OpenVINO runtime (`openvino*.dll` under the install dir). The NPU path loads pre-converted OpenVINO IR (`.xml`/`.bin`) for YuNet/SFace because OpenCV 4.12's ONNX importer rejects their opset (`unsupported opset: extension`). YuNet IR is static `1,3,640,640`; the runtime letterboxes camera frames before detection and restores coordinates afterward. The liveness model stays on ONNX and uses OpenCL, or CPU when OpenCL is unavailable or its first OpenCL inference fails, because its dynamic batch dimension is not a reliable NPU path.
+
+1. Open 首选项 → 识别参数 → 推理后端 and choose **Intel NPU**.
+2. Open 面容管理 → 添加新面容. Expected: model load succeeds (no `Failed to read/deserialize model`); a fallback to CPU is only acceptable with a visible warning and a logged reason.
+3. Enroll a face and run 一致性验证. Expected: face detection and matching work; the log line `opencv models loaded with Intel NPU backend (2,9)` appears (Unlock) and the UI load log shows backend `2, target 9`.
+4. Lock with Win+L and unlock by face. Expected: recognition runs on the NPU and unlocks; the service must not silently fall back to CPU unless the driver/runtime is missing.
+5. Restart the Unlock service (or reboot) and repeat. Expected: NPU still loads the IR; no first-inference stall.
+6. On a machine without NPU support, selecting Intel NPU must fall back to CPU with a clear message, not hang or crash.
+
 ## Release Decision
 
 Promote the candidate only when:
