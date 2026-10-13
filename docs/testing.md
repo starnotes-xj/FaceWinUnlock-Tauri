@@ -89,6 +89,16 @@ Use an installed build with the existing face-recognition type set to `delay`.
 
 ## Enrollment And Camera Ownership
 
+### Camera Selection Hot-Switch And Fallback
+
+1. With two cameras listed, select camera A, save, lock with `Win+L`, and confirm face unlock works.
+2. Return to the desktop, select camera B, save, and lock again. The service should read the setting on `prepare`, release any capture opened for camera A, and prewarm camera B without restarting the service. Changing the setting during an active request takes effect on the next request.
+3. Make the selected camera unavailable (for example, disconnect the USB camera) while another listed camera remains available. On the next open/retry, Unlock should log that the configured camera produced no usable frames and identify the fallback index it opened.
+4. Confirm the saved `camera` option remains set to the user's choice. Restore camera A and trigger a later camera open; the configured camera should be attempted before any fallback.
+5. With every listed camera unavailable, face recognition must fail closed and leave Windows PIN available.
+
+The release gate is source/build verification plus these installed-device checks; camera enumeration order and actual frame delivery are machine-dependent.
+
 ### No Face Records
 
 1. Temporarily disable/delete all enrolled faces.
