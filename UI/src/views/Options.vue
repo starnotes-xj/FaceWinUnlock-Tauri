@@ -735,6 +735,9 @@
 											@click="refreshCameraList"
 										/>
 									</div>
+									<p class="row-help">
+										保存后会在下一次启动识别时应用；指定设备无法输出画面时，会临时尝试列表中标记可用的其他设备。
+									</p>
 								</el-form-item>
 								<el-form-item label="摄像头旋转">
 									<el-select v-model="config.cameraRotation" style="width: 100%">

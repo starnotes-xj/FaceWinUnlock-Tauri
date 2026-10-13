@@ -124,8 +124,9 @@ fn resolve_delay_policy(msg: &str, boot_cancelled: bool) -> u8 {
 }
 // 预热帧数恢复到 10（issue #94：NVIDIA Broadcast 等虚拟摄像头需足够预热帧才稳定输出，
 // 否则花屏/黑帧）。有了「摄像头预热（秒解锁）」后，这段预热多在锁屏预开阶段完成、不在解锁关键路径上。
-const CAMERA_WARMUP_MAX_FRAMES: usize = 10;
+const CAMERA_WARMUP_MAX_FRAMES: usize = 30;
 const CAMERA_WARMUP_READY_FRAMES: usize = 10;
+const MAX_CAMERA_FALLBACK_CANDIDATES: usize = 8;
 // 摄像头预热（秒解锁）空闲超时：锁屏预开摄像头后，这段时间内无 "run"（用户到场）则释放摄像头
 // 并抑制预热（关指示灯、省电），直到收到 run 或 release。
 const PREWARM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
@@ -1265,6 +1266,53 @@ fn configured_camera_index(db_path: &Path) -> i32 {
     load_camera_index(db_path).unwrap_or(0)
 }
 
+fn update_camera_index(current_index: &mut i32, selected_index: i32) -> Option<i32> {
+    if *current_index == selected_index {
+        return None;
+    }
+    let previous_index = *current_index;
+    *current_index = selected_index;
+    Some(previous_index)
+}
+
+fn parse_camera_fallback_indices(camera_list: &str, configured_index: i32) -> Vec<i32> {
+    let Ok(cameras) = serde_json::from_str::<Vec<serde_json::Value>>(camera_list) else {
+        return Vec::new();
+    };
+
+    let mut indices = Vec::new();
+    for camera in cameras {
+        if camera.get("is_valid").and_then(serde_json::Value::as_bool) != Some(true) {
+            continue;
+        }
+        let index = camera.get("capture_index").and_then(|value| match value {
+            serde_json::Value::String(value) => value.trim().parse::<i32>().ok(),
+            serde_json::Value::Number(value) => value.as_i64().and_then(|n| i32::try_from(n).ok()),
+            _ => None,
+        });
+        let Some(index) = index.filter(|index| *index >= 0 && *index != configured_index) else {
+            continue;
+        };
+        if !indices.contains(&index) {
+            indices.push(index);
+            if indices.len() >= MAX_CAMERA_FALLBACK_CANDIDATES {
+                break;
+            }
+        }
+    }
+    indices
+}
+
+fn load_camera_fallback_indices(db_path: &Path, configured_index: i32) -> Vec<i32> {
+    load_option_value(db_path, "cameraList")
+        .map(|camera_list| parse_camera_fallback_indices(&camera_list, configured_index))
+        .unwrap_or_default()
+}
+
+fn camera_warmup_complete(ready_frames: usize) -> bool {
+    ready_frames >= CAMERA_WARMUP_READY_FRAMES
+}
+
 fn warm_up_camera(cam: &mut VideoCapture, should_cancel: &impl Fn() -> bool) -> bool {
     let mut dummy = Mat::default();
     let mut ready_frames = 0usize;
@@ -1282,7 +1330,7 @@ fn warm_up_camera(cam: &mut VideoCapture, should_cancel: &impl Fn() -> bool) -> 
             ready_frames = 0;
         }
     }
-    !should_cancel()
+    camera_warmup_complete(ready_frames) && !should_cancel()
 }
 
 fn open_configured_camera(
@@ -1311,7 +1359,18 @@ fn open_configured_camera(
                 let _ = c.set(videoio::CAP_PROP_FRAME_WIDTH, 640.0);
                 let _ = c.set(videoio::CAP_PROP_FRAME_HEIGHT, 480.0);
                 if !warm_up_camera(&mut c, &should_cancel) {
-                    return None;
+                    if should_cancel() {
+                        return None;
+                    }
+                    log_service(
+                        exe_dir,
+                        "WARN",
+                        &format!(
+                            "camera backend {} opened index {} but produced no usable warm-up frames",
+                            backend_name, index
+                        ),
+                    );
+                    continue;
                 }
                 log_service(
                     exe_dir,
@@ -1338,6 +1397,89 @@ fn open_configured_camera(
         }
     }
     None
+}
+
+fn open_camera_with_fallback(
+    configured_index: i32,
+    db_path: &Path,
+    exe_dir: &Path,
+    should_cancel: impl Fn() -> bool,
+) -> Option<(VideoCapture, &'static str, i32)> {
+    if let Some((camera, backend)) =
+        open_configured_camera(configured_index, exe_dir, &should_cancel)
+    {
+        return Some((camera, backend, configured_index));
+    }
+
+    for fallback_index in load_camera_fallback_indices(db_path, configured_index) {
+        if should_cancel() {
+            return None;
+        }
+        log_service(
+            exe_dir,
+            "WARN",
+            &format!(
+                "configured camera index {} did not provide usable frames; trying fallback index {}",
+                configured_index, fallback_index
+            ),
+        );
+        if let Some((camera, backend)) =
+            open_configured_camera(fallback_index, exe_dir, &should_cancel)
+        {
+            log_service(
+                exe_dir,
+                "WARN",
+                &format!(
+                    "configured camera index {} unavailable; using fallback index {}",
+                    configured_index, fallback_index
+                ),
+            );
+            return Some((camera, backend, fallback_index));
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod camera_selection_tests {
+    use super::{camera_warmup_complete, parse_camera_fallback_indices, update_camera_index};
+
+    #[test]
+    fn camera_index_updates_only_when_the_saved_selection_changes() {
+        let mut current_index = 0;
+        assert_eq!(update_camera_index(&mut current_index, 0), None);
+        assert_eq!(update_camera_index(&mut current_index, 2), Some(0));
+        assert_eq!(current_index, 2);
+    }
+
+    #[test]
+    fn fallback_candidates_skip_configured_negative_and_duplicate_indices() {
+        let camera_list = r#"[
+            {"capture_index":"2","is_valid":true},
+            {"capture_index":1,"is_valid":false},
+            {"capture_index":"2","is_valid":true},
+            {"capture_index":"3","is_valid":true},
+            {"capture_index":"3","is_valid":true},
+            {"capture_index":"-1","is_valid":true},
+            {"capture_index":"bad","is_valid":true}
+        ]"#;
+
+        assert_eq!(parse_camera_fallback_indices(camera_list, 2), vec![3]);
+    }
+
+    #[test]
+    fn fallback_candidates_reject_malformed_camera_lists() {
+        assert!(parse_camera_fallback_indices("not json", 0).is_empty());
+        assert!(parse_camera_fallback_indices("{}", 0).is_empty());
+    }
+
+    #[test]
+    fn camera_must_produce_warmup_frames_before_it_is_accepted() {
+        assert!(!camera_warmup_complete(0));
+        assert!(!camera_warmup_complete(9));
+        assert!(camera_warmup_complete(10));
+    }
 }
 
 /// 旋转帧（rotation: 0/90/180/270）
@@ -1734,9 +1876,27 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             let face_recog_delay = load_face_recog_delay(&db_path);
             retry_delay = load_retry_delay(&db_path);
             not_face_delay = load_not_face_delay(&db_path);
+            let selected_camera_index = configured_camera_index(&db_path);
+            if let Some(previous_camera_index) =
+                update_camera_index(&mut camera_index, selected_camera_index)
+            {
+                let released_open_camera = cam.take().is_some();
+                prewarm_at = None;
+                last_failed_at = None;
+                state.consecutive_failures.store(0, Ordering::SeqCst);
+                log_service(
+                    &exe_dir,
+                    "INFO",
+                    &format!(
+                        "configured camera changed from {} to {} during prepare; previous capture {}",
+                        previous_camera_index,
+                        camera_index,
+                        if released_open_camera { "released" } else { "was closed" }
+                    ),
+                );
+            }
             if records.is_empty() || last_reload.elapsed() > Duration::from_secs(5) {
                 records = load_face_records(&exe_dir, &db_path);
-                camera_index = configured_camera_index(&db_path);
                 camera_rotation = load_camera_rotation(&db_path);
                 unlock_brightness = load_unlock_brightness(&db_path);
                 if let Some((ref mut m, ref mut inf)) = models.as_mut() {
@@ -1747,7 +1907,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                     requested_inference = load_inference_backend(&db_path);
                 }
                 last_reload = Instant::now();
-                log_service(&exe_dir, "INFO", &format!("prepared unlock config for camera {}", camera_index));
+                log_service(&exe_dir, "INFO", "prepared unlock config");
             }
             if face_recog_type == "delay" {
                 // broker 冷却期内不武装 delay，防止新进程的 "prepare" 重新激活
@@ -1962,8 +2122,9 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 && !state.power.is_camera_blocked()
             {
                 let open_power_generation = state.power.generation();
-                if let Some((c, backend_name)) = open_configured_camera(
+                if let Some((c, backend_name, opened_index)) = open_camera_with_fallback(
                     camera_index,
+                    &db_path,
                     &exe_dir,
                     || {
                         state.power.is_camera_blocked()
@@ -1980,6 +2141,14 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                     }
                     cam = Some(c);
                     prewarm_at = Some(Instant::now());
+                    log_service(
+                        &exe_dir,
+                        "INFO",
+                        &format!(
+                            "camera pre-warm selected index {} (configured {})",
+                            opened_index, camera_index
+                        ),
+                    );
                     log_service(
                         &exe_dir,
                         "INFO",
@@ -2029,6 +2198,24 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             }
         }
         state.recognition_active.store(true, Ordering::SeqCst);
+        let selected_camera_index = configured_camera_index(&db_path);
+        if let Some(previous_camera_index) =
+            update_camera_index(&mut camera_index, selected_camera_index)
+        {
+            let released_open_camera = cam.take().is_some();
+            last_failed_at = None;
+            state.consecutive_failures.store(0, Ordering::SeqCst);
+            log_service(
+                &exe_dir,
+                "INFO",
+                &format!(
+                    "configured camera changed from {} to {} at recognition start; previous capture {}",
+                    previous_camera_index,
+                    camera_index,
+                    if released_open_camera { "released" } else { "was closed" }
+                ),
+            );
+        }
         // 进入识别：用户已到场——清预热标记并解除抑制。本次识别复用锁屏预开的摄像头（line
         // "if cam.is_none()" 处 cam 已 Some → 跳过 2-3s 打开 → 秒识别）；下一轮锁屏仍可预热。
         prewarm_at = None;
@@ -2040,7 +2227,6 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         // 定期重新加载人脸记录和配置
         if records.is_empty() || last_reload.elapsed() > Duration::from_secs(30) {
             records = load_face_records(&exe_dir, &db_path);
-            camera_index = configured_camera_index(&db_path);
             camera_rotation = load_camera_rotation(&db_path);
             unlock_brightness = load_unlock_brightness(&db_path);
             retry_delay = load_retry_delay(&db_path);
@@ -2120,8 +2306,9 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 continue 'main;
             }
             let open_power_generation = state.power.generation();
-            if let Some((c, backend_name)) = open_configured_camera(
+            if let Some((c, backend_name, opened_index)) = open_camera_with_fallback(
                 camera_index,
+                &db_path,
                 &exe_dir,
                 || {
                     state.power.is_camera_blocked()
@@ -2142,7 +2329,10 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 log_service(
                     &exe_dir,
                     "INFO",
-                    &format!("camera opened at configured index {} via {}", camera_index, backend_name),
+                    &format!(
+                        "camera opened at index {} (configured {}) via {}",
+                        opened_index, camera_index, backend_name
+                    ),
                 );
             }
         }
@@ -2277,8 +2467,9 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 log_service(&exe_dir, "INFO", &format!("no face in round {}, retrying ({}/{})", no_face_retries, no_face_retries + 1, MAX_NO_FACE_RETRIES));
                 // 释放当前摄像头后重开，获取新数据流（take() 取出旧值并 drop，显式释放）
                 drop(cam.take());
-                if let Some((c, backend_name)) = open_configured_camera(
+                if let Some((c, backend_name, opened_index)) = open_camera_with_fallback(
                     camera_index,
+                    &db_path,
                     &exe_dir,
                     || {
                         state.power.is_camera_blocked()
@@ -2294,7 +2485,14 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                         break;
                     }
                     cam = Some(c);
-                    log_service(&exe_dir, "INFO", &format!("camera reopened for retry via {}", backend_name));
+                    log_service(
+                        &exe_dir,
+                        "INFO",
+                        &format!(
+                            "camera reopened for retry at index {} (configured {}) via {}",
+                            opened_index, camera_index, backend_name
+                        ),
+                    );
                 } else {
                     log_service(&exe_dir, "ERROR", "failed to reopen camera for retry");
                     break;
@@ -2690,8 +2888,9 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             continue;
         }
         let check_power_generation = state.power.generation();
-        if let Some((c, backend_name)) = open_configured_camera(
+        if let Some((c, backend_name, opened_index)) = open_camera_with_fallback(
             camera_index,
+            &db_path,
             &exe_dir,
             || {
                 state.power.is_camera_blocked()
@@ -2714,7 +2913,14 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
                 log_service(&exe_dir, "INFO", "auto-lock: camera open cancelled by power or unlock activity");
                 continue;
             }
-            log_service(&exe_dir, "INFO", &format!("auto-lock: camera opened via {}", backend_name));
+            log_service(
+                &exe_dir,
+                "INFO",
+                &format!(
+                    "auto-lock: camera opened at index {} (configured {}) via {}",
+                    opened_index, camera_index, backend_name
+                ),
+            );
             cam = Some(c);
         }
         let cap = match cam.as_mut() {
@@ -2806,8 +3012,9 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
             {
                 continue;
             }
-            if let Some((mut c2, backend2)) = open_configured_camera(
+            if let Some((mut c2, backend2, opened_index)) = open_camera_with_fallback(
                 camera_index,
+                &db_path,
                 &exe_dir,
                 || {
                     state.power.is_camera_blocked()
@@ -2818,7 +3025,14 @@ fn auto_lock_monitor(state: Arc<State>, exe_dir: PathBuf) {
                             != INVALID_HANDLE_VALUE.0 as isize
                 },
             ) {
-                log_service(&exe_dir, "INFO", &format!("auto-lock: retry camera opened via {}", backend2));
+                log_service(
+                    &exe_dir,
+                    "INFO",
+                    &format!(
+                        "auto-lock: retry camera opened at index {} (configured {}) via {}",
+                        opened_index, camera_index, backend2
+                    ),
+                );
                 let retry_deadline = Instant::now() + Duration::from_secs(8);
                 let mut no_face_retry: Option<Instant> = None;
                 while Instant::now() < retry_deadline {

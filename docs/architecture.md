@@ -68,6 +68,8 @@ The Active check is repeated in `SetUsageScenario`, `Advise`, before pipe connec
 ## Camera Lifecycle
 
 - Lock-screen prewarm opens the configured camera before the first `run` where possible.
+- Unlock reads the saved camera selection on a recognition `prepare` event and again when each recognition request starts. A changed selection closes any old prewarmed capture before opening the selected camera; an in-flight request continues on its current camera.
+- A camera is considered usable only after warm-up frames arrive. If the configured camera cannot open or produce frames, Unlock tries other indices marked valid in the saved `cameraList`; this fallback is temporary and does not rewrite the user's selected camera. Each later open tries the configured camera first again.
 - Boot-delay mode may start recognition without user input, but only after the primary session policy is explicitly marked `prepare:boot` and the credential client is connected.
 - Boot-delay mode is bounded to three automatic attempts; exhaustion arms the existing mouse/keyboard path and does not inject credentials.
 - No enabled face records means no prewarm.
