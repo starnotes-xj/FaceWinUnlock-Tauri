@@ -284,7 +284,7 @@ Promote the candidate only when:
 2. With the main window open, drag it, switch to another window and back, and click the taskbar entry. Expected: ordinary focus changes do not return to the login page.
 3. Click the tray icon and tray-menu Show action while the main window is visible; each explicit show action should return to the login page. Close the main window to the tray and repeat both actions. Repeat using a second non-silent process launch.
 4. Register an enabled face and test app face login. Expected: only that local enabled template can match, one-face frames must pass the passive liveness threshold, and a different face, multiple faces, missing camera, or failed liveness does not enter the app.
-5. Disable liveness in enrollment settings and repeat app face login. Expected: app login still performs liveness detection. Then test password login as the fallback.
+5. Disable liveness in enrollment settings and repeat app face login. Expected: app login skips the liveness gate and verifies by template match only, matching the unlock policy. Re-enable liveness and confirm app login enforces the configured threshold (floor 0.30). Then test password login as the fallback.
 6. Select `onlyOpenApp` and a time-limited login method. Expected: the former asks at startup but not on focus; the latter asks again after expiry. Confirm camera ownership is returned to Unlock after every app-face attempt.
 
 The face-login route uses the local passive liveness model and still requires installed Windows camera testing; unit tests and the Vue build do not establish spoof resistance or hardware acceptance.

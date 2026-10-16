@@ -81,10 +81,22 @@ fn cosine_similarity_values(left: &[f32], right: &[f32]) -> Option<f64> {
     Some(dot / (left_norm.sqrt() * right_norm.sqrt()))
 }
 
-fn load_app_login_face_templates() -> Result<(Vec<AppLoginFaceTemplate>, f32), String> {
+fn load_app_login_face_templates() -> Result<(Vec<AppLoginFaceTemplate>, bool, f32), String> {
     let database_path = ROOT_DIR.join("database.db");
     let connection =
         Connection::open(&database_path).map_err(|e| format!("打开本地人脸数据库失败: {e}"))?;
+
+    // 应用登录的活体策略与解锁一致：跟随 livenessEnabled 选项；仅当启用时
+    // 才按配置阈值（下限 0.30）强制活体检测。用户明确要求关闭后不得再拦。
+    let liveness_enabled = connection
+        .query_row(
+            "SELECT val FROM options WHERE key = 'livenessEnabled'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .map(|value| matches!(value.trim(), "1" | "true" | "True"))
+        .unwrap_or(false);
 
     let liveness_threshold = connection
         .query_row(
@@ -140,7 +152,7 @@ fn load_app_login_face_templates() -> Result<(Vec<AppLoginFaceTemplate>, f32), S
         });
     }
 
-    Ok((templates, liveness_threshold))
+    Ok((templates, liveness_enabled, liveness_threshold))
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
@@ -683,11 +695,12 @@ pub fn verify_face(
 }
 
 /// Verify the current user for the management app's own login screen.
-/// This deliberately uses only enabled local feature files and always runs passive liveness,
-/// regardless of the optional liveness setting used by enrollment preview.
+/// This deliberately uses only enabled local feature files. Liveness follows the
+/// same `livenessEnabled` option as unlock verification: enforced with the
+/// configured threshold (floored at 0.30) when enabled, skipped when disabled.
 #[tauri::command]
 pub fn verify_app_login_face(camera_rotation: i32) -> Result<CustomResult, CustomResult> {
-    let (templates, liveness_threshold) =
+    let (templates, liveness_enabled, liveness_threshold) =
         load_app_login_face_templates().map_err(|e| CustomResult::error(Some(e), None))?;
     if templates.is_empty() {
         return Ok(CustomResult::success(
@@ -738,13 +751,15 @@ pub fn verify_app_login_face(camera_rotation: i32) -> Result<CustomResult, Custo
         ));
     }
 
-    let live_score =
-        liveness_score(&frame, &faces).map_err(|e| CustomResult::error(Some(e), None))?;
-    if live_score < liveness_threshold {
-        return Ok(CustomResult::success(
-            None,
-            Some(json!({"success": false, "message": "活体检测未通过，请看向摄像头后重试"})),
-        ));
+    if liveness_enabled {
+        let live_score =
+            liveness_score(&frame, &faces).map_err(|e| CustomResult::error(Some(e), None))?;
+        if live_score < liveness_threshold {
+            return Ok(CustomResult::success(
+                None,
+                Some(json!({"success": false, "message": "活体检测未通过，请看向摄像头后重试"})),
+            ));
+        }
     }
 
     let face_row = faces
