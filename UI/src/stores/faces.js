@@ -1,196 +1,132 @@
 import { defineStore } from 'pinia';
+import { invoke } from '@tauri-apps/api/core';
 import { select, insert, update, deleteData } from '../utils/sqlite';
-import { formatObjectString, getCurrentDateTime, removeFace } from '../utils/function'
-import { info, error as errorLog, warn } from '@tauri-apps/plugin-log';
+import { formatObjectString, getCurrentDateTime, removeFace } from '../utils/function';
+import { error as errorLog, warn } from '@tauri-apps/plugin-log';
 
 export const useFacesStore = defineStore('faces', {
     actions: {
-        init(){
-            return new Promise((resolve, reject) => {
-                select('faces', ['*']).then((result)=>{
-                    // 先清空再填充，确保重复调用 init() 不会重复添加同一面容。
-                    this.faceList = [];
-                    for(let i = 0; i < result.rows.length; i++){
-                        const item = result.rows[i];
-                        this.faceList.push({
-                            id: item.id,
-                            user_name: item.user_name,
-                            user_pwd: item.user_pwd,
-                            account_type: item.account_type,
-                            face_token: item.face_token,
-                            json_data: JSON.parse(item.json_data),
-                            createTime: item.createTime
-                        });
-                    }
-                    resolve();
-                }).catch((error)=>{
-                    errorLog(formatObjectString("面容Store初始化失败：", error));
-                    reject(error);
-                })
-            })
+        async init() {
+            try {
+                const result = await select('faces', [
+                    'id', 'user_name', 'account_type', 'face_token', 'json_data', 'createTime'
+                ]);
+                this.faceList = result.rows.map((item) => ({
+                    id: item.id,
+                    user_name: item.user_name,
+                    account_type: item.account_type,
+                    face_token: item.face_token,
+                    json_data: JSON.parse(item.json_data),
+                    createTime: item.createTime
+                }));
+            } catch (error) {
+                errorLog(formatObjectString('初始化Store失败：', error));
+                throw error;
+            }
         },
-        /**
-         * 添加面容
-         * @param {Object} data 面容数据
-         * @return {Promise} 
-         */
-        addFace(data){
-            return new Promise((resolve, reject) => {
-                insert("faces", 
-                    ["user_name", "user_pwd", "account_type", "face_token", "json_data"],
-                    [data.user_name, data.user_pwd, data.account_type, data.face_token, data.json_data]
-                ).then((result)=>{
-                    this.addFaceToList({
-                        id: result.lastId,
-                        createTime: getCurrentDateTime(),
-                        ...data
-                    });
-                    resolve();
-                }).catch((error)=>{
-                    const info = formatObjectString("添加面容到数据库失败：", error);
-                    errorLog(info);
-                    reject(error);
-                })
-            });
+
+        async addFace(data) {
+            try {
+                const protectedPassword = await invoke('protect_credential', { password: data.user_pwd });
+                const result = await insert(
+                    'faces',
+                    ['user_name', 'user_pwd', 'account_type', 'face_token', 'json_data'],
+                    [data.user_name, protectedPassword, data.account_type, data.face_token, data.json_data]
+                );
+                this.addFaceToList({
+                    id: result.lastId,
+                    createTime: getCurrentDateTime(),
+                    ...data
+                });
+            } catch (error) {
+                errorLog(formatObjectString('添加数据到数据库失败：', error));
+                throw error;
+            }
         },
-        /**
-         * 修改面容信息
-         * @param {Object} data 面容数据
-         * @param {Number} id 面容ID
-         * @returns {Promise}
-         */
-        editFace(data, id){
-            return new Promise((resolve, reject) => {
-                const faceIndex = this.faceList.findIndex(item => item.id == id);
-                if(faceIndex == -1){
-                    const info = "未找到id: " + id + " 的面容信息";
-                    warn(info);
-                    reject(info);
-                    return;
-                }
 
-                update("faces", 
-                    {
-                        user_name: data.user_name, user_pwd: data.user_pwd, 
-                        account_type: data.account_type, face_token: data.face_token, 
-                        json_data: data.json_data
-                    },
-                    "id = ?",
-                    [id]
-                ).then(()=>{
-                    // 如果解析失败，直接返回失败，后续操作会throw error
-                    this.faceList[faceIndex].json_data = JSON.parse(data.json_data);
-
-                    this.faceList[faceIndex].user_name = data.user_name;
-                    this.faceList[faceIndex].user_pwd = data.user_pwd;
-                    this.faceList[faceIndex].account_type = data.account_type;
-                    this.faceList[faceIndex].face_token = data.face_token;
-                    resolve();
-                }).catch((error)=>{
-                    const info = formatObjectString("修改面容到数据库失败：", error);
-                    errorLog(info);
-                    reject(error);
-                })
-            })
-        },
-        /**
-         * 修改面容JSON信息
-         * @param {String} json_data 面容json信息
-         * @param {Number} id 面容ID
-         * @returns {Promise}
-         */
-        editFaceJsonData(json_data, id){
-            return new Promise((resolve, reject) => {
-                const faceIndex = this.faceList.findIndex(item => item.id == id);
-                if(faceIndex == -1){
-                    const info = "未找到id: " + id + " 的面容信息";
-                    warn(info);
-                    reject(info);
-                    return;
-                }
-
-                update("faces", {json_data: json_data}, "id = ?", [id]).then(()=>{
-                    this.faceList[faceIndex].json_data = JSON.parse(json_data);
-                    resolve();
-                }).catch((error)=>{
-                    const info = formatObjectString("修改面容JSON数据到数据库失败：", error);
-                    errorLog(info);
-                    reject(error);
-                })
-            })
-        },
-        /**
-         * 传入面容ID 获取面容信息
-         * @param {Number} id 面容id
-         * @returns {Object} 面容信息
-         */
-        getFaceById(id){
-            let result = null;
-
-            let item = this.faceList.find(item => item.id == id);
-            if(item){
-                result = {...item};
+        async editFace(data, id) {
+            const faceIndex = this.faceList.findIndex(item => item.id == id);
+            if (faceIndex === -1) {
+                const message = `未找到id: ${id} 的面容信息`;
+                warn(message);
+                throw message;
             }
 
-            return result;
-        },
-        /**
-         * 传入面容ID，返回面容别名
-         * @param {Number} id 面容id
-         * @returns {String} 面容别名
-         */
-        getFaceAliasById(id){
-            let result = this.getFaceById(id);
-            if(result){
-                return result.json_data.alias;
+            try {
+                const changes = {
+                    user_name: data.user_name,
+                    account_type: data.account_type,
+                    face_token: data.face_token,
+                    json_data: data.json_data
+                };
+                if (data.update_password) {
+                    changes.user_pwd = await invoke('protect_credential', { password: data.user_pwd });
+                }
+                await update('faces', changes, 'id = ?', [id]);
+                this.faceList[faceIndex].json_data = JSON.parse(data.json_data);
+                this.faceList[faceIndex].user_name = data.user_name;
+                this.faceList[faceIndex].account_type = data.account_type;
+                this.faceList[faceIndex].face_token = data.face_token;
+            } catch (error) {
+                errorLog(formatObjectString('修改数据到数据库失败：', error));
+                throw error;
             }
-            return '无';
         },
-        /**
-         * 添加面容信息到本地列表
-         * @param {Object} data 面容数据（与数据库数据一致）
-         */
-        addFaceToList(data){
+
+        async editFaceJsonData(json_data, id) {
+            const faceIndex = this.faceList.findIndex(item => item.id == id);
+            if (faceIndex === -1) {
+                const message = `未找到id: ${id} 的面容信息`;
+                warn(message);
+                throw message;
+            }
+            try {
+                await update('faces', { json_data }, 'id = ?', [id]);
+                this.faceList[faceIndex].json_data = JSON.parse(json_data);
+            } catch (error) {
+                errorLog(formatObjectString('修改面容JSON数据失败：', error));
+                throw error;
+            }
+        },
+
+        getFaceById(id) {
+            const item = this.faceList.find(item => item.id == id);
+            return item ? { ...item } : null;
+        },
+
+        getFaceAliasById(id) {
+            return this.getFaceById(id)?.json_data.alias ?? '未知';
+        },
+
+        addFaceToList(data) {
             this.faceList.push({
                 id: data.id,
                 user_name: data.user_name,
-                user_pwd: data.user_pwd,
                 account_type: data.account_type,
                 face_token: data.face_token,
                 json_data: JSON.parse(data.json_data),
                 createTime: data.createTime
             });
         },
-        /**
-         * 删除一条面容数据
-         * @param {Number} id 面容ID 
-         */
-        deleteFace(id){
-            return new Promise((resolve, reject) => {
-                const faceIndex = this.faceList.findIndex(item => item.id == id);
-                if(faceIndex == -1){
-                    const info = "未找到id: " + id + " 的面容信息";
-                    warn(info);
-                    reject(info);
-                    return;
-                }
 
-                deleteData("faces", "id = ?", [id]).then(()=>{
-                    // 面容特征和图片删除失败不影响系统运行
-                    removeFace(this.faceList[faceIndex].face_token);
-                    this.faceList.splice(faceIndex, 1);
-                    resolve();
-                }).catch((error)=>{
-                    const info = formatObjectString("从数据库删除面容失败：", error);
-                    errorLog(info);
-                    reject(error);
-                })
-            })
+        async deleteFace(id) {
+            const faceIndex = this.faceList.findIndex(item => item.id == id);
+            if (faceIndex === -1) {
+                const message = `未找到id: ${id} 的面容信息`;
+                warn(message);
+                throw message;
+            }
+            try {
+                await deleteData('faces', 'id = ?', [id]);
+                removeFace(this.faceList[faceIndex].face_token);
+                this.faceList.splice(faceIndex, 1);
+            } catch (error) {
+                errorLog(formatObjectString('从数据库删除面容失败：', error));
+                throw error;
+            }
         }
     },
     state() {
-        return{
-            faceList: []
-        }
-    } 
+        return { faceList: [] };
+    }
 });

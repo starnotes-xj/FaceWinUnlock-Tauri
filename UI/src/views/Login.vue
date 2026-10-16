@@ -1,22 +1,36 @@
 <script setup lang="ts">
-import { ref, reactive } from 'vue';
+import { ref, reactive, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { useOptionsStore } from "../stores/options";
+import { useFacesStore } from "../stores/faces";
 import { hashMessage } from "../utils/function";
+import { invoke } from '@tauri-apps/api/core';
 
 const router = useRouter();
 const optionsStore = useOptionsStore();
+const facesStore = useFacesStore();
 
 const version = ref(localStorage.getItem("version") || 'unknown');
 const isLoading = ref(false);
 const errorMessage = ref('');
+const faceLoginAvailable = computed(() =>
+  optionsStore.getOptionValueByKey('loginEnabled') === 'true' &&
+  facesStore.faceList.some(face => face.json_data?.lock !== true)
+);
+const inferenceBackendMap: Record<string, { backend: number; target: number }> = {
+  cpu: { backend: 0, target: 0 },
+  opencl: { backend: 3, target: 1 },
+  opencl_fp16: { backend: 3, target: 2 },
+  intel_npu: { backend: 2, target: 9 },
+};
 
 const loginForm = reactive({
   password: ''
 });
 
 const handleLogin = async () => {
+  if (isLoading.value) return;
   if (!loginForm.password) {
     errorMessage.value = '请输入密码';
     return;
@@ -25,9 +39,7 @@ const handleLogin = async () => {
   isLoading.value = true;
   try {
     if (optionsStore.getOptionValueByKey('loginPassword') === await hashMessage(loginForm.password)) {
-      ElMessage.success('登录成功');
-      localStorage.setItem('lastLoginTime', Date.now().toString());
-      router.replace('/');
+      completeLogin('登录成功');
     } else {
       throw '密码错误，请重试';
     }
@@ -36,6 +48,52 @@ const handleLogin = async () => {
   } finally {
     isLoading.value = false;
   }
+};
+
+const completeLogin = (message: string) => {
+  ElMessage.success(message);
+  localStorage.setItem('lastLoginTime', Date.now().toString());
+  router.replace('/');
+};
+
+const handleFaceLogin = async () => {
+  if (isLoading.value) return;
+  errorMessage.value = '';
+  isLoading.value = true;
+  let cameraNeedsRelease = false;
+  let authenticated = false;
+  try {
+    await invoke('prepare_camera_for_ui');
+    cameraNeedsRelease = true;
+    let cameraIndex = Number.parseInt(optionsStore.getOptionValueByKey('camera'), 10);
+    if (Number.isNaN(cameraIndex)) cameraIndex = 0;
+    const backendKey = optionsStore.getOptionValueByKey('inferenceBackend') || 'cpu';
+    const { backend, target } = inferenceBackendMap[backendKey] ?? inferenceBackendMap.cpu;
+    const [modelResult, cameraResult] = await Promise.allSettled([
+      invoke('load_opencv_model', { backend, target }),
+      invoke('open_camera', { backend: null, camearIndex: cameraIndex }),
+    ]);
+    if (modelResult.status === 'rejected') throw modelResult.reason;
+    if (cameraResult.status === 'rejected') throw cameraResult.reason;
+    await new Promise(resolve => window.setTimeout(resolve, 400));
+
+    const cameraRotation = Number.parseInt(optionsStore.getOptionValueByKey('cameraRotation'), 10) || 0;
+    const result = await invoke('verify_app_login_face', { cameraRotation });
+    if (result?.data?.success !== true) {
+      throw result?.data?.message || '人脸验证失败，请重试或使用密码登录';
+    }
+    authenticated = true;
+  } catch (error) {
+    errorMessage.value = typeof error === 'string'
+      ? error
+      : error instanceof Error ? error.message : '人脸解锁失败，请使用密码登录';
+  } finally {
+    if (cameraNeedsRelease) {
+      await invoke('stop_camera').catch(error => console.warn('关闭应用登录摄像头失败', error));
+    }
+    isLoading.value = false;
+  }
+  if (authenticated) completeLogin('人脸解锁成功');
 };
 
 const handleKeyDown = (e: KeyboardEvent) => {
@@ -59,7 +117,21 @@ const handleKeyDown = (e: KeyboardEvent) => {
       <p class="login-sub">FaceWinUnlock · 墨韵星枢</p>
 
       <div class="login-form">
-        <p class="form-label">请输入应用登录密码</p>
+        <p class="form-label">应用已锁定，请验证身份</p>
+
+        <el-button
+          v-if="faceLoginAvailable"
+          type="primary"
+          size="large"
+          :loading="isLoading"
+          @click="handleFaceLogin"
+          class="login-btn"
+        >
+          人脸解锁
+        </el-button>
+
+        <p v-if="faceLoginAvailable" class="face-login-hint">请正对摄像头；活体检测通过后即可进入</p>
+        <p class="form-label">{{ faceLoginAvailable ? '或输入应用登录密码' : '请输入应用登录密码' }}</p>
 
         <el-input
           v-model="loginForm.password"
@@ -164,6 +236,13 @@ const handleKeyDown = (e: KeyboardEvent) => {
 
 .error-message {
   text-align: center;
+}
+
+.face-login-hint {
+  font-size: 12px;
+  color: var(--v7-text-dim);
+  text-align: center;
+  margin: -8px 0 0;
 }
 
 .login-btn {

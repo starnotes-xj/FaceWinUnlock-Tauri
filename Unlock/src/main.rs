@@ -15,6 +15,12 @@
 mod passkey;
 mod power_events;
 mod webauthn_activity;
+// The shared module also contains the UI-only credential writer.
+#[allow(dead_code)]
+#[path = "../../Common/credential_protection.rs"]
+mod credential_protection;
+#[path = "../../Common/zeroization.rs"]
+mod zeroization;
 
 use std::{
     ffi::OsStr,
@@ -113,7 +119,7 @@ fn resolve_delay_policy(msg: &str, boot_cancelled: bool) -> u8 {
         } else {
             DELAY_POLICY_BOOT
         }
-    } else if msg.contains("prepare:manual") {
+    } else if msg.contains("prepare:manual") || msg.contains("prepare:broker:") {
         DELAY_POLICY_MANUAL
     } else if msg.contains("prepare:legacy") {
         DELAY_POLICY_LEGACY
@@ -149,6 +155,9 @@ struct State {
     exit_cv:          Condvar,
     prepare_requested: AtomicBool,
     run_requested:    AtomicBool,
+    /// Set only by the browser broker's explicit command-link trigger.
+    broker_run_requested: AtomicBool,
+    active_broker_session_id: AtomicU64,
     /// `run_requested` 所属的电源代际。恢复后的新 run 可保留；挂起前遗留的 run 必须丢弃。
     run_power_generation: AtomicU64,
     recognition_active: AtomicBool,
@@ -163,7 +172,7 @@ struct State {
     dll_creds_pipe:   AtomicIsize,
     /// 人脸匹配到的 (username, password, domain)。所有场景统一只交密码（Approach B）。
     /// 写入后通过 matched_creds_cv 唤醒等待凭据的 DLL 连接线程。
-    matched_creds:    Mutex<Option<(String, String, String)>>,
+    matched_creds:    Mutex<Option<MatchedCredential>>,
     /// Condvar：face_recognition_loop 写入凭据后通知等待线程，消除 30ms 轮询。
     matched_creds_cv: Condvar,
     /// 上一次用户活跃的时间戳（Unix 秒），用于自动锁屏
@@ -205,6 +214,8 @@ struct State {
     power: Arc<power_events::PowerLifecycle>,
     /// 浏览器 passkey assertion 的一次性人脸授权门。
     passkey_face_gate: Arc<passkey::FaceAuthorizationGate>,
+    passkey_route_mutex: Option<Arc<passkey::RouteMutex>>,
+    passkey_route_active: AtomicBool,
     /// broker_guard_release 设置的预热抑制——必须在 release 或成功识别时清除，
     /// 不能由非 gate 路径自动清除（否则 passkey 场景下摄像头会被错误打开）。
     broker_guard_prewarm_blocked: AtomicBool,
@@ -213,12 +224,25 @@ struct State {
 impl State {
     fn new(exe_dir: PathBuf) -> Arc<Self> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let passkey_route_mutex = match passkey::RouteMutex::create() {
+            Ok(mutex) => Some(Arc::new(mutex)),
+            Err(error) => {
+                log_service(
+                    &exe_dir,
+                    "ERROR",
+                    &format!("Passkey/CredUI route arbitration unavailable: {error}"),
+                );
+                None
+            }
+        };
         Arc::new(Self {
             exe_dir,
             should_exit:     AtomicBool::new(false),
             exit_cv:         Condvar::new(),
             prepare_requested: AtomicBool::new(false),
             run_requested:   AtomicBool::new(false),
+            broker_run_requested: AtomicBool::new(false),
+            active_broker_session_id: AtomicU64::new(0),
             run_power_generation: AtomicU64::new(0),
             recognition_active: AtomicBool::new(false),
             release_requested: AtomicBool::new(false),
@@ -239,6 +263,8 @@ impl State {
             camera_yield_until: AtomicI64::new(0),
             power: Arc::new(power_events::PowerLifecycle::default()),
             passkey_face_gate: Arc::new(passkey::FaceAuthorizationGate::default()),
+            passkey_route_mutex,
+            passkey_route_active: AtomicBool::new(false),
             broker_guard_prewarm_blocked: AtomicBool::new(false),
         })
     }
@@ -246,7 +272,6 @@ impl State {
 
 // ─── Face record ──────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
 struct FaceRecord {
     id:         i64,
     user_name:  String,
@@ -254,6 +279,61 @@ struct FaceRecord {
     feature_bytes: Vec<u8>,
     threshold:  i64,   // 0~100，对应余弦相似度
     domain:     String,
+}
+
+fn parse_broker_session_id(message: &str, prefix: &str) -> Option<u64> {
+    message
+        .trim()
+        .strip_prefix(prefix)?
+        .parse::<u64>()
+        .ok()
+        .filter(|session_id| *session_id != 0)
+}
+
+fn parse_run_command(message: &str, active_broker_session_id: u64) -> Option<bool> {
+    match message.trim() {
+        "run" => Some(false),
+        command => {
+            let session_id = parse_broker_session_id(command, "run:broker:")?;
+            (session_id == active_broker_session_id).then_some(true)
+        }
+    }
+}
+
+fn is_current_broker_run(message: &str, active_broker_session_id: u64) -> bool {
+    parse_broker_session_id(message, "run:broker:") == Some(active_broker_session_id)
+}
+
+fn clear_matching_broker_session(active_session_id: &AtomicU64, requested_session_id: u64) -> bool {
+    active_session_id
+        .compare_exchange(requested_session_id, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+fn broker_passkey_route_blocked(state: &State, browser_broker_run: bool) -> bool {
+    browser_broker_run
+        && (state.passkey_route_active.load(Ordering::SeqCst)
+            || state.passkey_face_gate.pending_request_id().is_some())
+}
+
+impl Drop for FaceRecord {
+    fn drop(&mut self) {
+        zeroization::zeroize_string(&mut self.user_pwd);
+    }
+}
+
+struct MatchedCredential {
+    username: String,
+    password: String,
+    domain: String,
+}
+
+impl Drop for MatchedCredential {
+    fn drop(&mut self) {
+        zeroization::zeroize_string(&mut self.username);
+        zeroization::zeroize_string(&mut self.password);
+        zeroization::zeroize_string(&mut self.domain);
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -497,13 +577,30 @@ fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
                     continue;
                 }
                 if control_buf.contains("run") {
+                    let active_broker_session_id =
+                        state.active_broker_session_id.load(Ordering::SeqCst);
+                    let current_broker_run =
+                        is_current_broker_run(control_buf.trim(), active_broker_session_id);
+                    let broker_run = match parse_run_command(
+                        control_buf.trim(),
+                        active_broker_session_id,
+                    ) {
+                        Some(is_broker) => is_broker,
+                        None => {
+                            log_service(&state.exe_dir, "WARN", "stale or invalid browser-broker run rejected");
+                            control_buf.clear();
+                            continue;
+                        }
+                    };
                     // broker 冷却期内拒绝 "run"：防止新 CredUIBroker 进程
                     // 重新发送 "run" 激活摄像头
                     let now_ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as i64;
-                    if now_ms < state.after_release_cooldown_until.load(Ordering::SeqCst) {
+                    if now_ms < state.after_release_cooldown_until.load(Ordering::SeqCst)
+                        && !current_broker_run
+                    {
                         log_service(&state.exe_dir, "INFO", "run rejected: broker release cooldown active");
                         control_buf.clear();
                         continue;
@@ -515,6 +612,7 @@ fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
                         state
                             .run_power_generation
                             .store(state.power.generation(), Ordering::SeqCst);
+                        state.broker_run_requested.store(broker_run, Ordering::SeqCst);
                         state.run_requested.store(true, Ordering::SeqCst);
                         state.dll_run_received.store(true, Ordering::SeqCst);
                         if state.delay_policy.load(Ordering::SeqCst) == DELAY_POLICY_BOOT {
@@ -531,6 +629,13 @@ fn handle_control_client(pipe: HANDLE, state: Arc<State>) {
                     }
                     control_buf.clear();
                 } else if control_buf.contains("prepare") {
+                    if let Some(session_id) = parse_broker_session_id(
+                        control_buf.trim(),
+                        "prepare:broker:",
+                    ) {
+                        state.active_broker_session_id.store(session_id, Ordering::SeqCst);
+                        log_service(&state.exe_dir, "INFO", "browser CredUI session prepared; camera waits for explicit command-link click");
+                    }
                     let policy = resolve_delay_policy(
                         &control_buf,
                         state.delay_boot_cancelled.load(Ordering::SeqCst),
@@ -652,27 +757,63 @@ fn run_unlock_server(state: Arc<State>) {
 }
 
 fn handle_passkey_face_client(pipe: HANDLE, state: Arc<State>) {
+    let mut route_lock = None;
     let response = match pipe_read(pipe) {
         Ok(data) if String::from_utf8_lossy(&data).trim() == "authorize" => {
-            log_service(
-                &state.exe_dir,
-                "INFO",
-                "passkey plugin requested face authorization",
-            );
-            match state
-                .passkey_face_gate
-                .request_and_wait(Duration::from_secs(60))
-            {
-                passkey::FaceAuthorizationResult::Authorized => b"AUTHORIZED".as_slice(),
-                passkey::FaceAuthorizationResult::Rejected => b"REJECTED".as_slice(),
-                passkey::FaceAuthorizationResult::TimedOut => b"TIMEOUT".as_slice(),
+            let Some(mutex) = state.passkey_route_mutex.as_ref() else {
+                log_service(
+                    &state.exe_dir,
+                    "ERROR",
+                    "passkey face authorization rejected: route mutex unavailable",
+                );
+                return finish_passkey_face_client(pipe, b"REJECTED", &state, route_lock);
+            };
+            match mutex.acquire_for_passkey(Duration::from_secs(5)) {
+                Ok(guard) => {
+                    state.passkey_route_active.store(true, Ordering::SeqCst);
+                    route_lock = Some(guard);
+                    log_service(
+                        &state.exe_dir,
+                        "INFO",
+                        "passkey plugin requested face authorization",
+                    );
+                    match state
+                        .passkey_face_gate
+                        .request_and_wait(Duration::from_secs(60))
+                    {
+                        passkey::FaceAuthorizationResult::Authorized => b"AUTHORIZED".as_slice(),
+                        passkey::FaceAuthorizationResult::Rejected => b"REJECTED".as_slice(),
+                        passkey::FaceAuthorizationResult::TimedOut => b"TIMEOUT".as_slice(),
+                    }
+                }
+                Err(error) => {
+                    log_service(
+                        &state.exe_dir,
+                        "WARN",
+                        &format!("passkey face authorization rejected by route arbiter: {error}"),
+                    );
+                    b"REJECTED".as_slice()
+                }
             }
         }
         Ok(_) => b"INVALID_REQUEST".as_slice(),
         Err(_) => b"READ_ERROR".as_slice(),
     };
 
+    finish_passkey_face_client(pipe, response, &state, route_lock);
+}
+
+fn finish_passkey_face_client(
+    pipe: HANDLE,
+    response: &[u8],
+    state: &State,
+    route_lock: Option<passkey::RouteMutexGuard<'_>>,
+) {
     let _ = pipe_write(pipe, response);
+    if route_lock.is_some() {
+        state.passkey_route_active.store(false, Ordering::SeqCst);
+    }
+    drop(route_lock);
     unsafe { let _ = DisconnectNamedPipe(pipe); }
     close_handle(pipe);
 }
@@ -756,7 +897,9 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                 }
                 "broker_release" => {
                     log_service(&state.exe_dir, "INFO", "received broker_release command, closing camera with cooldown");
+                    state.active_broker_session_id.store(0, Ordering::SeqCst);
                     state.run_requested.store(false, Ordering::SeqCst);
+                    state.broker_run_requested.store(false, Ordering::SeqCst);
                     state.recognition_active.store(false, Ordering::SeqCst);
                     state.release_requested.store(true, Ordering::SeqCst);
                     *state.matched_creds.lock().unwrap() = None;
@@ -779,6 +922,7 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                         "INFO",
                         "received WebAuthn guard release; stopping generic broker recognition",
                     );
+                    state.active_broker_session_id.store(0, Ordering::SeqCst);
                     state.run_requested.store(false, Ordering::SeqCst);
                     state.recognition_active.store(false, Ordering::SeqCst);
                     state
@@ -789,7 +933,29 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                         .fetch_add(1, Ordering::SeqCst);
                     *state.matched_creds.lock().unwrap() = None;
                 }
-                _ => {}
+                _ => {
+                    if let Some(session_id) = parse_broker_session_id(
+                        msg.trim(),
+                        "broker_cancel:",
+                    ) {
+                        if clear_matching_broker_session(
+                            &state.active_broker_session_id,
+                            session_id,
+                        ) {
+                            state.run_requested.store(false, Ordering::SeqCst);
+                            state.broker_run_requested.store(false, Ordering::SeqCst);
+                            state
+                                .broker_guard_release_requested
+                                .store(true, Ordering::SeqCst);
+                            state
+                                .broker_guard_release_generation
+                                .fetch_add(1, Ordering::SeqCst);
+                            log_service(&state.exe_dir, "INFO", "browser CredUI prompt ended; cancelling broker recognition without cooldown");
+                        } else {
+                            log_service(&state.exe_dir, "INFO", "stale browser CredUI cancellation ignored");
+                        }
+                    }
+                }
             }
         }
     } else {
@@ -835,9 +1001,13 @@ fn handle_unlock_client(pipe: HANDLE, state: Arc<State>) {
                 .wait_timeout(guard, Duration::from_millis(500))
                 .unwrap();
             // 无论超时还是被唤醒，先检查凭据是否已就绪
-            if let Some((username, password, domain)) = guard.take() {
-                let payload = format!("{}\0{}\0{}\0", username, password, domain);
+            if let Some(credentials) = guard.take() {
+                let mut payload = format!(
+                    "{}\0{}\0{}\0",
+                    credentials.username, credentials.password, credentials.domain
+                );
                 let _ = pipe_write(pipe, payload.as_bytes());
+                zeroization::zeroize_string(&mut payload);
                 break;
             }
             if timeout_result.timed_out() {
@@ -885,10 +1055,11 @@ fn load_face_records(exe_dir: &Path, db_path: &Path) -> Vec<FaceRecord> {
     .ok()
     .map(|rows| {
         rows.filter_map(|r| r.ok())
-            .filter_map(|(id, u, p, account_type, t, j)| {
+            .filter_map(|(id, u, mut p, account_type, t, j)| {
                 let json = serde_json::from_str::<JsonData>(&j).unwrap_or_default();
                 // 0.3.3 源码里 view 只控制缩略图显示；真正禁用识别的是 lock。
                 if json.lock.unwrap_or(false) {
+                    zeroization::zeroize_string(&mut p);
                     return None;
                 }
                 let thr = json.threshold.unwrap_or(60);
@@ -897,11 +1068,32 @@ fn load_face_records(exe_dir: &Path, db_path: &Path) -> Vec<FaceRecord> {
                     _ => ".".to_string(),
                 });
                 let feature_path = exe_dir.join("faces").join(format!("{}.face", t));
-                let feature_bytes = std::fs::read(feature_path).ok()?;
-                if feature_bytes.is_empty() {
-                    return None;
-                }
-                Some(FaceRecord { id, user_name: u, user_pwd: p, feature_bytes, threshold: thr, domain: dm })
+                let feature_bytes = match std::fs::read(feature_path) {
+                    Ok(bytes) if !bytes.is_empty() => bytes,
+                    _ => {
+                        zeroization::zeroize_string(&mut p);
+                        return None;
+                    }
+                };
+                let user_pwd = if credential_protection::is_protected_credential(&p) {
+                    let decrypted = credential_protection::unprotect_stored_credential(&p);
+                    zeroization::zeroize_string(&mut p);
+                    match decrypted {
+                        Ok(password) => password,
+                        Err(error) => {
+                            log_service(
+                                exe_dir,
+                                "WARN",
+                                &format!("skipping face credential {id}: DPAPI decryption failed: {error}"),
+                            );
+                            return None;
+                        }
+                    }
+                } else {
+                    // Existing installations remain usable until the elevated UI migrates them.
+                    p
+                };
+                Some(FaceRecord { id, user_name: u, user_pwd, feature_bytes, threshold: thr, domain: dm })
             })
             .collect()
     })
@@ -1633,12 +1825,18 @@ mod delay_policy_tests {
     }
 
     #[test]
-    fn manual_primary_sessions_never_arm_delay() {
+    fn manual_sessions_never_arm_delay_even_after_a_run() {
         assert!(!should_arm_delayed_recognition(
             DELAY_POLICY_MANUAL,
             0,
             true,
             true,
+        ));
+        assert!(!should_arm_delayed_recognition(
+            DELAY_POLICY_MANUAL,
+            0,
+            true,
+            false,
         ));
     }
 
@@ -1663,9 +1861,47 @@ mod delay_policy_tests {
         assert_eq!(resolve_delay_policy("prepare:boot", false), DELAY_POLICY_BOOT);
         assert_eq!(resolve_delay_policy("prepare:boot", true), DELAY_POLICY_MANUAL);
         assert_eq!(resolve_delay_policy("prepare:manual", true), DELAY_POLICY_MANUAL);
+        assert_eq!(resolve_delay_policy("prepare:broker:42", false), DELAY_POLICY_MANUAL);
         assert_eq!(resolve_delay_policy("prepare:legacy", true), DELAY_POLICY_LEGACY);
         // Older DLLs that send plain "prepare" keep the legacy behavior.
         assert_eq!(resolve_delay_policy("prepare", true), DELAY_POLICY_LEGACY);
+    }
+}
+
+#[cfg(test)]
+mod broker_session_command_tests {
+    use super::{
+        clear_matching_broker_session, is_current_broker_run, parse_broker_session_id,
+        parse_run_command,
+    };
+    use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn broker_run_requires_the_current_prompt_token() {
+        assert_eq!(parse_run_command("run", 0), Some(false));
+        assert_eq!(parse_run_command("run:broker:42", 42), Some(true));
+        assert_eq!(parse_run_command("run:broker:41", 42), None);
+        assert_eq!(parse_run_command("run:broker:0", 0), None);
+        assert_eq!(parse_run_command("run:broker", 42), None);
+        assert!(is_current_broker_run("run:broker:42", 42));
+        assert!(!is_current_broker_run("run:broker:41", 42));
+        assert!(!is_current_broker_run("run:broker", 42));
+    }
+
+    #[test]
+    fn delayed_cancellation_cannot_clear_a_newer_prompt() {
+        let active = AtomicU64::new(42);
+        assert!(!clear_matching_broker_session(&active, 41));
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 42);
+        assert!(clear_matching_broker_session(&active, 42));
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn broker_session_commands_reject_empty_or_zero_tokens() {
+        assert_eq!(parse_broker_session_id("prepare:broker:42", "prepare:broker:"), Some(42));
+        assert_eq!(parse_broker_session_id("broker_cancel:0", "broker_cancel:"), None);
+        assert_eq!(parse_broker_session_id("broker_cancel:nope", "broker_cancel:"), None);
     }
 }
 
@@ -1800,7 +2036,11 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
 
         // 轮询 test_creds.tmp（UI 测试模式）
         if let Some((user, pwd)) = check_test_creds(&exe_dir) {
-            *state.matched_creds.lock().unwrap() = Some((user, pwd, ".".to_string()));
+            *state.matched_creds.lock().unwrap() = Some(MatchedCredential {
+                username: user,
+                password: pwd,
+                domain: ".".to_string(),
+            });
             state.matched_creds_cv.notify_all();
             // 等待 DLL 消费（最多 30s）
             for _ in 0..300 {
@@ -2102,10 +2342,23 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 .unwrap_or_default()
                 .as_millis() as i64;
             let broker_cooldown = now_ms < state.after_release_cooldown_until.load(Ordering::SeqCst);
+            let broker_prompt_active =
+                state.active_broker_session_id.load(Ordering::SeqCst) != 0;
+            if broker_prompt_active && prewarm_at.is_some() && !pending && !recognizing {
+                cam = None;
+                prewarm_at = None;
+                prewarm_suppressed = true;
+                log_service(
+                    &exe_dir,
+                    "INFO",
+                    "idle camera prewarm released while browser CredUI waits for explicit command-link click",
+                );
+            }
             if prewarm_at.is_none()
                 && !prewarm_suppressed
                 && !prewarm_session_gate.blocks_prewarm()
                 && has_credential_client
+                && !broker_prompt_active
                 // 没有任何启用面容时不存在可匹配目标，不应仅因锁屏界面出现就点亮摄像头。
                 && !records.is_empty()
                 && cam.is_none()
@@ -2131,10 +2384,14 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                             || state.power.generation() != open_power_generation
                             || state.should_exit.load(Ordering::SeqCst)
                             || state.release_requested.load(Ordering::SeqCst)
+                            || state.active_broker_session_id.load(Ordering::SeqCst) != 0
+                            || state.broker_guard_release_requested.load(Ordering::SeqCst)
                     },
                 ) {
                     if state.power.is_camera_blocked()
                         || state.power.generation() != open_power_generation
+                        || state.active_broker_session_id.load(Ordering::SeqCst) != 0
+                        || state.broker_guard_release_requested.load(Ordering::SeqCst)
                     {
                         drop(c);
                         continue 'main;
@@ -2172,12 +2429,28 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         }
 
         let passkey_request_id = state.passkey_face_gate.pending_request_id();
-        let normal_run_requested = if passkey_request_id.is_none() {
+        let passkey_route_active = state.passkey_route_active.load(Ordering::SeqCst);
+        let passkey_blocks_generic = passkey_request_id.is_some() || passkey_route_active;
+        if passkey_blocks_generic && state.broker_run_requested.swap(false, Ordering::SeqCst) {
+            state.run_requested.store(false, Ordering::SeqCst);
+            log_service(
+                &exe_dir,
+                "INFO",
+                "discarded queued browser-broker run while a Passkey route was active",
+            );
+        }
+        let broker_run_requested = if !passkey_blocks_generic {
+            state.broker_run_requested.swap(false, Ordering::SeqCst)
+        } else {
+            false
+        };
+        let normal_run_requested = if !passkey_blocks_generic {
             state.run_requested.swap(false, Ordering::SeqCst)
         } else {
             false
         };
-        if passkey_request_id.is_none() && !normal_run_requested {
+        if passkey_request_id.is_none() && !normal_run_requested && !broker_run_requested
+        {
             thread::sleep(Duration::from_millis(30));
             continue;
         }
@@ -2315,6 +2588,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                         || state.power.generation() != open_power_generation
                         || state.should_exit.load(Ordering::SeqCst)
                         || state.release_requested.load(Ordering::SeqCst)
+                        || broker_passkey_route_blocked(&state, broker_run_requested)
                         || (passkey_request_id.is_none()
                             && state.broker_guard_release_requested.load(Ordering::SeqCst))
                 },
@@ -2351,6 +2625,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
         const MAX_NO_FACE_RETRIES: u32 = 3;
         let mut matched = false;
         let mut matched_face_id: Option<i64> = None;
+        let mut matched_credential: Option<MatchedCredential> = None;
         let mut saw_face = false;
         let mut no_face_retries = 0u32;
 
@@ -2359,6 +2634,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                 || state.release_requested.load(Ordering::SeqCst)
                 || state.power.is_camera_blocked()
                 || state.power.generation() != observed_power_generation
+                || broker_passkey_route_blocked(&state, broker_run_requested)
                 || (passkey_request_id.is_none()
                     && state.broker_guard_release_requested.load(Ordering::SeqCst))
             {
@@ -2384,6 +2660,7 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                         || state.release_requested.load(Ordering::SeqCst)
                         || state.power.is_camera_blocked()
                         || state.power.generation() != observed_power_generation
+                        || broker_passkey_route_blocked(&state, broker_run_requested)
                         || (passkey_request_id.is_none()
                             && state.broker_guard_release_requested.load(Ordering::SeqCst))
                     {
@@ -2426,24 +2703,20 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
                                 log_service(
                                     &exe_dir,
                                     "INFO",
-                                    &format!("face matched for passkey authorization: {}", rec.user_name),
+                                    "face matched for passkey authorization",
                                 );
                             } else {
-                                *state.matched_creds.lock().unwrap() = Some((
-                                    rec.user_name.clone(),
-                                    rec.user_pwd.clone(),
-                                    rec.domain.clone(),
-                                ));
-                                state.matched_creds_cv.notify_all();
-                                log_service(&exe_dir, "INFO", &format!("face matched for {}", rec.user_name));
+                                matched_credential = Some(MatchedCredential {
+                                    username: rec.user_name.clone(),
+                                    password: rec.user_pwd.clone(),
+                                    domain: rec.domain.clone(),
+                                });
+                                log_service(&exe_dir, "INFO", "face matched; awaiting route arbitration");
                             }
                             matched_face_id = Some(rec.id);
                             // 更新活跃时间：人脸识别成功说明用户在
                             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
                             state.last_user_active.store(now, Ordering::SeqCst);
-                            if passkey_request_id.is_none() {
-                                state.last_successful_unlock_at.store(now, Ordering::SeqCst);
-                            }
                             matched = true;
                             // 仅提交密码凭据（Approach B）——所有场景统一走密码，登录/解锁秒过，
                             // CredUI 被拒时由 DLL 回退 Windows 原生 PIN。不再加载/注入存储 PIN。
@@ -2516,6 +2789,20 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             set_brightness(orig);
         }
 
+        let broker_passkey_cancelled = passkey_request_id.is_none()
+            && broker_run_requested
+            && broker_passkey_route_blocked(&state, true);
+        if broker_passkey_cancelled {
+            matched = false;
+            matched_face_id = None;
+            matched_credential = None;
+            log_service(
+                &exe_dir,
+                "INFO",
+                "browser-broker recognition result discarded because a Passkey route started",
+            );
+        }
+
         let broker_guard_cancelled = passkey_request_id.is_none()
             && state
                 .broker_guard_release_requested
@@ -2531,6 +2818,9 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             } else if state.passkey_face_gate.reject(request_id) {
                 log_service(&exe_dir, "WARN", "passkey face authorization rejected");
             }
+        } else if broker_passkey_cancelled {
+            state.run_requested.store(false, Ordering::SeqCst);
+            *state.matched_creds.lock().unwrap() = None;
         } else if broker_guard_cancelled {
             state.run_requested.store(false, Ordering::SeqCst);
             *state.matched_creds.lock().unwrap() = None;
@@ -2541,8 +2831,17 @@ fn face_recognition_loop(state: Arc<State>, exe_dir: PathBuf) {
             );
         } else {
             if matched {
+                if let Some(credential) = matched_credential.take() {
+                    *state.matched_creds.lock().unwrap() = Some(credential);
+                    state.matched_creds_cv.notify_all();
+                }
                 insert_unlock_log(&db_path, &exe_dir, matched_face_id, true, None);
                 last_failed_at = None;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                state.last_successful_unlock_at.store(now, Ordering::SeqCst);
                 state.run_requested.store(false, Ordering::SeqCst);
                 state.consecutive_failures.store(0, Ordering::SeqCst);
                 // 重置 delay 状态，确保下次锁屏时能重新布防。

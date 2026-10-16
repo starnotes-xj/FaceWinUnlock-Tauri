@@ -1,5 +1,5 @@
 <script setup>
-    import { computed, ref,h } from 'vue';
+    import { computed, ref, h, watch } from 'vue';
     import { InfoFilled, WarnTriangleFilled  } from '@element-plus/icons-vue';
     import { ElMessageBox, ElMessage, ElSwitch } from 'element-plus';
 
@@ -80,6 +80,16 @@
         set: (val) => emit('update:modelValue', val)
     });
 
+    const displayedTips = computed(() =>
+        (props.customTips || defaultTips).replace('当前使用明文存储', 'Windows DPAPI 本机保护后存储')
+    );
+
+    watch(() => props.modelValue.password, (password) => {
+        if (props.modelValue.isEditing && password) {
+            props.modelValue.changePassword = true;
+        }
+    });
+
     const handleBlur = (field) => {
         if(field === "username"){
             if(formData.value.username != originalUsername.value) {
@@ -101,7 +111,10 @@
 
 <template>
     <div class="account-auth-container">
-        <el-form :model="formData" label-position="top" class="auth-form">
+            <el-form :model="formData" label-position="top" class="auth-form">
+            <el-checkbox v-if="formData.isEditing" v-model="formData.changePassword" style="margin-bottom: 12px">
+                更换已保存的 Windows 登录密码
+            </el-checkbox>
             <el-form-item label="账户类型">
                 <el-select
                     v-model = "formData.accountType"
@@ -139,7 +152,7 @@
                         <span>系统登录密码</span>
                         <el-tooltip
                             v-if="small"
-                            :content="`<span>${customTips || defaultTips}</span>`"
+                            :content="`<span>${displayedTips}</span>`"
                             placement="top-end"
                             raw-content
                         >
@@ -154,7 +167,7 @@
                 <el-icon>
                     <InfoFilled />
                 </el-icon>
-                <span v-html="customTips || defaultTips"></span>
+                <span v-html="displayedTips"></span>
             </div>
         </el-form>
     </div>

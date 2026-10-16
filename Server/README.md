@@ -25,8 +25,8 @@
 
 | Pipe | Direction | Messages |
 |---|---|---|
-| `MansonWindowsUnlockRustServer` | DLL to Unlock | `prepare`, `run` |
-| `MansonWindowsUnlockRustUnlock` | Unlock to DLL; UI control | credentials, `release`, `broker_release`, `ui_release`, `ui_done`, health/exit control |
+| `MansonWindowsUnlockRustServer` | DLL to Unlock | `prepare`, `prepare:broker:<session>`, `run`, `run:broker:<session>` |
+| `MansonWindowsUnlockRustUnlock` | Unlock to DLL; UI control | credentials, `release`, `broker_release`, `broker_cancel:<session>`, `ui_release`, `ui_done`, health/exit control |
 
 Credentials use null-delimited UTF-8 (`username\0password\0domain\0`) or the compatibility JSON format. Never log payload bytes.
 
@@ -35,6 +35,8 @@ Credentials use null-delimited UTF-8 (`username\0password\0domain\0`) or the com
 The Credential Provider cannot read Chromium's `CredUIPromptForWindowsCredentials` message text through the provider API. Classification therefore combines owner/root-owner process context, explicit safe/unsafe title signals, private-window state, registry policy, and the named WebAuthn Ready/Active events.
 
 Active WebAuthn always wins and returns control to Windows. Unknown password-fill fallback is allowed only for the maintained Chromium-family process list when the monitor is healthy and `CREDUI_BROWSER_PASSWORD_FILL=1`.
+
+Browser CredUI sessions use a per-prompt token. The Unlock service keeps the camera off while the prompt waits for the explicit command-link click, rejects stale runs/cancellations from an older prompt, and releases any idle prewarm on prompt close without applying the fallback cooldown.
 
 Do not add UI Automation, keyboard injection, or Credential Provider graphics/animation dependencies.
 

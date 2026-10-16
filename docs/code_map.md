@@ -14,15 +14,23 @@
 - `lib.rs`: COM exports, DLL lifetime, shared credential state, logging, owner-window context, browser allowlist, WebAuthn event handles, broker classification and tests.
 - `CSampleProvider.rs`: usage-scenario filtering, broker policy, credential enumeration, listener lifecycle.
 - `CSampleCredential.rs`: face tile fields, credential serialization and failed-result cleanup.
+- `credui_observation.rs`: default-off, metadata-only sampling of the credential events' official host HWND; no intent ticket or recognition action.
 - `CPipeListener.rs`: control/credential threads, WebAuthn race checks, broker fallback, asynchronous teardown, DLL lifetime guards.
 - `Pipe.rs`: Win32 named-pipe operations and payload parsing.
 
 ## Unlock
 
 - `main.rs`: supervisor/worker entry, three named-pipe servers, face-recognition loop, camera prewarm, UI camera yield, WTS session-idle auto-lock, helper launch, service logging.
+- `lib.rs` and `credui_intent.rs`: testable offline request/recognition ownership model; not imported into the service binary and not connected to IPC.
 - `power_events.rs`: traditional suspend/resume plus console-display power notifications, with a combined camera-blocking generation state for Modern Standby.
 - `webauthn_activity.rs`: Event Log channel/provider validation, ten-minute replay, pull subscription, transaction tracking/expiry, Ready/Active named events.
 - `passkey/mod.rs`: serialized face-authorization state machine for the official Passkey plugin.
+
+## CredUI Probe Fixtures
+
+- `CredUIProbe/`: x64-only synthetic ABI/debugger fixtures. The host accepts only its four self-tests; it cannot launch or attach to a browser. Passing tests do not establish a live browser's CredUI behavior.
+- `scripts/build-credui-probe.ps1`: configures, builds, and optionally runs the fixture CTest suite.
+- `docs/credui-intent-bridge-design.md`: current prototype status, trust boundaries, and prerequisites for any future runtime integration.
 
 ## UI Backend
 
@@ -64,6 +72,7 @@ Registry root: `HKLM\SOFTWARE\facewinunlock-tauri`.
 | `CREDUI_ALLOW_BROKER` | `1` | Enable broker scene classification |
 | `CREDUI_BROKER_FALLBACK_TIMEOUT` | `5` or installer `6` | Face timeout before Windows fallback |
 | `CREDUI_BROWSER_PASSWORD_FILL` | `1` | Guarded unknown browser password-fill fallback |
+| `CREDUI_INTENT_MODE` | absent/off | Experimental host HWND metadata sampler; only exact `REG_SZ` `observe` is implemented; `auto` does not enable it |
 
 `CREDUI_UIA_DETECT`, `CREDUI_BROKER_TRY_FACE_UNKNOWN`, animation settings, and old takeover flags are obsolete. Their remaining uses must only delete old installations.
 

@@ -1,4 +1,6 @@
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -86,6 +88,43 @@ pub fn request_broker_release(reason: &str) {
     }
 }
 
+/// Create a fresh broker-session token so delayed teardown from an older
+/// CredentialUI prompt cannot cancel a newer prompt handled by the service.
+pub fn new_broker_session_id() -> u64 {
+    static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let sequence = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    (now.rotate_left(17) ^ ((std::process::id() as u64) << 32) ^ sequence).max(1)
+}
+
+/// End one browser CredUI session without the fallback cooldown. The pipe
+/// operation is bounded and must only run on a background thread.
+fn request_broker_cancel(session_id: u64) {
+    use crate::Pipe::{pipe_connect_to_server, pipe_write_raw, PIPE_UNLOCK_NAME};
+    let command = format!("broker_cancel:{session_id}");
+    if let Ok(pipe) = pipe_connect_to_server(PIPE_UNLOCK_NAME, 1_000) {
+        let _ = pipe_write_raw(pipe, command.as_bytes());
+        unsafe {
+            let _ = CloseHandle(pipe);
+        }
+    }
+}
+
+pub fn request_broker_cancel_async(session_id: u64, reason: &'static str) {
+    info!(
+        "CPipeListener - 请求结束浏览器 CredUI 会话 {}: {}",
+        session_id, reason
+    );
+    crate::dll_add_ref();
+    thread::spawn(move || {
+        let _dll_ref = DllRefGuard;
+        request_broker_cancel(session_id);
+    });
+}
+
 fn request_broker_guard_release(reason: &str) {
     info!("CPipeListener - 请求停止通用 broker 人脸识别: {}", reason);
     use crate::Pipe::{pipe_connect_to_server, pipe_write_raw, PIPE_UNLOCK_NAME};
@@ -114,8 +153,8 @@ fn trigger_broker_pin_fallback(
         if creds.broker_fallback_to_pin {
             true
         } else {
-            creds.username.clear();
-            creds.password.clear();
+            crate::zeroization::zeroize_string(&mut creds.username);
+            crate::zeroization::zeroize_string(&mut creds.password);
             creds.is_ready = false;
             creds.is_unlocked = false;
             creds.broker_fallback_to_pin = true;
@@ -344,7 +383,7 @@ pub struct CPipeListener {
     creds_thread: Option<JoinHandle<()>>,
     /// 保存凭据线程当前持有的管道句柄原始值（isize），用于 stop_and_join 时关闭句柄打断 ReadFile
     creds_pipe_raw: Arc<AtomicIsize>,
-    /// 是否安装了鼠标/键盘 Hook。所有已启用场景都可用 Hook 触发 run。
+    /// 是否安装了鼠标/键盘 Hook。浏览器 broker 必须由用户点击命令链接触发。
     use_input_hooks: bool,
     /// 是否主场景（登录/解锁）。仅主场景在 stop_and_join 中向 Unlock EXE 发 release 释放摄像头；
     /// CREDUI/broker 场景不发——既符合文档约定（锁屏可能仍需 Unlock EXE），也避免在
@@ -352,10 +391,55 @@ pub struct CPipeListener {
     is_primary_scenario: bool,
 }
 
+/// Fail a broker CredUI session closed without making the COM callback wait on
+/// pipe teardown. GetSerialization uses this when Passkey owns the route mutex.
+pub fn reject_broker_route_async(
+    reason: &'static str,
+    events: Option<ICredentialProviderEvents>,
+    advise_context: usize,
+) {
+    mark_broker_pin_fallback();
+    crate::dll_add_ref();
+    let events = events.map(|events| SendableEvents(events, advise_context));
+    thread::spawn(move || {
+        let _dll_ref = DllRefGuard;
+        request_broker_guard_release(reason);
+        if let Some(events) = events {
+            if let Err(error) = events.notify_changed() {
+                error!("CPipeListener - broker PIN fallback refresh failed: {:?}", error);
+            }
+        }
+    });
+}
+
+fn session_prepare_command(
+    is_primary_scenario: bool,
+    boot_delay_session: bool,
+    broker_session_id: Option<u64>,
+) -> String {
+    if let Some(session_id) = broker_session_id {
+        format!("prepare:broker:{session_id}")
+    } else if !is_primary_scenario {
+        "prepare:manual".to_string()
+    } else if boot_delay_session {
+        "prepare:boot".to_string()
+    } else {
+        "prepare:manual".to_string()
+    }
+}
+
+fn run_command(is_browser_broker: bool, broker_session_id: Option<u64>) -> String {
+    if is_browser_broker {
+        format!("run:broker:{}", broker_session_id.unwrap_or_default())
+    } else {
+        "run".to_string()
+    }
+}
+
 impl CPipeListener {
     /// 启动管道监听：
     ///   - Client 线程：连接到 Unlock EXE 的 Server 管道，先发送会话策略 prepare；
-    ///     所有已启用场景都可由 DLL 低级输入 Hook 捕获鼠标/键盘事件后发送 "run"
+    ///     主场景/UAC 用输入 Hook 触发 run，浏览器 broker 只接受命令链接的明确请求。
     ///   - Creds 线程：阻塞等待凭据推送，收到后设置动画为 Success
     pub fn start(
         events: ICredentialProviderEvents,
@@ -364,12 +448,14 @@ impl CPipeListener {
         is_primary_scenario: bool,
         broker_fallback_to_pin: bool,
         usage_scenario: u32,
+        broker_session_id: Option<u64>,
+        broker_manual_run: Arc<AtomicBool>,
     ) -> Arc<Mutex<Self>> {
         let is_unlocked    = Arc::new(AtomicBool::new(false));
         let stop_flag      = Arc::new(AtomicBool::new(false));
         // 存储当前凭据管道句柄原始值（INVALID_HANDLE_VALUE.0 as isize 表示无效）
         let creds_pipe_raw = Arc::new(AtomicIsize::new(INVALID_HANDLE_VALUE.0 as isize));
-        let use_input_hooks = true;
+        let use_input_hooks = !broker_fallback_to_pin;
         // 不再由 DLL 直接自动发送 "run"。开机候选只发送策略标记，
         // Unlock EXE 在 delay 配置、凭据连接和冷启动保护均满足后内部触发识别。
         // 这样保留 SetSelected/GetSerialization 的启动安全边界，也避免把
@@ -377,14 +463,15 @@ impl CPipeListener {
         let boot_delay_session = is_primary_scenario
             && usage_scenario == 1
             && crate::claim_boot_delay_session();
-        let prepare_command: &'static [u8] = if !is_primary_scenario {
-            b"prepare:legacy"
-        } else if boot_delay_session {
-            b"prepare:boot"
-        } else {
-            b"prepare:manual"
-        };
-        let prepare_label = String::from_utf8_lossy(prepare_command);
+        // A CredUI dialog must not inherit legacy delayed recognition from a
+        // prior session's run. Browser brokers use the explicit command link;
+        // other supported CredUI prompts retain their input trigger.
+        let prepare_command = session_prepare_command(
+            is_primary_scenario,
+            boot_delay_session,
+            broker_session_id,
+        );
+        let prepare_label = prepare_command.clone();
         info!(
             "{} 场景策略: {}",
             if is_primary_scenario { "登录/解锁" } else { "CREDUI/UAC" },
@@ -404,6 +491,7 @@ impl CPipeListener {
             let creds_pipe_raw_for_client = creds_pipe_raw.clone();
             let send_events_for_client = SendableEvents(events.clone(), advise_context);
             let broker_timeout = broker_fallback_timeout();
+            let broker_manual_run = broker_manual_run.clone();
             thread::spawn(move || {
                 let _dll_ref = DllRefGuard; // 退出（含下方 return）时 dll_release，分离安全
                 let connect_enabled = read_facewinunlock_registry("CONNECT_TO_PIPE")
@@ -413,10 +501,10 @@ impl CPipeListener {
                     return;
                 }
 
-                // Broker 已由 WebAuthn 活动守卫和 owner 上下文分类。此处仍在
-                // prepare/run 前复查 Active，覆盖事件订阅与 Provider 生命周期的竞态。
+                // Broker 已由 WebAuthn 监视器和 owner 上下文分类。此处仍在
+                // prepare/run 前复查 Ready/Active，覆盖监视器故障与 Provider 竞态。
                 if broker_fallback_to_pin {
-                    info!("CPipeListener - broker CredUI 场景：先面容，超时回退 PIN");
+                    info!("CPipeListener - broker CredUI 场景：点击人脸链接后开始识别，超时回退 PIN");
                 }
 
                 info!("CPipeListener::start - 进入管道Client线程");
@@ -427,13 +515,13 @@ impl CPipeListener {
                 // Client 线程持续运行直到 stop_flag，不依赖 is_unlocked 退出
                 loop {
                     if stop_flag.load(Ordering::SeqCst) { break; }
-                    if broker_fallback_to_pin && crate::is_webauthn_guard_active() {
+                    if broker_fallback_to_pin && crate::browser_broker_guard_blocks_face() {
                         trigger_broker_pin_fallback(
                             &shared_creds_for_client,
                             &stop_flag,
                             &creds_pipe_raw_for_client,
                             &send_events_for_client,
-                            "WebAuthn transaction active before pipe connect",
+                            "WebAuthn monitor unavailable or transaction active before pipe connect",
                             BrokerReleaseMode::WebAuthnGuard,
                         );
                         return;
@@ -460,20 +548,20 @@ impl CPipeListener {
                     };
                     first_connect = false;
 
-                    if broker_fallback_to_pin && crate::is_webauthn_guard_active() {
+                    if broker_fallback_to_pin && crate::browser_broker_guard_blocks_face() {
                         unsafe { let _ = CloseHandle(pipe); }
                         trigger_broker_pin_fallback(
                             &shared_creds_for_client,
                             &stop_flag,
                             &creds_pipe_raw_for_client,
                             &send_events_for_client,
-                            "WebAuthn transaction active before prepare",
+                            "WebAuthn monitor unavailable or transaction active before prepare",
                             BrokerReleaseMode::WebAuthnGuard,
                         );
                         return;
                     }
 
-                    if let Err(e) = pipe_write_raw(pipe, prepare_command) {
+                    if let Err(e) = pipe_write_raw(pipe, prepare_command.as_bytes()) {
                         error!("写入 prepare 失败: {:?}", e);
                         unsafe { let _ = CloseHandle(pipe); }
                         if interruptible_sleep(Duration::from_secs(5), &stop_flag) { break; }
@@ -494,14 +582,14 @@ impl CPipeListener {
                     }
 
                     loop {
-                        if broker_fallback_to_pin && crate::is_webauthn_guard_active() {
+                        if broker_fallback_to_pin && crate::browser_broker_guard_blocks_face() {
                             unsafe { let _ = CloseHandle(pipe); }
                             trigger_broker_pin_fallback(
                                 &shared_creds_for_client,
                                 &stop_flag,
                                 &creds_pipe_raw_for_client,
                                 &send_events_for_client,
-                                "WebAuthn transaction became active",
+                                "WebAuthn monitor unavailable or transaction active",
                                 BrokerReleaseMode::WebAuthnGuard,
                             );
                             return;
@@ -554,12 +642,15 @@ impl CPipeListener {
                         } else {
                             0
                         };
+                        let manual_requested = broker_fallback_to_pin
+                            && broker_manual_run.swap(false, Ordering::SeqCst);
                         let should_send_run = hooks_armed
                             && last_run_at.elapsed() >= min_run_interval
-                            && input_requested;
+                            && (input_requested || manual_requested)
+                            && (!broker_fallback_to_pin || broker_first_run_at.is_none());
 
                         if should_send_run {
-                            // ★ WebAuthn 守卫复查 + 实时 debounce（v0.5.10-rc5 修复）：
+                            // ★ WebAuthn Ready/Active 复查 + 实时 debounce（v0.5.10-rc5 修复）：
                             //   passkey CredUI 打开时 CTAP 事务可能尚未启动。500ms 实测
                             //   仍有 1-2/5 漏过 → 延长至 800ms。密码填充场景无 CTAP 事务，
                             //   这 500ms 纯轮询开销（每 30ms 一次 OpenEventW），对用户无感。
@@ -567,13 +658,13 @@ impl CPipeListener {
                                 let debounce = Duration::from_millis(500);
                                 let deadline = Instant::now() + debounce;
                                 loop {
-                                    if crate::is_webauthn_guard_active() {
+                                    if crate::browser_broker_guard_blocks_face() {
                                         trigger_broker_pin_fallback(
                                             &shared_creds_for_client,
                                             &stop_flag,
                                             &creds_pipe_raw_for_client,
                                             &send_events_for_client,
-                                            "WebAuthn transaction active before run (debounce)",
+                                            "WebAuthn monitor unavailable or transaction active before run (debounce)",
                                             BrokerReleaseMode::WebAuthnGuard,
                                         );
                                         unsafe { let _ = CloseHandle(pipe); }
@@ -587,8 +678,12 @@ impl CPipeListener {
                                     thread::sleep(Duration::from_millis(30));
                                 }
                             }
-                            if let Err(e) = pipe_write_raw(pipe, b"run") {
+                            let run = run_command(broker_fallback_to_pin, broker_session_id);
+                            if let Err(e) = pipe_write_raw(pipe, run.as_bytes()) {
                                 warn!("发送 run 失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
+                                if manual_requested && !stop_flag.load(Ordering::SeqCst) {
+                                    broker_manual_run.store(true, Ordering::SeqCst);
+                                }
                                 unsafe { let _ = CloseHandle(pipe); }
                                 break;
                             }
@@ -607,6 +702,8 @@ impl CPipeListener {
                                     _ => "鼠标/键盘",
                                 };
                                 info!("检测到{}{}输入，已发送 run", scenario_label, source_name);
+                            } else if manual_requested {
+                                info!("用户点击浏览器密码填充人脸链接，已发送 run");
                             }
                         }
 
@@ -635,7 +732,7 @@ impl CPipeListener {
                         }
 
                         if last_prepare_at.elapsed() >= Duration::from_secs(1) {
-                            if let Err(e) = pipe_write_raw(pipe, prepare_command) {
+                            if let Err(e) = pipe_write_raw(pipe, prepare_command.as_bytes()) {
                                 warn!("prepare 心跳失败: {:?}，Unlock EXE 可能已崩溃，尝试重连...", e);
                                 unsafe { let _ = CloseHandle(pipe); }
                                 break;
@@ -697,22 +794,28 @@ impl CPipeListener {
                     close_pipe_if_owned(&creds_pipe_raw, pipe);
 
                     match read_result {
-                        Ok(data) if !data.is_empty() => {
-                            if broker_fallback_to_pin && crate::is_webauthn_guard_active() {
+                        Ok(mut data) if !data.is_empty() => {
+                            if broker_fallback_to_pin && crate::browser_broker_guard_blocks_face() {
+                                crate::zeroization::zeroize_bytes(&mut data);
                                 trigger_broker_pin_fallback(
                                     &shared_creds,
                                     &stop_flag,
                                     &creds_pipe_raw,
                                     &send_events,
-                                    "WebAuthn transaction active before credential submission",
+                                    "WebAuthn monitor unavailable or transaction active before credential submission",
                                     BrokerReleaseMode::WebAuthnGuard,
                                 );
                                 break;
                             }
-                            match parse_credentials(&data) {
-                                Some((user, pwd, domain)) => {
+                            let parsed = parse_credentials(&data);
+                            crate::zeroization::zeroize_bytes(&mut data);
+                            match parsed {
+                                Some((mut user, mut pwd, mut domain)) => {
                                     // 拒绝空用户名的凭据，防止"虚空登录" (#103)
                                     if user.is_empty() {
+                                        crate::zeroization::zeroize_string(&mut user);
+                                        crate::zeroization::zeroize_string(&mut pwd);
+                                        crate::zeroization::zeroize_string(&mut domain);
                                         warn!("凭据线程：收到空用户名凭据，已拒绝");
                                     } else {
                                         {
@@ -727,10 +830,13 @@ impl CPipeListener {
                                                 BROKER_PIN_FALLBACK_GLOBAL.store(false, Ordering::SeqCst);
                                                 // 也要释放 pin_buffer，让 GetSerialization 走密码路径
                                             }
-                                            info!("凭据线程：收到凭据，用户: {}", user);
+                                            info!("凭据线程：收到非空用户名的凭据");
+                                            crate::zeroization::zeroize_string(&mut creds.username);
+                                            crate::zeroization::zeroize_string(&mut creds.password);
+                                            crate::zeroization::zeroize_string(&mut creds.domain);
                                             creds.username = user;
                                             creds.password = pwd;
-                                            creds.domain   = domain;
+                                            creds.domain = domain;
                                             creds.is_ready = true;
                                             creds.is_unlocked = true;
                                         }
@@ -850,5 +956,35 @@ impl Drop for CPipeListener {
         if self.use_input_hooks {
             uninstall_input_hooks();
         }
+    }
+}
+
+#[cfg(test)]
+mod session_policy_tests {
+    use super::{run_command, session_prepare_command};
+
+    #[test]
+    fn cred_ui_sessions_never_enable_legacy_delayed_recognition() {
+        assert_eq!(session_prepare_command(false, false, None), "prepare:manual");
+        // Even a stale/incorrect boot-candidate flag cannot make CredUI automatic.
+        assert_eq!(session_prepare_command(false, true, None), "prepare:manual");
+    }
+
+    #[test]
+    fn only_the_primary_boot_candidate_uses_boot_delay() {
+        assert_eq!(session_prepare_command(true, true, None), "prepare:boot");
+        assert_eq!(session_prepare_command(true, false, None), "prepare:manual");
+    }
+
+    #[test]
+    fn browser_broker_prepare_and_run_are_bound_to_the_prompt_session() {
+        assert_eq!(session_prepare_command(false, false, Some(42)), "prepare:broker:42");
+        assert_eq!(run_command(true, Some(42)), "run:broker:42");
+    }
+
+    #[test]
+    fn only_browser_broker_runs_are_marked_for_passkey_arbitration() {
+        assert_eq!(run_command(true, Some(7)), "run:broker:7");
+        assert_eq!(run_command(false, None), "run");
     }
 }

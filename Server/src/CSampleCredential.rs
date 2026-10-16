@@ -1,5 +1,6 @@
 // 引入必要的同步原语和Win32 API
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::{
     Foundation::{E_NOTIMPL, STATUS_SUCCESS},
     Graphics::Gdi::HBITMAP,
@@ -9,6 +10,7 @@ use windows::Win32::{
         ICredentialProviderCredential, ICredentialProviderCredentialEvents,
         ICredentialProviderEvents,
         ICredentialProviderCredential_Impl, CPFIS_NONE, CPFS_DISPLAY_IN_BOTH,
+        CPFS_DISPLAY_IN_SELECTED_TILE,
         CPGSR_NO_CREDENTIAL_NOT_FINISHED, CPGSR_NO_CREDENTIAL_FINISHED,
         CPGSR_RETURN_CREDENTIAL_FINISHED, CPSI_ERROR,
         CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION, CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE,
@@ -19,6 +21,8 @@ use windows::Win32::{
 use windows_core::{implement, PCWSTR, PWSTR};
 use windows::Win32::Foundation::BOOL;
 use crate::{CLSID_SampleProvider, SharedCredentials};
+
+pub(crate) const BROKER_FACE_LINK_FIELD_ID: u32 = 2;
 
 /// 凭据实现类，代表登录界面上的一个磁贴
 /// 每个凭据对应一个可选择的登录选项
@@ -31,6 +35,8 @@ pub struct SampleCredential {
     provider_events: Mutex<Option<ICredentialProviderEvents>>,
     provider_advise_context: usize,
     broker_fallback_enabled: bool,
+    broker_manual_run: Arc<AtomicBool>,
+    broker_observation: Mutex<Option<crate::credui_observation::HostObservation>>,
 }
 
 impl SampleCredential {
@@ -41,6 +47,7 @@ impl SampleCredential {
         provider_events: Option<ICredentialProviderEvents>,
         provider_advise_context: usize,
         broker_fallback_enabled: bool,
+        broker_manual_run: Arc<AtomicBool>,
     ) -> Self {
         info!("SampleCredential::new - 创建凭据实例");
         Self {
@@ -50,13 +57,32 @@ impl SampleCredential {
             provider_events: Mutex::new(provider_events),
             provider_advise_context,
             broker_fallback_enabled,
+            broker_manual_run,
+            broker_observation: Mutex::new(None),
         }
+    }
+
+    fn queue_broker_manual_run(&self, broker_guard_blocks_face: bool) -> bool {
+        if !self.broker_fallback_enabled || broker_guard_blocks_face {
+            return false;
+        }
+        let creds = self.shared_creds.lock().unwrap();
+        if creds.broker_fallback_to_pin || creds.is_ready {
+            return false;
+        }
+        self.broker_manual_run.store(true, Ordering::SeqCst);
+        true
     }
 }
 
 impl Drop for SampleCredential {
     fn drop(&mut self) {
         info!("SampleCredential::drop - 销毁凭据实例");
+        if let Ok(observation) = self.broker_observation.get_mut() {
+            if let Some(observation) = observation.take() {
+                observation.end("drop");
+            }
+        }
     }
 }
 
@@ -65,8 +91,16 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
     /// pcpce: 系统提供的事件接口
     fn Advise(&self, pcpce: windows_core::Ref<ICredentialProviderCredentialEvents>) -> windows_core::Result<()> {
         info!("SampleCredential::Advise - 注册事件通知");
-        let mut events = self.events.lock().unwrap();
-        *events = pcpce.clone(); // 保存事件接口
+        let events = pcpce.clone();
+        *self.events.lock().unwrap() = events.clone(); // 保存事件接口
+
+        if self.broker_fallback_enabled {
+            let observation = events.as_ref().and_then(crate::credui_observation::observe_after_advise);
+            let previous = std::mem::replace(&mut *self.broker_observation.lock().unwrap(), observation);
+            if let Some(previous) = previous {
+                previous.end("re_advise");
+            }
+        }
 
         Ok(())
     }
@@ -77,6 +111,10 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
 
         let mut events = self.events.lock().unwrap();
         *events = None; // 清除事件接口
+        drop(events);
+        if let Some(observation) = self.broker_observation.lock().unwrap().take() {
+            observation.end("unadvise");
+        }
         Ok(())
     }
 
@@ -87,7 +125,7 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
     /// 参考：Stack Overflow #66706711, #55512774; Microsoft CPUS_LOGON 文档。
     fn SetSelected(&self) -> windows_core::Result<BOOL> {
         let creds = self.shared_creds.lock().unwrap();
-        let ready = creds.is_ready && creds.is_unlocked;
+        let ready = creds.has_pending_face_authorization();
         info!(
             "SampleCredential::SetSelected - 磁贴被选中, autoLogon={}",
             ready
@@ -119,6 +157,10 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
                     *pcpfs = CPFS_DISPLAY_IN_BOTH; // 在磁贴和详细视图中都显示
                     *pcpfis = CPFIS_NONE;          // 非交互元素（不能点击或编辑）
                 }
+                BROKER_FACE_LINK_FIELD_ID if self.broker_fallback_enabled => {
+                    *pcpfs = CPFS_DISPLAY_IN_SELECTED_TILE;
+                    *pcpfis = CPFIS_NONE;
+                }
                 _ => {
                     error!("SampleCredential::GetFieldState - 无效的字段ID: {}", dwfieldid);
                     return Err(windows::Win32::Foundation::E_INVALIDARG.into());
@@ -133,7 +175,9 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
     fn GetStringValue(&self, dwfieldid: u32) -> windows_core::Result<PWSTR> {
         info!("SampleCredential::GetStringValue - 获取字段 {} 的文本内容", dwfieldid);
         let val = match dwfieldid {
-            1 => "FaceWinUnlock - 开机延迟识别；锁屏后触碰鼠标或按键启动",  // 字段1的文本内容
+            1 if self.broker_fallback_enabled => "仅在浏览器填充密码时使用下方人脸验证链接",
+            1 => "FaceWinUnlock - 开机延迟识别；锁屏后触碰鼠标或按键启动",
+            BROKER_FACE_LINK_FIELD_ID if self.broker_fallback_enabled => "这是密码填充，使用人脸验证",
             _ => {
                 warn!("SampleCredential::GetStringValue - 字段 {} 无文本内容", dwfieldid);
                 ""
@@ -201,10 +245,17 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         Err(E_NOTIMPL.into())
     }
 
-    /// 命令链接被点击（未实现）
-    fn CommandLinkClicked(&self, _dwfieldid: u32) -> windows_core::Result<()> {
-        info!("SampleCredential::CommandLinkClicked - 未实现的接口");
-        Err(E_NOTIMPL.into())
+    /// 浏览器 CredUI 只在用户明确选择密码填充时启动面容识别。
+    fn CommandLinkClicked(&self, dwfieldid: u32) -> windows_core::Result<()> {
+        if dwfieldid != BROKER_FACE_LINK_FIELD_ID || !self.broker_fallback_enabled {
+            return Err(windows::Win32::Foundation::E_INVALIDARG.into());
+        }
+        if self.queue_broker_manual_run(crate::browser_broker_guard_blocks_face()) {
+            info!("SampleCredential::CommandLinkClicked - 用户明确请求浏览器人脸验证");
+        } else {
+            info!("SampleCredential::CommandLinkClicked - 当前会话不接受人脸请求");
+        }
+        Ok(())
     }
 
     /// 序列化凭据信息（登录时调用）
@@ -215,12 +266,46 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         _ppszoptionalstatustext: *mut PWSTR,
         _pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON,
     ) -> windows_core::Result<()> {
-        let creds = self.shared_creds.lock().unwrap();
+        let mut creds = self.shared_creds.lock().unwrap();
 
         if !creds.is_ready {
             unsafe { *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED; }
             return Ok(());
         }
+        if !creds.has_pending_face_authorization() {
+            unsafe { *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED; }
+            return Ok(());
+        }
+
+        // Passkey authorization owns the same inter-process route mutex while
+        // face verification is pending. Never serialize a generic broker
+        // credential if the mutex is busy, missing, or was abandoned.
+        let _route_guard = if self.broker_fallback_enabled {
+            match crate::credui_route_guard::try_acquire() {
+                Ok(guard) => Some(guard),
+                Err(reason) => {
+                    error!(
+                        "SampleCredential::GetSerialization - broker route arbitration denied serialization: {}",
+                        reason
+                    );
+                    crate::zeroization::zeroize_string(&mut creds.username);
+                    crate::zeroization::zeroize_string(&mut creds.password);
+                    crate::zeroization::zeroize_string(&mut creds.domain);
+                    creds.is_ready = false;
+                    creds.is_unlocked = false;
+                    creds.broker_fallback_to_pin = true;
+                    unsafe { *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED; }
+                    crate::CPipeListener::reject_broker_route_async(
+                        "Passkey route arbitration denied broker serialization",
+                        self.provider_events.lock().unwrap().clone(),
+                        self.provider_advise_context,
+                    );
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
 
         info!("SampleCredential::GetSerialization - 开始序列化凭据");
 
@@ -239,8 +324,9 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
             format!("{}\\{}", creds.domain, creds.username)
         };
 
-        let user_wide = to_wide_vec(&qualified_user);
-        let pwd_wide  = to_wide_vec(&creds.password);
+        let user_wide = SecretWideBuffer::new(&qualified_user);
+        let pwd_wide = SecretWideBuffer::new(&creds.password);
+        let pwd_ptr = PCWSTR::from_raw(pwd_wide.as_ptr());
 
         // 第一次调用：查询所需缓冲区大小（预期返回 ERROR_INSUFFICIENT_BUFFER）
         let mut cb_packed = 0u32;
@@ -248,7 +334,7 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
             let _ = CredPackAuthenticationBufferW(
                 CRED_PACK_PROTECTED_CREDENTIALS,
                 PCWSTR::from_raw(user_wide.as_ptr()),
-                PCWSTR::from_raw(pwd_wide.as_ptr()),
+                pwd_ptr,
                 None,
                 &mut cb_packed,
             );
@@ -258,18 +344,17 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
             error!("SampleCredential::GetSerialization - 无法获取缓冲区大小");
             unsafe { *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED; }
             // 凭据打包失败，重置标志防止死循环
-            drop(creds);
-            self.shared_creds.lock().unwrap().is_unlocked = false;
+            creds.consume_face_authorization();
             return Ok(());
         }
 
         // 分配输出缓冲区（Windows 负责释放）
-        let buf = unsafe { CoTaskMemAlloc(cb_packed as usize) as *mut u8 };
+        let packed_capacity = cb_packed as usize;
+        let buf = unsafe { CoTaskMemAlloc(packed_capacity) as *mut u8 };
         if buf.is_null() {
             error!("SampleCredential::GetSerialization - 内存分配失败");
             unsafe { *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED; }
-            drop(creds);
-            self.shared_creds.lock().unwrap().is_unlocked = false;
+            creds.consume_face_authorization();
             return Ok(());
         }
 
@@ -278,7 +363,7 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
             CredPackAuthenticationBufferW(
                 CRED_PACK_PROTECTED_CREDENTIALS,
                 PCWSTR::from_raw(user_wide.as_ptr()),
-                PCWSTR::from_raw(pwd_wide.as_ptr()),
+                pwd_ptr,
                 Some(buf),
                 &mut cb_packed,
             )
@@ -287,20 +372,25 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         if let Err(e) = pack_result {
             error!("SampleCredential::GetSerialization - CredPackAuthenticationBufferW 失败: {:?}", e);
             unsafe {
+                crate::zeroization::zeroize_raw_bytes(buf, packed_capacity);
                 CoTaskMemFree(Some(buf as *mut _));
                 *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
             }
-            drop(creds);
-            self.shared_creds.lock().unwrap().is_unlocked = false;
+            creds.consume_face_authorization();
             return Ok(());
         }
 
         // 凭据打包成功，重置 is_unlocked 标志（#112 修复：延迟重置防止 UAC 竞态）
-        drop(creds);
-        {
-            let mut s = self.shared_creds.lock().unwrap();
-            s.is_unlocked = false;
+        if !creds.consume_face_authorization() {
+            unsafe {
+                crate::zeroization::zeroize_raw_bytes(buf, packed_capacity);
+                CoTaskMemFree(Some(buf as *mut _));
+                *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
+            }
+            error!("SampleCredential::GetSerialization - 人脸授权在序列化期间失效");
+            return Ok(());
         }
+        drop(creds);
 
         unsafe {
             (*pcpcs).ulAuthenticationPackage = self.auth_package_id;
@@ -310,7 +400,7 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
             *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
         }
 
-        info!("SampleCredential::GetSerialization - 凭据序列化完成，用户: {}", qualified_user);
+        info!("SampleCredential::GetSerialization - 凭据序列化完成");
         Ok(())
     }
 
@@ -333,8 +423,8 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
             && crate::current_process_exe_name() == "credentialuibroker.exe";
         {
             let mut creds = self.shared_creds.lock().unwrap();
-            creds.username.clear();
-            creds.password.clear();
+            crate::zeroization::zeroize_string(&mut creds.username);
+            crate::zeroization::zeroize_string(&mut creds.password);
             creds.is_ready = false;
             creds.is_unlocked = false;
             if fallback_to_pin {
@@ -378,4 +468,57 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
 // 将 String 转换为符合 Win32 要求的 UTF-16 向量（带 null 结尾）
 fn to_wide_vec(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+struct SecretWideBuffer(Vec<u16>);
+
+impl SecretWideBuffer {
+    fn new(value: &str) -> Self {
+        Self(to_wide_vec(value))
+    }
+
+    fn as_ptr(&self) -> *const u16 {
+        self.0.as_ptr()
+    }
+}
+
+impl Drop for SecretWideBuffer {
+    fn drop(&mut self) {
+        crate::zeroization::zeroize_wide(&mut self.0);
+    }
+}
+
+#[cfg(test)]
+mod manual_broker_run_tests {
+    use super::*;
+
+    fn credential(is_broker: bool) -> (SampleCredential, Arc<Mutex<SharedCredentials>>, Arc<AtomicBool>) {
+        let creds = Arc::new(Mutex::new(SharedCredentials {
+            username: String::new(),
+            password: String::new(),
+            domain: ".".to_string(),
+            is_ready: false,
+            is_unlocked: false,
+            broker_fallback_to_pin: false,
+        }));
+        let request = Arc::new(AtomicBool::new(false));
+        let credential = SampleCredential::new(creds.clone(), 0, None, 0, is_broker, request.clone());
+        (credential, creds, request)
+    }
+
+    #[test]
+    fn only_explicit_browser_request_queues_a_run() {
+        let (broker, creds, request) = credential(true);
+        assert!(!broker.queue_broker_manual_run(true));
+        assert!(!request.load(Ordering::SeqCst));
+        assert!(broker.queue_broker_manual_run(false));
+        assert!(request.swap(false, Ordering::SeqCst));
+        creds.lock().unwrap().broker_fallback_to_pin = true;
+        assert!(!broker.queue_broker_manual_run(false));
+        assert!(!request.load(Ordering::SeqCst));
+
+        let (non_broker, _, request) = credential(false);
+        assert!(!non_broker.queue_broker_manual_run(false));
+        assert!(!request.load(Ordering::SeqCst));
+    }
 }

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use opencv::videoio::{VideoCapture, VideoCaptureTrait, VideoCaptureTraitConst};
 use serde_json::json;
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_log::log;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
@@ -151,7 +152,7 @@ pub fn check_camera_status() -> Result<CustomResult, CustomResult> {
 // 部署核心组件（复制 DLL + 写注册表）
 // ──────────────────────────────────────────────────────────────────────────────
 #[tauri::command]
-pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
+pub fn deploy_core_components(app: AppHandle) -> Result<CustomResult, CustomResult> {
     if !is_elevated() {
         return Err(CustomResult::error(
             Some("需要管理员权限才能部署核心组件".to_string()),
@@ -164,8 +165,10 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         let src = ROOT_DIR.join("resources").join(name);
         let dst = system32_dir().join(name);
         if !src.exists() {
-            log::info!("deploy: {} 不存在，跳过", src.display());
-            return Ok(());
+            return Err(CustomResult::error(
+                Some(format!("部署资源不存在: {}", src.display())),
+                None,
+            ));
         }
         std::fs::copy(&src, &dst).map_err(|e| {
             CustomResult::error(
@@ -183,7 +186,9 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         Ok(())
     };
 
+    emit_deployment_progress(&app, 5, "正在准备 Credential Provider 部署");
     copy_to_system32(DLL_NAME)?;
+    emit_deployment_progress(&app, 30, "Credential Provider DLL 已复制到 System32");
 
     // 2. 注册 Credential Provider（HKLM）
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
@@ -219,6 +224,7 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         .map_err(|e| CustomResult::error(Some(format!("写 ThreadingModel 失败: {}", e)), None))?;
 
     // 4. 写入应用注册表配置（HKLM\SOFTWARE\facewinunlock-tauri）
+    emit_deployment_progress(&app, 55, "Windows Credential Provider 已注册");
     let app_reg_path = r"SOFTWARE\facewinunlock-tauri";
     let (app_key, _) = hklm
         .create_subkey_with_flags(app_reg_path, KEY_WRITE)
@@ -303,6 +309,7 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
         let _ = app_key.delete_value(obsolete);
     }
 
+    emit_deployment_progress(&app, 80, "应用策略和日志路径已配置");
     // 5. 自动创建 Unlock EXE 的定时任务（BootTrigger + SessionUnlock）
     //    用户安装后无需手动去 Options 页点"同步"，就能让面容识别自动可用
     //    add_scheduled_task 内部会把相对路径解析为 ROOT_DIR 下的绝对路径
@@ -329,6 +336,13 @@ pub fn deploy_core_components() -> Result<CustomResult, CustomResult> {
 // ──────────────────────────────────────────────────────────────────────────────
 // 卸载核心组件（删除 DLL + 清理注册表）
 // ──────────────────────────────────────────────────────────────────────────────
+fn emit_deployment_progress(app: &AppHandle, progress: u8, message: &str) {
+    let _ = app.emit(
+        "init-deploy-progress",
+        json!({ "progress": progress, "message": message }),
+    );
+}
+
 #[tauri::command]
 pub fn uninstall_init() -> Result<CustomResult, CustomResult> {
     if !is_elevated() {

@@ -51,6 +51,7 @@ fn try_create_tray(app: &AppHandle<Wry>) -> Result<Arc<TrayIcon<Wry>>, Box<dyn s
     tray.on_menu_event(move |app, event| match event.id.as_ref() {
         "show-window" => {
             let _ = window.show();
+            let _ = window.emit("app-window-reopened", ());
             let _ = window.set_focus();
         }
         "quit" => {
@@ -70,6 +71,7 @@ fn try_create_tray(app: &AppHandle<Wry>) -> Result<Arc<TrayIcon<Wry>>, Box<dyn s
             let app = tray.app_handle();
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
+                let _ = window.emit("app-window-reopened", ());
                 let _ = window.set_focus();
             }
         }

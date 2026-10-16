@@ -1,7 +1,8 @@
 // 引入必要的Win32 API和同步原语
 use windows::Win32::{Foundation::{E_NOTIMPL, HANDLE, STATUS_SUCCESS}, Security::Authentication::Identity::{LsaConnectUntrusted, LsaDeregisterLogonProcess, LsaLookupAuthenticationPackage, LSA_STRING}, UI::Shell::*};
 use std::sync::{Arc, Mutex};
-use crate::{dll_add_ref, dll_release, read_facewinunlock_registry, CPipeListener::CPipeListener, CSampleCredential::SampleCredential, SharedCredentials};
+use std::sync::atomic::{AtomicBool, Ordering};
+use crate::{dll_add_ref, dll_release, read_facewinunlock_registry, CPipeListener::CPipeListener, CSampleCredential::{SampleCredential, BROKER_FACE_LINK_FIELD_ID}, SharedCredentials};
 use windows_core::{implement, PSTR, PWSTR};
 use windows::Win32::Foundation::BOOL;
 
@@ -21,6 +22,8 @@ struct ProviderInner {
     advise_context: usize,
     listener: Option<Arc<Mutex<CPipeListener>>>,
     pub shared_creds: Arc<Mutex<SharedCredentials>>,
+    broker_manual_run: Arc<AtomicBool>,
+    broker_session_id: Option<u64>,
     pub auth_package_id: u32,
     pub credential: Option<ICredentialProviderCredential>,
 }
@@ -53,6 +56,8 @@ impl SampleProvider {
                 advise_context: 0,
                 listener: None,
                 shared_creds: shared,
+                broker_manual_run: Arc::new(AtomicBool::new(false)),
+                broker_session_id: None,
                 auth_package_id: auth_id,
                 credential: None,
             }),
@@ -60,11 +65,15 @@ impl SampleProvider {
     }
 
     fn reset_broker_session_state(inner: &mut ProviderInner) {
+        if let Some(session_id) = inner.broker_session_id.take() {
+            crate::CPipeListener::request_broker_cancel_async(session_id, "provider re-advise");
+        }
         if let Some(listener) = inner.listener.take() {
             listener.lock().unwrap().stop_and_join();
         }
         inner.credential = None;
         inner.shared_creds.lock().unwrap().reset_for_new_usage();
+        inner.broker_manual_run.store(false, Ordering::SeqCst);
         crate::CPipeListener::reset_broker_pin_fallback();
     }
 }
@@ -186,6 +195,7 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
                 inner.is_scenario_supported = false;
                 return Err(E_NOTIMPL.into());
             }
+            inner.broker_session_id = Some(crate::CPipeListener::new_broker_session_id());
         }
 
         inner.events = pcpe.clone(); // 保存事件接口
@@ -205,6 +215,8 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
                     is_primary,
                     is_broker,
                     inner.usage_scenario.0 as u32,
+                    inner.broker_session_id,
+                    inner.broker_manual_run.clone(),
                 ));
             }
         }
@@ -218,6 +230,10 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
         info!("SampleProvider::UnAdvise - 获取 inner 锁...");
         let mut inner = self.inner.lock().unwrap();
         info!("SampleProvider::UnAdvise - inner 锁已获取");
+        inner.broker_manual_run.store(false, Ordering::SeqCst);
+        if let Some(session_id) = inner.broker_session_id.take() {
+            crate::CPipeListener::request_broker_cancel_async(session_id, "provider unadvise");
+        }
         inner.events = None; // 清除事件接口
         inner.advise_context = 0; // 重置上下文ID
 
@@ -239,14 +255,22 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
 
     /// 获取字段描述符的数量
     fn GetFieldDescriptorCount(&self) -> windows_core::Result<u32> {
-        info!("SampleProvider::GetFieldDescriptorCount - 字段数量: 2");
-        Ok(2)
+        let inner = self.inner.lock().unwrap();
+        let broker = inner.usage_scenario.0 == 4
+            && crate::current_process_exe_name() == "credentialuibroker.exe";
+        let count = if broker { 3 } else { 2 };
+        info!("SampleProvider::GetFieldDescriptorCount - 字段数量: {}", count);
+        Ok(count)
     }
 
     /// 获取指定索引的字段描述符
     /// dwindex: 字段索引
     fn GetFieldDescriptorAt(&self, dwindex: u32) -> windows_core::Result<*mut CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR> {
         info!("SampleProvider::GetFieldDescriptorAt - 获取字段 {} 的描述符", dwindex);
+        let inner = self.inner.lock().unwrap();
+        let broker = inner.usage_scenario.0 == 4
+            && crate::current_process_exe_name() == "credentialuibroker.exe";
+        drop(inner);
         unsafe {
             // 分配字段描述符的内存（使用CoTaskMemAlloc，系统会负责释放）
             let size = std::mem::size_of::<CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR>();
@@ -261,6 +285,7 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             let (ft, label) = match dwindex {
                 0 => (CPFT_TILE_IMAGE, "面容图标"),
                 1 => (CPFT_SMALL_TEXT, "面容解锁"),
+                BROKER_FACE_LINK_FIELD_ID if broker => (CPFT_COMMAND_LINK, "使用人脸验证"),
                 _ => {
                     error!("SampleProvider::GetFieldDescriptorAt - 无效的字段索引: {}", dwindex);
                     return Err(windows::Win32::Foundation::E_INVALIDARG.into());
@@ -337,7 +362,7 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             // 防止 UAC 多次调用 GetCredentialCount 导致 autologon 丢失 (#112)
             let autologon = {
                 let creds = inner.shared_creds.lock().unwrap();
-                creds.is_unlocked
+                creds.has_pending_face_authorization()
             };
 
             if autologon {
@@ -348,6 +373,18 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
             } else if let Some(_l) = &inner.listener {
                 *pdwcount = if show_tile { 1 } else { 0 };
                 *pbautologonwithdefault = BOOL::from(false);
+                // broker 密码场景（查看密码/浏览器填充）默认选中人脸磁贴：命令链接
+                // 直接可见，用户无需手动切换磁贴。仅选中、不自动登录——识别仍只能由
+                // CommandLinkClicked 显式触发；主登录/锁屏场景保持 NO_DEFAULT，
+                // 避免默认选中 + SetSelected 组合出的自动登录重试循环。
+                if show_tile
+                    && inner.usage_scenario.0 == 4
+                    && crate::current_process_exe_name() == "credentialuibroker.exe"
+                    && crate::classify_broker_scene(inner.dwflags).uses_face()
+                {
+                    *pdwdefault = 0;
+                    info!("SampleProvider::GetCredentialCount - broker 密码场景默认选中人脸磁贴");
+                }
             } else {
                 *pdwcount = 0;
                 *pbautologonwithdefault = BOOL::from(false);
@@ -377,6 +414,7 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
                 inner.events.clone(),
                 inner.advise_context,
                 is_broker,
+                inner.broker_manual_run.clone(),
             );
             let cred_interface: ICredentialProviderCredential = cred.into();
             inner.credential = Some(cred_interface.clone());

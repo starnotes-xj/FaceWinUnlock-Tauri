@@ -43,7 +43,9 @@
         accountType: 'local',
         username: '',
         password: '',
-        domain: ''
+        domain: '',
+        isEditing: false,
+        changePassword: false
     });
 
     const isEditMode = computed(() => route.query.mode === 'edit');
@@ -114,6 +116,8 @@
         authForm.username = '';
         authForm.password = '';
         authForm.domain = '';
+        authForm.isEditing = false;
+        authForm.changePassword = false;
     }
 
     // 页面出现时就做不涉及隐私采集的准备：后台加载模型，并让 Unlock 服务释放锁屏预热
@@ -136,8 +140,8 @@
         if (route.query.mode === 'edit') {
             editFaceData = facesStore.getFaceById(route.query.id);
             if (editFaceData) {
+                authForm.isEditing = true;
                 authForm.username = editFaceData.user_name;
-                authForm.password = editFaceData.user_pwd;
                 authForm.accountType = editFaceData.account_type;
                 authForm.domain = editFaceData.json_data.domain || '';
                 faceName.value = editFaceData.json_data.alias;
@@ -426,7 +430,8 @@
             isEditFaceImage = true;
         }
 
-        if (!authForm.username || !authForm.password) {
+        if (!authForm.username || (!isEditMode.value && !authForm.password) ||
+            (isEditMode.value && authForm.changePassword && !authForm.password)) {
             ElMessage.warning('请填写完整的账号密码信息')
             return;
         }
@@ -461,7 +466,7 @@
             // 如果是修改，判断数据是否完全一致
             if(
                 authForm.username == editFaceData.user_name &&
-                authForm.password == editFaceData.user_pwd &&
+                !authForm.changePassword &&
                 authForm.accountType == editFaceData.account_type &&
                 authForm.domain == (editFaceData.json_data.domain || '') &&
                 faceName.value == editFaceData.json_data.alias &&
@@ -503,6 +508,7 @@
                 await facesStore.addFace({
                     "user_name": authForm.username,
                     "user_pwd": authForm.password,
+                    "update_password": true,
                     "account_type": authForm.accountType,
                     "face_token": face_token,
                     "json_data": JSON.stringify({
@@ -518,6 +524,7 @@
                 await facesStore.editFace({
                     "user_name": authForm.username,
                     "user_pwd": authForm.password,
+                    "update_password": authForm.changePassword,
                     "account_type": authForm.accountType,
                     "face_token": face_token,
                     "json_data": JSON.stringify({

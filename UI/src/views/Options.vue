@@ -895,7 +895,7 @@
 							<div class="option-row">
 								<div class="row-text">
 									<p class="label">启用应用登录</p>
-									<p class="sub">打开应用时需要输入密码验证，增强安全性</p>
+									<p class="sub">打开应用时可用已登记人脸或登录密码验证，增强安全性</p>
 								</div>
 								<el-switch v-model="config.loginEnabled" />
 							</div>

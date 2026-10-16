@@ -65,6 +65,7 @@ Run these first. Stop the release if any item fails.
 7. Perform a Google or webauthn.io passkey action and choose Windows Hello or a security key; the generic Credential Provider must not start its camera.
 8. Separately choose a passkey saved with FaceWinUnlock; the plugin's dedicated face authorization starts the camera and succeeds.
 9. Enable automatic lock with a 30-second timeout and confirm it locks through the interactive-session helper.
+10. During first-time deployment, confirm progress follows completed DLL and registry stages; after deployment, a missing Unlock task or camera appears as a warning instead of a successful all-ready result.
 10. Sleep/resume and repeat face unlock plus manual PIN unlock.
 
 ## Install, Restart, And First Enrollment
@@ -84,8 +85,9 @@ Use an installed build with the existing face-recognition type set to `delay`.
 2. Leave the computer at the lock screen with no person present. Expected: at most three automatic recognition attempts occur; afterward the camera is released according to the normal idle policy and a later mouse/keyboard event is required.
 3. After reaching the desktop, press `Win+L` and remain away from the camera longer than the configured delay. Expected: no automatic recognition or unlock occurs.
 4. On that same Win+L session, move the mouse or press a key. Expected: the existing input hook starts recognition and face unlock works.
-5. Start a supported browser password-fill/CREDUI flow and a FaceWinUnlock Passkey flow. Expected: CREDUI keeps its legacy run-gated fallback behavior and the Passkey provider remains on its dedicated face-authorization pipe.
-6. Restart LogonUI or the Unlock worker between cold boot and Win+L tests. Expected: the current boot marker prevents a second unattended boot claim; later sessions remain manual.
+5. Start a supported browser password-fill/CREDUI flow and a FaceWinUnlock Passkey flow. Expected: browser CredUI starts recognition only after the user clicks the face tile's password-fill command link; the Passkey provider remains on its dedicated face-authorization pipe.
+6. Repeat with the two flows overlapping: start a browser face match, then trigger a FaceWinUnlock Passkey request before the broker serializes credentials. Expected: broker recognition is discarded or final serialization is denied, pending browser credentials are cleared, Windows falls back to its native PIN, and only the dedicated Passkey request can receive the Passkey face decision. Then reverse the order and confirm the broker credential cannot serialize while Passkey face authorization holds the route mutex.
+7. Restart LogonUI or the Unlock worker between cold boot and Win+L tests. Expected: the current boot marker prevents a second unattended boot claim; later sessions remain manual.
 
 ## Enrollment And Camera Ownership
 
@@ -187,16 +189,34 @@ Test Chrome and Edge first, then at least one of Brave, Opera/Opera GX, Vivaldi,
 
 | Scenario | Expected generic Provider behavior |
 |---|---|
-| Reveal/show saved password | Face starts and succeeds |
-| Website saved-password fill | Face starts and succeeds |
-| Explicit password manager verification | Face starts and succeeds |
+| Reveal/show saved password | Face tile appears preselected with its command link visible; the link starts recognition |
+| Website saved-password fill | Face tile appears preselected with its command link visible; the link starts recognition |
+| Website saved-password fill on a page titled “登录 - …” or “Sign in - …” | Same manual face path when the monitor is Ready and inactive; the page title alone must not classify it as Passkey |
+| Browser prompt with no command-link click | Mouse and keyboard input do not start recognition; the camera stays off |
+| Explicit password manager verification | Face tile appears; its command link starts recognition |
 | Google Passkey or webauthn.io | Generic Provider skips; Windows/plugin flow remains usable |
 | Hardware security key | Generic Provider skips |
 | Set/change Windows PIN | Generic Provider skips |
 | Incognito/InPrivate unknown prompt | Falls back to Windows PIN |
 | Unsupported browser unknown prompt | Falls back to Windows PIN |
+| WebAuthn monitor loses Ready before the click or while recognition is running | Falls back to Windows PIN without credential submission |
+
+For a browser fill prompt, also try an incorrect Windows PIN and then reopen the prompt and cancel it. Check each fresh `SetUsageScenario` log entry separately: a password-fill attempt on a login page must not be classified as `Passkey` solely because of the page title. Confirm that input alone never logs a broker `run` and the camera stays off; then click the command link and verify exactly one session-matched broker `run`. After cancel or prompt close, confirm the camera turns off within 5 seconds. Cancel and incorrect-PIN retry behavior belongs to the browser's CredUI caller; verify that it remains responsive. Repeat the test with a real passkey request on a login page, including mouse/keyboard input before the WebAuthn transaction begins, and confirm that the generic Provider does not submit a credential.
+
+After a browser CredUI session runs or returns credentials, open a fresh browser prompt without clicking the FaceWinUnlock command link. Expected: the Unlock log contains no delayed `run requested by delayed recognition mode` for that new CredUI session; a prior session's `run` must not carry over.
 
 Check `facewinunlock.log` for the owner process, scene, `webauthn_ready`, and `webauthn_active`. Logs must not contain credential serialization hex, passwords, PINs, RP IDs, or usernames from WebAuthn requests.
+
+### CredUI Intent Prototype (Offline Only)
+
+These checks exercise implementation mechanics only. The state machine is not connected to the Unlock service, and the probe refuses browser launch/attachment. Do not treat these results as Chrome, Edge, Windows CredUI, cursor, or PIN-retry acceptance.
+
+```powershell
+cargo test -p unlock --lib
+.\scripts\build-credui-probe.ps1 -Test
+```
+
+The Rust tests cover manual-required suppression after a nonzero auth error, cancellation, or request timeout, WebAuthn vetoes, credential selection, single-use output, and exclusive camera ownership. The CTest cases use synthetic CredUI-shaped functions and verify debugger cleanup, module unload, and crash handling without opening a real credential dialog.
 
 ### Registry Kill Switch
 
@@ -257,3 +277,26 @@ Promote the candidate only when:
 - Passkey keep/reinstall behavior passes on Windows 11 24H2+.
 - Camera release is timely after manual PIN, cancellation, sleep/resume, and enrollment exit.
 - Logs contain no secrets and no unexplained monitor, helper, pipe, or worker failures.
+
+## Management-App Login
+
+1. Enable app login and choose `showApp`. Verify startup requests login, then unlock with the configured password.
+2. With the main window open, drag it, switch to another window and back, and click the taskbar entry. Expected: ordinary focus changes do not return to the login page.
+3. Click the tray icon and tray-menu Show action while the main window is visible; each explicit show action should return to the login page. Close the main window to the tray and repeat both actions. Repeat using a second non-silent process launch.
+4. Register an enabled face and test app face login. Expected: only that local enabled template can match, one-face frames must pass the passive liveness threshold, and a different face, multiple faces, missing camera, or failed liveness does not enter the app.
+5. Disable liveness in enrollment settings and repeat app face login. Expected: app login still performs liveness detection. Then test password login as the fallback.
+6. Select `onlyOpenApp` and a time-limited login method. Expected: the former asks at startup but not on focus; the latter asks again after expiry. Confirm camera ownership is returned to Unlock after every app-face attempt.
+
+The face-login route uses the local passive liveness model and still requires installed Windows camera testing; unit tests and the Vue build do not establish spoof resistance or hardware acceptance.
+
+## Windows Credential Storage
+
+1. On a disposable installation with legacy face records, launch the elevated UI. Expected: migration completes before the SQLite plugin opens the database; face records and unlock behavior remain available.
+2. Inspect `faces.user_pwd` in the migrated database. Expected: each value uses the `FWDP1:` protected format and contains no original password text.
+3. Inspect the Vue face store and browser-visible state. Expected: queries omit `user_pwd`; editing a face leaves the password field blank and unchanged unless the user selects or types a replacement.
+4. Restart the SYSTEM Unlock service and unlock with each migrated face. Expected: the service decrypts credentials and Windows logon succeeds; a damaged ciphertext or unavailable registry key skips that face and leaves Windows PIN available.
+5. Run an older database without opening the management UI. Expected: legacy credentials remain usable until the UI migration runs; after migration, the database no longer stores them in plaintext.
+6. Confirm logs contain neither plaintext passwords nor decrypted values. Verify the `CredentialProtection` registry subkey DACL grants access only to SYSTEM and Administrators.
+7. Run the Rust zeroization unit tests and confirm locally owned byte, UTF-8, and UTF-16 buffers are overwritten. This does not verify copies retained by SQLite, WebView, Windows APIs, or the operating system.
+
+The migration and DPAPI tests validate code paths, not the installed service identity, registry ACL, database backup/restore, or real Windows logon. Test migration on a disposable copy before release.

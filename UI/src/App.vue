@@ -7,6 +7,7 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import { useOptionsStore } from "./stores/options";
 import { useRouter, useRoute } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { info, warn } from '@tauri-apps/plugin-log';
 import { useFacesStore } from './stores/faces.js';
 import { attachConsole } from "@tauri-apps/plugin-log";
@@ -60,6 +61,11 @@ const route = useRoute();
 const optionsStore = useOptionsStore();
 const facesStore = useFacesStore();
 const currentWindow = getCurrentWindow();
+let unlistenAppWindowReopened;
+
+onUnmounted(() => {
+  unlistenAppWindowReopened?.();
+});
 
 // 打包时注释
 attachConsole();
@@ -68,7 +74,9 @@ invoke('get_install_dir').then((res)=>{
   const dir = typeof res?.data === 'string' ? res.data : (res?.data ?? '');
   if (!dir) { throw new Error('get_install_dir 返回空'); }
   localStorage.setItem('exe_dir', dir);
-  return connect();
+  return connect().then(() => invoke('migrate_face_credentials')).then((migrated) => {
+    if (migrated > 0) info(`已保护并迁移 ${migrated} 条 Windows 登录凭据`);
+  });
 }).then(()=>{
   return optionsStore.init();
 }).then(async ()=>{
@@ -121,18 +129,29 @@ invoke('get_install_dir').then((res)=>{
   }
   isInit.value = true;
 
+  unlistenAppWindowReopened = await listen("app-window-reopened", () => {
+    if (optionsStore.getOptionValueByKey("is_initialized") === "true" &&
+      optionsStore.getOptionValueByKey("loginEnabled") === "true" &&
+      optionsStore.getOptionValueByKey("loginMethod") === "showApp" &&
+      route.path !== '/login') {
+      info("应用窗口从隐藏状态重新打开，需要进行登录认证");
+      router.replace('/login');
+    }
+  });
+
   const appWindow = getCurrentWebviewWindow();
   appWindow.onFocusChanged(({ payload: focused }) => {
     if (focused && optionsStore.getOptionValueByKey("is_initialized") === "true" && localStorage.getItem("proactiveOutOfFocus") !== "true") {
       if(optionsStore.getOptionValueByKey("loginEnabled") === "true" && route.path !== '/login'){
         const loginMethod = optionsStore.getOptionValueByKey("loginMethod");
         let loginLog = false;
-        if(loginMethod === "showApp"){ router.replace('/login'); loginLog = true; }
-        else if(loginMethod.includes("time:")){
+        if(loginMethod.includes("time:")){
           let time = parseInt(loginMethod.split(":")[1]);
           const lastLoginTime = localStorage.getItem("lastLoginTime") || '0';
           if(Date.now() - parseInt(lastLoginTime) >= time * 60 * 1000){ router.replace('/login'); loginLog = true; }
-        } else if(loginMethod !== "onlyOpenApp"){ warn("未知的登录显示方法：" + optionsStore.getOptionValueByKey("loginMethod")); }
+        } else if(loginMethod !== "onlyOpenApp" && loginMethod !== "showApp"){
+          warn("未知的登录显示方法：" + loginMethod);
+        }
         if(loginLog){ info("需要进行登录认证"); }
       }
     }

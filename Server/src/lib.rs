@@ -31,6 +31,10 @@ pub mod CSampleProvider;
 pub mod CSampleCredential;
 pub mod CPipeListener;
 pub mod Pipe;
+pub mod credui_route_guard;
+mod credui_observation;
+#[path = "../../Common/zeroization.rs"]
+pub mod zeroization;
 
 use CSampleProvider::SampleProvider;
 
@@ -354,9 +358,9 @@ pub fn webauthn_monitor_state() -> WebAuthnMonitorState {
     }
 }
 
-pub fn is_webauthn_guard_active() -> bool {
+pub fn browser_broker_guard_blocks_face() -> bool {
     let state = webauthn_monitor_state();
-    state.ready && state.active
+    !state.ready || state.active
 }
 
 pub fn classify_broker_scene(dwflags: u32) -> BrokerScene {
@@ -399,8 +403,7 @@ pub fn classify_broker_context(
     ];
     const SETTINGS_PROCESSES: &[&str] = &["systemsettings.exe", "bioenrollmenthost.exe"];
 
-    // 标题关键词仅在「WebAuthn 监视器不可用」的兜底路径使用；监视器 Ready 的正常路径
-    // 完全不依赖它们，改由 webauthn_active（进行中的 CTAP 事务）+ owner 进程判定。
+    // 标题仅作为明确的排除信号或密码管理器提示；未知浏览器请求还须监视器 Ready。
     const PASSKEY_KEYWORDS: &[&str] = &[
         "通行密钥", "passkey", "安全密钥", "security key", "保存通行密钥",
         "创建通行密钥", "save passkey", "save a passkey", "create passkey",
@@ -416,17 +419,6 @@ pub fn classify_broker_context(
         "saved password", "saved passwords", "查看密码", "显示密码",
         "view password", "show password", "reveal password",
     ];
-    const PASSWORD_FILL_KEYWORDS: &[&str] = &[
-        "填充密码", "填充您的密码", "填充你的密码", "fill password",
-        "fill your password", "filling passwords", "autofill password",
-    ];
-    // 浏览器登录页标题关键词（非密码填充）。Google/微软等账号登录页会先弹 CredUI
-    // 再启动 CTAP 事务（MakeCredential/GetAssertion），届时 webauthn_active 尚未置起。
-    // 保守跳过人脸，避免登录页误触发面容识别。
-    const LOGIN_AUTH_KEYWORDS: &[&str] = &[
-        "登录 -", "sign in -", "sign-in", "log in -", "log in to",
-    ];
-
     // ① 设置 / PIN / 指纹录入：靠触发进程识别（结构信号）。任何情况都不在此走人脸。
     if has_process(SETTINGS_PROCESSES) {
         return BrokerScene::PinOrSettings;
@@ -460,29 +452,22 @@ pub fn classify_broker_context(
 
     // ⑥ 触发进程是浏览器：到此 active=false（passkey 已在 ②③ 排除）。
     if has_process(BROWSER_PROCESSES) {
-        // 查看已保存密码 / 密码管理器重新验证：明确的凭据查看，始终走人脸。
+        if !context.webauthn_ready {
+            return BrokerScene::MonitorUnavailable;
+        }
+        // 查看已保存密码 / 密码管理器重新验证：提供用户手动启动的人脸磁贴。
         if title_has(PASSWORD_KEYWORDS) {
             return BrokerScene::Password;
         }
-        // 其余浏览器 CredUI = 密码填充。受 CREDUI_BROWSER_PASSWORD_FILL 开关控制。
-        // 登录页（标题含"登录"/"sign in"）且监视器 Ready → 跳过人脸，不受开关影响。
-        // Google/微软账号登录先弹 CredUI 再启 CTAP，此时 active 尚未置起。
-        if context.webauthn_ready && title_has(LOGIN_AUTH_KEYWORDS) {
-            return BrokerScene::Passkey;
-        }
+        // 页面标题中的“登录”只描述网站，不能证明 CredUI 在请求通行密钥。
+        // Passkey 仍由上面的明确标题信号和 WebAuthn Active 拦截，并在 run 前复查。
         if !browser_password_fill_enabled {
             return BrokerScene::Unknown;
         }
-        // ★ 监视器 Ready 且无 active（CTAP + 枚举均无）：枚举事件 2250 已为
-        //   passkey 弹窗提供 5s 早期 active 窗口。到此 active=false → 必为密码填充。
-        if context.webauthn_ready {
-            return BrokerScene::BrowserPasswordFill;
-        }
-        // 监视器不可用：纯关键词兜底。
-        if title_has(PASSWORD_FILL_KEYWORDS) {
-            return BrokerScene::BrowserPasswordFill;
-        }
-        return BrokerScene::MonitorUnavailable;
+        // 监视器 Ready 且无 Active、来源为受支持浏览器：允许配置开启的未知填充兜底。
+        // 这不是确定的密码填充信号；枚举事件 2250 的早期 Active 窗口及提交前
+        // 复查用于降低先弹 CredUI、后开始 CTAP 的误判风险。
+        return BrokerScene::BrowserPasswordFill;
     }
 
     // ⑦ 非浏览器 App 的查看密码兜底。
@@ -506,11 +491,32 @@ pub struct SharedCredentials {
     pub broker_fallback_to_pin: bool, // credentialuibroker 场景已放弃本 Provider，交还 Windows Hello PIN
 }
 
+impl Drop for SharedCredentials {
+    fn drop(&mut self) {
+        zeroization::zeroize_string(&mut self.username);
+        zeroization::zeroize_string(&mut self.password);
+        zeroization::zeroize_string(&mut self.domain);
+    }
+}
+
 impl SharedCredentials {
+    pub fn has_pending_face_authorization(&self) -> bool {
+        self.is_ready && self.is_unlocked
+    }
+
+    pub fn consume_face_authorization(&mut self) -> bool {
+        if !self.has_pending_face_authorization() {
+            return false;
+        }
+        self.is_unlocked = false;
+        zeroization::zeroize_string(&mut self.password);
+        true
+    }
+
     pub fn reset_for_new_usage(&mut self) {
-        self.username.clear();
-        self.password.clear();
-        self.domain.clear();
+        zeroization::zeroize_string(&mut self.username);
+        zeroization::zeroize_string(&mut self.password);
+        zeroization::zeroize_string(&mut self.domain);
         self.domain.push('.');
         self.is_ready = false;
         self.is_unlocked = false;
@@ -745,7 +751,7 @@ mod shared_credentials_tests {
         let chinese = context(
             "windows 安全中心 google 密码管理工具",
             &["chrome.exe"],
-            false,
+            true,
             false,
             false,
         );
@@ -754,7 +760,7 @@ mod shared_credentials_tests {
         let english = context(
             "windows security google password manager",
             &["msedge.exe"],
-            false,
+            true,
             false,
             false,
         );
@@ -814,7 +820,50 @@ mod shared_credentials_tests {
     }
 
     #[test]
-    fn broker_scene_detects_password_fill_prompt_text() {
+    fn face_authorization_can_be_consumed_only_once() {
+        let mut credentials = SharedCredentials {
+            username: "face-user".to_string(),
+            password: "face-password".to_string(),
+            domain: ".".to_string(),
+            is_ready: true,
+            is_unlocked: true,
+            broker_fallback_to_pin: false,
+        };
+
+        assert!(credentials.has_pending_face_authorization());
+        assert!(credentials.consume_face_authorization());
+        assert!(credentials.password.is_empty());
+        assert!(!credentials.has_pending_face_authorization());
+        assert!(!credentials.consume_face_authorization());
+    }
+
+    #[test]
+    fn login_page_title_does_not_turn_password_fill_into_passkey() {
+        // The browser page title is not the CredUI request's purpose. A normal
+        // password fill on a login page can have the same title as a passkey flow.
+        let fill = context(
+            "windows 安全中心 登录 - 蓝奏云 - google chrome",
+            &["credentialuibroker.exe", "chrome.exe"],
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            classify_broker_context(&fill, true),
+            BrokerScene::BrowserPasswordFill
+        );
+        assert_eq!(classify_broker_context(&fill, false), BrokerScene::Unknown);
+
+        let mut passkey = fill.clone();
+        passkey.webauthn_active = true;
+        assert_eq!(
+            classify_broker_context(&passkey, true),
+            BrokerScene::Passkey
+        );
+    }
+
+    #[test]
+    fn browser_prompt_text_cannot_bypass_monitor_failure() {
         let context = context(
             "windows 安全中心 chrome 正尝试在 wx.mail.qq.com 上填充您的密码",
             &["chrome.exe"],
@@ -824,7 +873,7 @@ mod shared_credentials_tests {
         );
         assert_eq!(
             classify_broker_context(&context, true),
-            BrokerScene::BrowserPasswordFill
+            BrokerScene::MonitorUnavailable
         );
     }
 
@@ -852,28 +901,6 @@ mod shared_credentials_tests {
         assert_eq!(
             classify_broker_context(&private, true),
             BrokerScene::PrivateBrowser
-        );
-    }
-
-    #[test]
-    fn login_page_with_ready_monitor_skips_face() {
-        // 登录页 + 监视器 Ready → 即使 active=false（CTAP 未启），标题含"登录 -"
-        // 也应跳过人脸。Google/微软账号登录先弹 CredUI 再启 CTAP 事务。
-        let google_login = context(
-            "windows 安全中心 登录 - google 账号 - google chrome",
-            &["credentialuibroker.exe", "chrome.exe"],
-            true,
-            false,
-            false,
-        );
-        assert_eq!(
-            classify_broker_context(&google_login, true),
-            BrokerScene::Passkey
-        );
-        // 开关关闭时仍应跳过。
-        assert_eq!(
-            classify_broker_context(&google_login, false),
-            BrokerScene::Passkey
         );
     }
 

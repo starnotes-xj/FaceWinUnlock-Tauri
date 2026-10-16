@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-use tauri::{tray::TrayIcon, Manager, Wry};
+use tauri::{tray::TrayIcon, Emitter, Manager, Wry};
 use windows::Win32::{
     Foundation::HWND,
     System::RemoteDesktop::{WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION},
@@ -14,13 +14,19 @@ use windows::Win32::{
 pub mod modules;
 pub mod proc;
 pub mod utils;
+#[path = "../../../Common/credential_protection.rs"]
+pub mod credential_protection;
+#[path = "../../../Common/zeroization.rs"]
+pub mod zeroization;
 use modules::faces::{
-    check_face_from_camera, check_face_from_img, save_face_registration, verify_face,
+    check_face_from_camera, check_face_from_img, save_face_registration, verify_app_login_face,
+    verify_face,
 };
 use modules::init::{
     check_admin_privileges, check_camera_status, cleanup_stale_cp_dll,
     deploy_core_components, uninstall_init,
 };
+use modules::credential_security::{migrate_face_credentials, protect_credential};
 use modules::options::write_to_registry;
 use modules::passkey_plugin::{
     get_passkey_plugin_status, install_passkey_plugin, open_passkey_plugin_manager,
@@ -127,10 +133,9 @@ pub fn run() {
                 }
 
                 let main = app.get_webview_window("main").expect("no main window");
-                if !main.is_visible().unwrap() {
-                    main.show().unwrap();
-                }
-                main.set_focus().unwrap();
+                let _ = main.show();
+                let _ = main.emit("app-window-reopened", ());
+                let _ = main.set_focus();
             }))
             .plugin(tauri_plugin_fs::init())
             // 对话框
@@ -225,7 +230,10 @@ pub fn run() {
                 check_face_from_img,
                 check_face_from_camera,
                 verify_face,
+                verify_app_login_face,
                 save_face_registration,
+                protect_credential,
+                migrate_face_credentials,
                 // 配置模块
                 write_to_registry,
                 // 通用api

@@ -7,6 +7,8 @@ use opencv::{
     imgcodecs, imgproc,
     prelude::*,
 };
+use rusqlite::Connection;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::utils::custom_result::CustomResult;
@@ -21,6 +23,125 @@ struct VerificationCache {
 }
 static VERIFY_CACHE: std::sync::LazyLock<Mutex<Option<VerificationCache>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
+
+const FACE_FEATURE_LENGTH: usize = 128;
+
+struct AppLoginFaceTemplate {
+    feature: Vec<f32>,
+    threshold: f64,
+    detection_threshold: f32,
+}
+
+#[derive(Deserialize, Default)]
+struct AppLoginFaceSettings {
+    #[serde(default)]
+    lock: bool,
+    threshold: Option<f64>,
+    #[serde(rename = "faceDetectionThreshold")]
+    face_detection_threshold: Option<f32>,
+}
+
+fn decode_face_feature(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.len() != FACE_FEATURE_LENGTH * std::mem::size_of::<f32>() {
+        return None;
+    }
+
+    let values: Vec<f32> = bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|chunk| Some(f32::from_le_bytes(chunk.try_into().ok()?)))
+        .collect::<Option<_>>()?;
+    values
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(values)
+}
+
+fn cosine_similarity_values(left: &[f32], right: &[f32]) -> Option<f64> {
+    if left.len() != FACE_FEATURE_LENGTH || right.len() != FACE_FEATURE_LENGTH {
+        return None;
+    }
+
+    let mut dot = 0.0f64;
+    let mut left_norm = 0.0f64;
+    let mut right_norm = 0.0f64;
+    for (&left, &right) in left.iter().zip(right) {
+        if !left.is_finite() || !right.is_finite() {
+            return None;
+        }
+        let left = left as f64;
+        let right = right as f64;
+        dot += left * right;
+        left_norm += left * left;
+        right_norm += right * right;
+    }
+
+    if left_norm == 0.0 || right_norm == 0.0 {
+        return None;
+    }
+    Some(dot / (left_norm.sqrt() * right_norm.sqrt()))
+}
+
+fn load_app_login_face_templates() -> Result<(Vec<AppLoginFaceTemplate>, f32), String> {
+    let database_path = ROOT_DIR.join("database.db");
+    let connection =
+        Connection::open(&database_path).map_err(|e| format!("打开本地人脸数据库失败: {e}"))?;
+
+    let liveness_threshold = connection
+        .query_row(
+            "SELECT val FROM options WHERE key = 'livenessThreshold'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.50)
+        .clamp(0.30, 1.0);
+
+    let mut statement = connection
+        .prepare("SELECT face_token, json_data FROM faces")
+        .map_err(|e| format!("读取本地人脸列表失败: {e}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("查询本地人脸列表失败: {e}"))?;
+
+    let mut templates = Vec::new();
+    for row in rows {
+        let (face_token, json_data) = row.map_err(|e| format!("读取人脸记录失败: {e}"))?;
+        let settings = match serde_json::from_str::<AppLoginFaceSettings>(&json_data) {
+            Ok(settings) if !settings.lock => settings,
+            _ => continue,
+        };
+        let face_id = match uuid::Uuid::parse_str(&face_token) {
+            Ok(face_id) => face_id.hyphenated().to_string(),
+            Err(_) => continue,
+        };
+        let feature_bytes =
+            match std::fs::read(ROOT_DIR.join("faces").join(format!("{face_id}.face"))) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+        let feature = match decode_face_feature(&feature_bytes) {
+            Some(feature) => feature,
+            None => continue,
+        };
+        let threshold = settings.threshold.unwrap_or(60.0).clamp(0.0, 100.0) / 100.0;
+        let detection_threshold = settings
+            .face_detection_threshold
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.90)
+            .clamp(0.1, 0.99);
+        templates.push(AppLoginFaceTemplate {
+            feature,
+            threshold,
+            detection_threshold,
+        });
+    }
+
+    Ok((templates, liveness_threshold))
+}
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
@@ -561,10 +682,125 @@ pub fn verify_face(
     ))
 }
 
+/// Verify the current user for the management app's own login screen.
+/// This deliberately uses only enabled local feature files and always runs passive liveness,
+/// regardless of the optional liveness setting used by enrollment preview.
+#[tauri::command]
+pub fn verify_app_login_face(camera_rotation: i32) -> Result<CustomResult, CustomResult> {
+    let (templates, liveness_threshold) =
+        load_app_login_face_templates().map_err(|e| CustomResult::error(Some(e), None))?;
+    if templates.is_empty() {
+        return Ok(CustomResult::success(
+            None,
+            Some(json!({"success": false, "message": "没有可用于应用登录的已启用人脸"})),
+        ));
+    }
+
+    let frame = {
+        let mut state = APP_STATE
+            .lock()
+            .map_err(|e| CustomResult::error(Some(format!("获取 APP_STATE 失败: {e}")), None))?;
+        let camera = state
+            .camera
+            .as_mut()
+            .ok_or_else(|| CustomResult::error(Some("摄像头未打开".to_string()), None))?;
+        let mut frame = Mat::default();
+        camera
+            .inner
+            .read(&mut frame)
+            .map_err(|e| CustomResult::error(Some(format!("读取摄像头帧失败: {e:?}")), None))?;
+        if frame.empty() {
+            return Ok(CustomResult::success(
+                None,
+                Some(json!({"success": false, "message": "摄像头尚未准备好，请重试"})),
+            ));
+        }
+        frame
+    };
+    let frame =
+        rotate_frame(&frame, camera_rotation).map_err(|e| CustomResult::error(Some(e), None))?;
+    let face_detection_threshold = templates
+        .iter()
+        .map(|template| template.detection_threshold)
+        .fold(0.99, f32::min);
+    let faces = detect_faces(&frame, face_detection_threshold)
+        .map_err(|e| CustomResult::error(Some(e), None))?;
+    if faces.rows() == 0 {
+        return Ok(CustomResult::success(
+            None,
+            Some(json!({"success": false, "message": "未检测到人脸，请正对摄像头"})),
+        ));
+    }
+    if faces.rows() != 1 {
+        return Ok(CustomResult::success(
+            None,
+            Some(json!({"success": false, "message": "请确保画面中只有一个人脸"})),
+        ));
+    }
+
+    let live_score =
+        liveness_score(&frame, &faces).map_err(|e| CustomResult::error(Some(e), None))?;
+    if live_score < liveness_threshold {
+        return Ok(CustomResult::success(
+            None,
+            Some(json!({"success": false, "message": "活体检测未通过，请看向摄像头后重试"})),
+        ));
+    }
+
+    let face_row = faces
+        .row(0)
+        .map_err(|e| CustomResult::error(Some(format!("获取人脸检测结果失败: {e:?}")), None))?
+        .try_clone()
+        .map_err(|e| CustomResult::error(Some(format!("克隆人脸检测结果失败: {e:?}")), None))?;
+    let feature =
+        extract_feature(&frame, &face_row).map_err(|e| CustomResult::error(Some(e), None))?;
+    let feature_values = feature
+        .data_typed::<f32>()
+        .map_err(|e| CustomResult::error(Some(format!("读取人脸特征失败: {e:?}")), None))?;
+    let matched = templates.iter().any(|template| {
+        cosine_similarity_values(feature_values, &template.feature)
+            .is_some_and(|score| score >= template.threshold)
+    });
+
+    let message = if matched {
+        "人脸验证通过"
+    } else {
+        "人脸不匹配，请重试或使用密码登录"
+    };
+    Ok(CustomResult::success(
+        None,
+        Some(json!({"success": matched, "message": message})),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use opencv::core::CV_8UC3;
+
+    #[test]
+    fn decodes_only_finite_128_value_face_features() {
+        let bytes: Vec<u8> = (0..FACE_FEATURE_LENGTH)
+            .flat_map(|_| 0.25f32.to_le_bytes())
+            .collect();
+        let decoded = decode_face_feature(&bytes).unwrap();
+        assert_eq!(decoded.len(), FACE_FEATURE_LENGTH);
+        assert!(decoded.iter().all(|value| *value == 0.25));
+        assert!(decode_face_feature(&bytes[..bytes.len() - 1]).is_none());
+        let non_finite: Vec<u8> = (0..FACE_FEATURE_LENGTH)
+            .flat_map(|_| f32::NAN.to_le_bytes())
+            .collect();
+        assert!(decode_face_feature(&non_finite).is_none());
+    }
+
+    #[test]
+    fn cosine_similarity_uses_the_existing_face_threshold_scale() {
+        let same = vec![1.0f32; FACE_FEATURE_LENGTH];
+        let opposite = vec![-1.0f32; FACE_FEATURE_LENGTH];
+        assert!((cosine_similarity_values(&same, &same).unwrap() - 1.0).abs() < 1e-12);
+        assert!((cosine_similarity_values(&same, &opposite).unwrap() + 1.0).abs() < 1e-12);
+        assert!(cosine_similarity_values(&same, &same[..10]).is_none());
+    }
 
     // #20a：按最长边缩放（多尺度用），4K→576 且保持宽高比
     #[test]

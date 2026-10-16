@@ -17,6 +17,7 @@ const router = useRouter();
 const initialized = ref(false);
 const deployProgress = ref(0);
 const deployStatus = ref('');
+const deployMessage = ref('');
 const isFinalizing = ref(false);
 const optionsStore = useOptionsStore();
 const riskDialogVisible = ref(false);
@@ -168,17 +169,54 @@ const detectAndSaveCamera = async () => {
   } catch (error) { checks.camera = false; checks.camera_msg = '摄像头自动检测失败'; }
 };
 
-const confirmDeployment = () => {
+const confirmDeployment = async () => {
   riskDialogVisible.value = false;
   isDeploying.value = true;
-  invoke('deploy_core_components').then(async () => {
+  deployProgress.value = 0;
+  deployStatus.value = '';
+  deployMessage.value = '正在准备部署';
+  let unlisten: UnlistenFn | undefined;
+  try {
+    unlisten = await listen<{ progress: number; message: string }>('init-deploy-progress', ({ payload }) => {
+      deployProgress.value = Math.max(deployProgress.value, payload.progress);
+      deployMessage.value = payload.message;
+    });
+    await invoke('deploy_core_components');
+
+    deployProgress.value = Math.max(deployProgress.value, 85);
+    deployMessage.value = '正在验证 Unlock 服务计划任务';
+    const taskResult: any = await invoke('check_scheduled_task', { taskName: 'FaceWinUnlockServer' });
+    const taskReady = Boolean(taskResult?.data?.enable);
+
+    deployProgress.value = Math.max(deployProgress.value, 92);
+    deployMessage.value = '正在检测并保存摄像头配置';
     await detectAndSaveCamera();
-    let progress = 0;
-    const timer = setInterval(() => {
-      progress += 25; deployProgress.value = progress;
-      if (progress >= 100) { clearInterval(timer); isDeploying.value = false; deployStatus.value = 'success'; ElMessage.success('DLL 与注册表配置完成'); }
-    }, 400);
-  }).catch((error: any) => { isDeploying.value = false; deployStatus.value = 'exception'; errorLog(formatObjectString("部署失败：", error)); ElMessageBox.alert(error, '部署失败', { type: 'error' }); });
+    const cameraReady = checks.camera;
+
+    deployProgress.value = 100;
+    const warnings = [];
+    if (!taskReady) warnings.push('Unlock 服务计划任务未就绪');
+    if (!cameraReady) warnings.push('未检测到可用摄像头');
+    if (warnings.length) {
+      deployStatus.value = 'warning';
+      deployMessage.value = `Credential Provider 已部署；${warnings.join('；')}`;
+      ElMessage.warning(deployMessage.value);
+    } else {
+      deployStatus.value = 'success';
+      deployMessage.value = 'Credential Provider、Unlock 服务任务和摄像头配置均已检查';
+      ElMessage.success('部署和检查已完成');
+    }
+  } catch (error: any) {
+    isDeploying.value = false;
+    deployProgress.value = 0;
+    deployStatus.value = 'exception';
+    deployMessage.value = '部署失败，可修复原因后重试';
+    errorLog(formatObjectString('部署失败：', error));
+    await ElMessageBox.alert(formatObjectString('部署失败：', error), '部署失败', { type: 'error' });
+  } finally {
+    unlisten?.();
+    isDeploying.value = false;
+  }
 };
 
 async function waitForSessionUnlock() {
@@ -327,6 +365,7 @@ const finishInit = () => {
             <h3>正在部署 WinLogon 核心组件</h3>
             <p>复制 DLL 到 System32 并修改注册表以启用面容识别支持</p>
             <div class="progress-wrap"><el-progress :percentage="deployProgress" :status="deployStatus as any" /></div>
+            <p v-if="deployMessage" class="deploy-message">{{ deployMessage }}</p>
             <el-button type="danger" :loading="isDeploying" @click="startDeployment" v-if="deployProgress === 0">执行部署</el-button>
             <el-button type="primary" :disabled="deployProgress < 100" @click="handleNextStep">下一步</el-button>
           </div>
@@ -463,6 +502,7 @@ const finishInit = () => {
 .deploy-box p  { color: var(--v7-text-dim); font-size: 13px; margin: 0 0 20px; }
 
 .progress-wrap { margin: 30px 0; }
+.deploy-message { margin: -18px 0 20px !important; color: var(--v7-text-dim); }
 
 .passkey-alerts { max-width: 520px; margin: 20px auto; text-align: left; }
 .passkey-actions { display: flex; justify-content: center; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
