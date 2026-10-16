@@ -103,23 +103,12 @@
     WriteRegStr HKCR "CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}" "" "FaceWinUnlock-Tauri"
     WriteRegStr HKCR "CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}\InprocServer32" "" "$SYSDIR\FaceWinUnlock-Tauri.dll"
     WriteRegStr HKCR "CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}\InprocServer32" "ThreadingModel" "Apartment"
-    ; credentialuibroker.exe 可能已加载旧 DLL 到内存，需重启才生效
-    nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq credentialuibroker.exe" /NH'
-    Pop $2
-    ${If} $2 == 0
-      MessageBox MB_YESNO|MB_ICONINFORMATION "Credential Provider DLL 已更新，但系统进程正在使用旧版本。$\n$\n人脸识别和 Google 登录等功能需重启后生效。$\n$\n是否立即重启？" IDNO cp_no_reboot
-      ; 重启后通过当前用户的 RunOnce 重新打开应用。
-      ; 首次安装时应用会继续初始化向导，初始化完成后自动进入录入人脸页面。
-      WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\RunOnce" "FaceWinUnlockPostInstall" "$\"$INSTDIR\FaceWinUnlock-Launcher.exe$\""
-      Reboot
-      cp_no_reboot:
-    ${EndIf}
   done_cp_dll:
 
   ; 让安装后的主程序默认按管理员权限启动。主 EXE 也会嵌入 requireAdministrator manifest，
   ; 这里再写 AppCompat RUNASADMIN 作为快捷方式/外壳启动兜底。
-  WriteRegStr HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\${MAINBINARYNAME}.exe" "RUNASADMIN"
-  ; 官方 Windows Passkey Provider 插件（FaceWinUnlock-Passkey.msix + .cer + 安装脚本）
+    WriteRegStr HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\${MAINBINARYNAME}.exe" "RUNASADMIN"
+    ; 官方 Windows Passkey Provider 插件（FaceWinUnlock-Passkey.msix + .cer + 安装脚本）
   ; 已由安装包放置到 $INSTDIR。此处【不】直接 Add-AppxPackage：
   ; NSIS 以管理员 / perMachine 提权运行，而 MSIX 是“按用户”安装的——提权上下文的账户
   ; 可能不是目标桌面用户（标准用户 + 管理员凭据提权场景），会把插件装到管理员账户，
@@ -157,6 +146,21 @@
   WriteRegStr HKLM "Software\facewinunlock-tauri" "CREDUI_BROKER_FALLBACK_TIMEOUT" "6.0"
 
   DetailPrint "FaceWinUnlock 安装完成"
+
+  ; ── 重启询问必须放在宏的最末尾：Reboot 指令会立即终止安装器。 ──
+  ; 2026-10-16 重装实测：此块曾位于宏中部，用户选"是"后 Reboot 直接跳过了
+  ; 后续的 RUNASADMIN 兼容层与策略注册表写入，导致启动器以 os error 740
+  ; 启动主程序失败。任何新增安装步骤都必须放在本块之前。
+  nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq credentialuibroker.exe" /NH'
+  Pop $2
+  ${If} $2 == 0
+    MessageBox MB_YESNO|MB_ICONINFORMATION "Credential Provider DLL 已更新，但系统进程正在使用旧版本。$\n$\n人脸识别和 Google 登录等功能需重启后生效。$\n$\n是否立即重启？" IDNO cp_no_reboot
+    ; 重启后通过当前用户的 RunOnce 重新打开应用。
+    ; 首次安装时应用会继续初始化向导，初始化完成后自动进入录入人脸页面。
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\RunOnce" "FaceWinUnlockPostInstall" "$\"$INSTDIR\FaceWinUnlock-Launcher.exe$\""
+    Reboot
+    cp_no_reboot:
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

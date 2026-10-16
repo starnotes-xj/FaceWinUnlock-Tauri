@@ -24,7 +24,10 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK, MB_SYSTEMMODAL};
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    MessageBoxW, MB_ICONERROR, MB_OK, MB_SYSTEMMODAL, SW_SHOWNORMAL,
+};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MAIN_EXE_NAME: &str = "facewinunlock-tauri.exe";
@@ -89,16 +92,47 @@ fn main() {
         return;
     }
 
-    let mut cmd = Command::new(&main_exe);
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    if !forwarded_args.is_empty() {
-        cmd.args(&forwarded_args);
-    }
+    // 主程序清单为 requireAdministrator，而本启动器不提权：普通 CreateProcess 会以
+    // os error 740（ERROR_ELEVATION_REQUIRED）失败。历史上依赖安装器写入 AppCompat
+    // RUNASADMIN 兼容层让 CreateProcess 自动提权；但安装器中途选择"立即重启"会跳过
+    // 后续注册表写入（2026-10-16 重装实测踩中），因此这里必须显式用 runas 动词
+    // 请求提权，不再依赖任何注册表状态。
+    let exe_wide: Vec<u16> = main_exe
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let params = forwarded_args
+        .iter()
+        .map(|a| {
+            let s = a.to_string_lossy();
+            if s.contains(' ') {
+                format!("\"{}\"", s)
+            } else {
+                s.into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let params_wide: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
+    let verb_wide: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
 
-    if let Err(e) = cmd.spawn() {
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb_wide.as_ptr()),
+            PCWSTR(exe_wide.as_ptr()),
+            PCWSTR(params_wide.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result.0 as usize;
+    if code <= 32 {
         let msg = format!(
-            "启动主程序失败: {}\n\n路径: {}\n\n请尝试重新安装程序。",
-            e,
+            "启动主程序失败 (ShellExecute code {})\n\n路径: {}\n\n请尝试重新安装程序。",
+            code,
             main_exe.display()
         );
         msgbox_error(&msg, "FaceWinUnlock - 启动失败");
