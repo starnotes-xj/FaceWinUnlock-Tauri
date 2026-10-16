@@ -9,8 +9,7 @@ use windows::Win32::{
     UI::Shell::{
         ICredentialProviderCredential, ICredentialProviderCredentialEvents,
         ICredentialProviderEvents,
-        ICredentialProviderCredential_Impl, CPFIS_NONE, CPFS_DISPLAY_IN_BOTH,
-        CPFS_DISPLAY_IN_SELECTED_TILE,
+        ICredentialProviderCredential_Impl, CPFIS_FOCUSED, CPFIS_NONE, CPFS_DISPLAY_IN_BOTH,
         CPGSR_NO_CREDENTIAL_NOT_FINISHED, CPGSR_NO_CREDENTIAL_FINISHED,
         CPGSR_RETURN_CREDENTIAL_FINISHED, CPSI_ERROR,
         CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION, CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE,
@@ -158,8 +157,12 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
                     *pcpfis = CPFIS_NONE;          // 非交互元素（不能点击或编辑）
                 }
                 BROKER_FACE_LINK_FIELD_ID if self.broker_fallback_enabled => {
-                    *pcpfs = CPFS_DISPLAY_IN_SELECTED_TILE;
-                    *pcpfis = CPFIS_NONE;
+                    // BOTH：CredUI 主机在同调用方的后续对话框会预选上次使用的
+                    // （PIN/密码）磁贴，仅选中态显示会让链接在第二个对话框里不可见。
+                    // FOCUSED：把初始焦点从主机的「取消」按钮移到链接上，使回车
+                    // 等效于点击链接而不是直接取消。
+                    *pcpfs = CPFS_DISPLAY_IN_BOTH;
+                    *pcpfis = CPFIS_FOCUSED;
                 }
                 _ => {
                     error!("SampleCredential::GetFieldState - 无效的字段ID: {}", dwfieldid);
@@ -266,6 +269,14 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         _ppszoptionalstatustext: *mut PWSTR,
         _pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON,
     ) -> windows_core::Result<()> {
+        // 提交即意图：broker 密码场景中「确定」按钮与回车都是对已选中人脸磁贴的
+        // 显式提交，与点击命令链接等效。凭据未就绪时触发同一条手动识别路径，下方
+        // 既有逻辑仍返回 NOT_FINISHED 保持对话框打开，刷脸成功后由 CredentialsChanged
+        // 流程完成提交。queue_broker_manual_run 内部会获取 shared_creds 锁，必须在
+        // 下面长生命周期锁之前调用，避免 std::sync::Mutex 重入死锁。
+        if self.queue_broker_manual_run(crate::browser_broker_guard_blocks_face()) {
+            info!("SampleCredential::GetSerialization - 提交即意图，已请求浏览器人脸验证");
+        }
         let mut creds = self.shared_creds.lock().unwrap();
 
         if !creds.is_ready {

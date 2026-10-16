@@ -189,8 +189,8 @@ Test Chrome and Edge first, then at least one of Brave, Opera/Opera GX, Vivaldi,
 
 | Scenario | Expected generic Provider behavior |
 |---|---|
-| Reveal/show saved password | Face tile appears preselected with its command link visible; the link starts recognition |
-| Website saved-password fill | Face tile appears preselected with its command link visible; the link starts recognition |
+| Reveal/show saved password | Face tile appears preselected with its command link visible and focused; the link, the OK button, or Enter all start one recognition |
+| Website saved-password fill | Face tile appears preselected with its command link visible and focused; the link, the OK button, or Enter all start one recognition |
 | Website saved-password fill on a page titled “登录 - …” or “Sign in - …” | Same manual face path when the monitor is Ready and inactive; the page title alone must not classify it as Passkey |
 | Browser prompt with no command-link click | Mouse and keyboard input do not start recognition; the camera stays off |
 | Explicit password manager verification | Face tile appears; its command link starts recognition |
